@@ -14,8 +14,11 @@
 
 - [x] 3.1 Update `README.md` — protocol references to v1.2.0, status table rows for `doc_coverage` and `cognitive_complexity` (Not implemented) — and verify the documented local-development commands still run
 - [x] 3.2 Run the CI parity gates — `npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage` — and verify all three pass with coverage at or above the 85% thresholds
+- [x] 3.3 Sweep the AGENTS.md constitution summary to pin v1.2.0 (proposal Impact item; shipped alongside task 1.1)
 
 ## Workflow follow-up
 
 - Run the spec review and code review gates; record `<!-- spec-review: passed -->` and `<!-- code-review: passed -->` markers when satisfied.
 - Archive the change after review requirements are met and the change merges.
+
+<!-- spec-review: passed -->

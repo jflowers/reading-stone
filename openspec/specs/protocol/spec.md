@@ -40,7 +40,7 @@ The system SHALL define named constants for the JSON-RPC 2.0 standard error code
 
 ### Requirement: initialize request schema
 
-The system SHALL accept an `initialize` request whose `params` is a JSON object containing `root_path` (string, required; the absolute project root — path form is not validated) and optionally `config` (object, the opaque `.gaze.yaml` config whose contents are ignored). A missing or `{}` `config` SHALL be accepted. If `params` is absent, is not an object (e.g. an array), or lacks a string `root_path`, the system SHALL respond with `INVALID_PARAMS` (`-32602`).
+The system SHALL accept an `initialize` request whose `params` is a JSON object containing `root_path` (string, required; the absolute project root — path form is not validated at the initialize boundary; methods that use `root_path` for filesystem access resolve and traversal-check it per constitution Principle V) and optionally `config` (object, the opaque `.gaze.yaml` config whose contents are ignored). A missing or `{}` `config` SHALL be accepted. If `params` is absent, is not an object (e.g. an array), or lacks a string `root_path`, the system SHALL respond with `INVALID_PARAMS` (`-32602`).
 
 #### Scenario: initialize accepts required root_path
 
@@ -86,9 +86,9 @@ The system SHALL return an `initialize` result with exact field names: `analyzer
 - **WHEN** `initialize` is called
 - **THEN** `language_version` equals `process.versions.node`
 
-#### Scenario: New optional methods are not found until implemented
+#### Scenario: Optional methods are gated by their capability flags
 
-- **WHEN** a `doc_coverage` or `cognitive_complexity` request is sent before those methods are implemented
+- **WHEN** a `doc_coverage` or `cognitive_complexity` request is sent while the corresponding capability flag is `false`
 - **THEN** a `-32601` method not found error is returned
 
 ### Requirement: shutdown request params

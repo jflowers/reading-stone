@@ -38,7 +38,7 @@ reading-stone's handshake currently pins `protocol_version = "1.1.0"` and advert
 
 ## Risks / Trade-offs
 
-- [Older Gaze builds pinned to v1.1.0 negotiate against a v1.2.0 analyzer] → v1.2.0 is additive only (no removed or renamed fields) per the upstream protocol specification at `unbound-force/gaze/docs/protocol.md` (v1.2.0); capability negotiation ignores unknown keys, so older Gaze builds behave identically. The handshake golden test pins the exact shape.
+- [Older Gaze builds pinned to v1.1.0 negotiate against a v1.2.0 analyzer] → v1.2.0 is additive only (no removed or renamed fields) per the upstream protocol specification at `unbound-force/gaze/docs/protocol.md` (v1.2.0), so no field an older build reads changes meaning. How a v1.1.0-era Gaze client decodes the two unknown capability keys is not specified by that document (Gaze is Go and `encoding/json` ignores unknown fields by default, but this change does not verify that against a pinned older build); the claim is therefore scoped to the wire format, and a conformance check against a v1.1.0 Gaze consumer is deferred to the v0.2.0 release issue (#7). The handshake golden test pins the exact shape reading-stone emits.
 - [Flag drift as later issues land] → Each milestone issue flips only its own flag and updates the handshake assertions in the same change; the golden test fails on any unintended flag change.
 - [`protocol_version` says 1.2.0 while `doc_coverage`/`cognitive_complexity` return `-32601`] → Intentional and protocol-conformant: optional-method errors degrade gracefully in Gaze, and `false` capability flags are the advertised signal. The requirement's scenario pins the `-32601` behavior.
 

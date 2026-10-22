@@ -1,7 +1,7 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: none (initial ratification)
+Version change: 1.0.0 → 1.0.1 (protocol pin amendment)
 
 This is the initial Reading Stone constitution, adapted from the
 Snake Eyes constitution (v1.1.0) for a TypeScript analyzer, aligned
@@ -19,7 +19,8 @@ Unchanged from Snake Eyes v1.1.0 (wording adapted only):
 - I. Protocol Fidelity (includes determinism MUST rules)
 - II. Detection Accuracy
 - IV. Testability
-- Development Workflow, Governance, protocol v1.1.0 pin
+- Development Workflow, Governance (protocol pin amended from v1.1.0 to
+  v1.2.0; see Upstream Alignment)
 
 Org alignment check: ALIGNED
 - All five principles are compatible with org v1.3.1
