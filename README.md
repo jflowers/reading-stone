@@ -13,6 +13,7 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 | `shutdown` | Implemented |
 | `discover` | Not implemented (`-32601`) |
 | `analyze` | Not implemented (`-32601`) |
+| `analyze/stream` | Not implemented (`-32601`) |
 | `complexity` | Not implemented (`-32601`) |
 | `coverage` | Not implemented (`-32601`) |
 | `classify_signals` | Not implemented (`-32601`) |

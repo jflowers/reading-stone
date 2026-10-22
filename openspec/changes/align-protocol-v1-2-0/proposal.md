@@ -14,7 +14,7 @@ Gaze's analyzer protocol has advanced to v1.2.0 — adding the `doc_coverage` an
 - `README.md`: protocol version references updated to v1.2.0; the status table gains `doc_coverage` and `cognitive_complexity` rows (Not implemented).
 - `tests/protocol.test.ts`: handshake assertions updated to six capability flags and the `"1.2.0"` version pin.
 - `tests/server.test.ts`: reserved-method `-32601` coverage extended to `doc_coverage` and `cognitive_complexity`.
-- OpenSpec hygiene: main specs (`openspec/specs/`) gain authored Purpose sections and a v1.2.0 citation sweep; this change's delta extends to cover every main-spec edit (envelope-types and initialize-request wording, plus a new server dispatch-table-scope delta enumerating the nine reserved methods).
+- OpenSpec hygiene: the completed scaffold-and-protocol change is archived and the main specs are created at `openspec/specs/{cli,protocol,server}/spec.md` (authored Purpose sections, v1.2.0 citation sweep, requirement text pre-synced to this change's deltas so archive-time sync is idempotent). This change's delta extends to cover every requirement-level main-spec edit (envelope-types and initialize-request wording, plus a new server dispatch-table-scope delta enumerating the nine reserved methods); the Purpose sections and the cli main-spec creation are Impact-section items outside the deltas.
 
 Not a breaking change: v1.2.0 is backward compatible with v1.1.0, so no MAJOR version bump is triggered (reading-stone remains 0.1.0 until the v0.2.0 release issue).
 
@@ -26,7 +26,7 @@ None.
 
 ### Modified Capabilities
 
-- `protocol`: the `initialize result schema` requirement changes — `protocol_version` reports `"1.2.0"` and the `capabilities` object carries six keys (adds `doc_coverage` and `cognitive_complexity`, both `false` in this change). The `doc_coverage` capability gates the `doc_coverage` method and `cognitive_complexity` gates the `cognitive_complexity` method (both optional in v1.2.0, both unimplemented (`-32601`) in this change). The `JSON-RPC envelope types` and `initialize request schema` requirements are restated with v1.2.0 citations and evergreen phrasing (no semantic change).
+- `protocol`: the `initialize result schema` requirement changes — `protocol_version` reports `"1.2.0"` and the `capabilities` object carries six keys (adds `doc_coverage` and `cognitive_complexity`, both `false` in this change). The `doc_coverage` capability gates the `doc_coverage` method and `cognitive_complexity` gates the `cognitive_complexity` method (both optional in v1.2.0, both unimplemented (`-32601`) in this change). The `JSON-RPC envelope types` requirement is restated with v1.2.0 citations and evergreen phrasing (wording only); the `initialize request schema` is restated the same way and additionally gains a normative Principle V traversal-check clause — a constitution-aligned semantic addition replacing the archived change's time-bound deferral.
 - `server`: the `Dispatch table scope` requirement is restated in evergreen phrasing and its reserved-method enumeration extends to nine names (adds `doc_coverage` and `cognitive_complexity`).
 
 ## Impact

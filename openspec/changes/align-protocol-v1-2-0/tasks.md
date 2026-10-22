@@ -3,6 +3,7 @@
 ## 1. Constitution amendment
 
 - [x] 1.1 Amend the Upstream Alignment section of `.specify/memory/constitution.md` to pin protocol v1.2.0 (referencing alignment issue zero-dot-force/reading-stone#1) and bump the constitution version footer to 1.0.1; verify the document still names all five principles unchanged
+- [x] 1.2 Archive the completed scaffold-and-protocol change and materialize the main specs (`openspec/specs/{cli,protocol,server}/spec.md` — created with authored Purpose sections, v1.2.0 citation sweep, and requirement text pre-synced to this change's deltas so archive-time sync is idempotent); carried in this branch so the MODIFIED deltas validate against a real baseline
 
 ## 2. Protocol layer
 
@@ -22,3 +23,4 @@
 - Archive the change after review requirements are met and the change merges.
 
 <!-- spec-review: passed -->
+<!-- code-review: passed -->
