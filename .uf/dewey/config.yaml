@@ -1,0 +1,7 @@
+# Dewey configuration
+# See: https://github.com/unbound-force/dewey
+
+embedding:
+  model: granite-embedding:30m  # Override with DEWEY_EMBEDDING_MODEL env var
+  # endpoint: http://localhost:11434  # Uncomment to override OLLAMA_HOST
+  # max_chunk_chars: 12288  # Override with DEWEY_CHUNK_MAX_CHARS env var

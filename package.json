@@ -1,0 +1,37 @@
+{
+  "name": "reading-stone",
+  "version": "0.1.0",
+  "description": "TypeScript side-effect analyzer backend for Gaze",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "zero-dot-force",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zero-dot-force/reading-stone.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "reading-stone": "dist/main.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "biome check src/ tests/",
+    "format": "biome format --write src/ tests/",
+    "test": "vitest run --coverage",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.2",
+    "@types/node": "^26.6.5",
+    "@vitest/coverage-v8": "^5.0.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

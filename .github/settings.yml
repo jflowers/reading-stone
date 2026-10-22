@@ -1,0 +1,4 @@
+_extends: .github
+
+repository:
+  description: "TypeScript analyzer for Gaze -- test quality analysis via side effect detection"
