@@ -133,7 +133,7 @@ describe("initialize result", () => {
     expect(result.analyzer_name).toBe(ANALYZER_NAME);
     expect(result.language).toBe("typescript");
     expect(result.language).toBe(LANGUAGE);
-    expect(result.protocol_version).toBe("1.1.0");
+    expect(result.protocol_version).toBe("1.2.0");
     expect(result.protocol_version).toBe(PROTOCOL_VERSION);
   });
 
@@ -141,17 +141,29 @@ describe("initialize result", () => {
     expect(initializeResult().language_version).toBe(process.versions.node);
   });
 
-  it("exposes exactly four capability flags, all false", () => {
+  it("exposes exactly six capability flags, all false", () => {
     const capabilities = initializeResult().capabilities;
     expect(Object.keys(capabilities).sort()).toEqual([
       "classify_signals",
+      "cognitive_complexity",
       "discover",
+      "doc_coverage",
       "streaming",
       "test_mapping",
     ]);
     for (const value of Object.values(capabilities)) {
       expect(value).toBe(false);
     }
+  });
+
+  it("serializes the initialize handshake to pinned golden bytes", () => {
+    const expected =
+      `{"id":1,"jsonrpc":"2.0","result":{"analyzer_name":"reading-stone",` +
+      `"capabilities":{"classify_signals":false,"cognitive_complexity":false,` +
+      `"discover":false,"doc_coverage":false,"streaming":false,"test_mapping":false},` +
+      `"language":"typescript","language_version":"${process.versions.node}",` +
+      `"protocol_version":"1.2.0"}}`;
+    expect(serialize(successResponse(1, initializeResult()))).toBe(expected);
   });
 });
 

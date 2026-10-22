@@ -3,7 +3,7 @@
 **TypeScript analyzer backend for [Gaze](https://github.com/unbound-force/gaze).**
 
 Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/stdout
-(protocol v1.1.0). Gaze owns the CLI, scoring, and reports.
+(protocol v1.2.0). Gaze owns the CLI, scoring, and reports.
 
 ## Current status (v0.1.0)
 
@@ -17,6 +17,8 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 | `coverage` | Not implemented (`-32601`) |
 | `classify_signals` | Not implemented (`-32601`) |
 | `test_mapping` | Not implemented (`-32601`) |
+| `doc_coverage` | Not implemented (`-32601`) |
+| `cognitive_complexity` | Not implemented (`-32601`) |
 
 All capability flags are advertised as `false` at handshake. TypeScript side-effect
 detection is the roadmap; see `openspec/changes/`.
