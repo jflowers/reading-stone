@@ -1,7 +1,7 @@
 # cli Specification
-
 ## Purpose
-TBD - created by archiving change scaffold-and-protocol. Update Purpose after archive.
+
+The command-line and packaging surface of reading-stone: the `reading-stone` npm package scaffold (`package.json`, `bin` entry, version constant), the `--stdio` flag parsing and module-entry behavior of `src/main.ts`, and the `NOTICE` attribution file. reading-stone has no user-facing CLI of its own — Gaze spawns it as a subprocess in stdio mode.
 
 ## Requirements
 

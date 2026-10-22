@@ -230,9 +230,8 @@ principles defined above.
   MUST be verified by an automated conformance suite (canned
   request/response pairs validated against the protocol schema).
   When Gaze bumps the protocol version, Reading Stone MUST open
-  an alignment issue within one release cycle. (The pin moved
-  from v1.1.0 to v1.2.0 via zero-dot-force/reading-stone#1,
-  opened ahead of the v1.1.0 deadline.)
+  an alignment issue within one release cycle. (Current pin
+  alignment: zero-dot-force/reading-stone#1.)
 - **Conflict Resolution**: When two principles appear to conflict
   in a specific scenario, the tradeoff MUST be explicitly
   documented in the relevant spec or plan. No principle has

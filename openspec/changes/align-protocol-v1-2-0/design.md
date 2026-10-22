@@ -21,7 +21,7 @@ reading-stone's handshake currently pins `protocol_version = "1.1.0"` and advert
 ## Decisions
 
 1. **Constants-only protocol change.**
-   `PROTOCOL_VERSION` becomes the literal `"1.2.0"`; `Capabilities` gains `doc_coverage` and `cognitive_complexity` booleans; `initializeResult()` emits both as `false`. No schema machinery, validation, or serialization changes — v1.2.0 adds keys to the capabilities object and does not alter any existing field. Alternative (a version-negotiation layer keyed on the incoming request) rejected: the protocol has no request-side version field to negotiate on; the analyzer declares its version unilaterally.
+   `PROTOCOL_VERSION` becomes the literal `"1.2.0"`; `Capabilities` gains `doc_coverage` and `cognitive_complexity` booleans; `initializeResult()` emits both as `false`. No schema machinery, validation, or serialization changes — v1.2.0 adds keys to the capabilities object and does not alter any existing field. Alternative (a version-negotiation layer keyed on the incoming request) rejected: the protocol has no request-side version field to negotiate on; the analyzer declares its version unilaterally. The main specs' v1.1.0 citations (`JSON-RPC envelope types`, `initialize request schema`) are swept to v1.2.0 in the same delta — wording only, no semantic change.
 
 2. **New flags advertise `false` until their methods exist.**
    Capability flags are the truth mechanism Gaze relies on for graceful degradation; advertising an unimplemented optional method would violate Principle I. Each later v0.2.0 issue flips exactly its own flag(s) alongside the method it ships, so the handshake is truthful at every commit.
@@ -31,13 +31,14 @@ reading-stone's handshake currently pins `protocol_version = "1.1.0"` and advert
 
 4. **Golden test pins the serialized handshake bytes.**
    Determinism (Principle I) is enforced by asserting the exact serialized `initialize` result string. Sorted-key serialization already yields a fixed key order (`capabilities` keys sort lexicographically), so the golden string is stable across runs and Node versions for every field except `language_version` (which the golden test therefore excludes by asserting the parsed object rather than a full literal, or by building the expected string with `process.versions.node` interpolated — the test chooses the latter to keep byte-exactness).
+   Principle I note (conflict resolution): `language_version` is environment-dependent by protocol design — it is reported once in the `initialize` handshake and never participates in analysis output. Principle I determinism targets analysis results and byte-identical serialization of the same logical response; the golden test interpolates `process.versions.node` into the expected string so the assertion stays byte-exact without pinning the environment.
 
 5. **No version bump for the package in this change.**
    The protocol pin is not a package-level API break (v1.2.0 is backward compatible); `VERSION` stays `0.1.0` and moves to `0.2.0` only in the release issue (#7) that completes the milestone.
 
 ## Risks / Trade-offs
 
-- [Older Gaze builds pinned to v1.1.0 negotiate against a v1.2.0 analyzer] → v1.2.0 is additive only (no removed or renamed fields); capability negotiation ignores unknown keys, so older Gaze builds behave identically. The handshake golden test pins the exact shape.
+- [Older Gaze builds pinned to v1.1.0 negotiate against a v1.2.0 analyzer] → v1.2.0 is additive only (no removed or renamed fields) per the upstream protocol specification at `unbound-force/gaze/docs/protocol.md` (v1.2.0); capability negotiation ignores unknown keys, so older Gaze builds behave identically. The handshake golden test pins the exact shape.
 - [Flag drift as later issues land] → Each milestone issue flips only its own flag and updates the handshake assertions in the same change; the golden test fails on any unintended flag change.
 - [`protocol_version` says 1.2.0 while `doc_coverage`/`cognitive_complexity` return `-32601`] → Intentional and protocol-conformant: optional-method errors degrade gracefully in Gaze, and `false` capability flags are the advertised signal. The requirement's scenario pins the `-32601` behavior.
 

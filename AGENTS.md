@@ -29,7 +29,7 @@ TypeScript projects.
 The Reading Stone constitution
 (`.specify/memory/constitution.md`) is the highest-authority document
 for this project. It extends the unbound-force org constitution and
-pins Gaze protocol v1.1.0. Constitution violations are CRITICAL
+pins Gaze protocol v1.2.0. Constitution violations are CRITICAL
 severity and non-negotiable.
 
 **Five principles:**
