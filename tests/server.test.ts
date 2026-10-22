@@ -201,6 +201,8 @@ describe("server: dispatch", () => {
     "test_mapping",
     "classify_signals",
     "analyze/stream",
+    "doc_coverage",
+    "cognitive_complexity",
   ])("answers reserved method %s with -32601", async (method) => {
     const { responses } = await drive([request(6, method)]);
     expect(errorBody(responses[0] ?? {}).code).toBe(-32601);

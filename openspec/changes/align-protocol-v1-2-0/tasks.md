@@ -8,6 +8,7 @@
 
 - [x] 2.1 Update `src/protocol.ts` — `PROTOCOL_VERSION = "1.2.0"`, `Capabilities` gains `doc_coverage` and `cognitive_complexity`, `initializeResult()` emits both as `false` — and verify `npm run build` passes
 - [x] 2.2 Update `tests/protocol.test.ts` — six-flag capability set, `"1.2.0"` version pin, golden test pinning the exact serialized `initialize` result — and verify `npx vitest run` passes
+- [x] 2.3 Extend `tests/server.test.ts` reserved-method coverage with `doc_coverage` and `cognitive_complexity` — and verify `npx vitest run` passes
 
 ## 3. Documentation and gates
 
