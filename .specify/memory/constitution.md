@@ -225,16 +225,18 @@ principles defined above.
   proposed work aligns with all active principles.
 - **Upstream Alignment**: This constitution is subordinate to
   Gaze's analyzer protocol specification. Reading Stone
-  implements **protocol v1.1.0** (defined at
+  implements **protocol v1.2.0** (defined at
   `unbound-force/gaze/docs/protocol.md`). Protocol conformance
   MUST be verified by an automated conformance suite (canned
   request/response pairs validated against the protocol schema).
   When Gaze bumps the protocol version, Reading Stone MUST open
-  an alignment issue within one release cycle.
+  an alignment issue within one release cycle. (The pin moved
+  from v1.1.0 to v1.2.0 via zero-dot-force/reading-stone#1,
+  opened ahead of the v1.1.0 deadline.)
 - **Conflict Resolution**: When two principles appear to conflict
   in a specific scenario, the tradeoff MUST be explicitly
   documented in the relevant spec or plan. No principle has
   implicit priority over another; resolution is context-dependent
   and requires written justification.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-22
+**Version**: 1.0.1 | **Ratified**: 2026-10-22

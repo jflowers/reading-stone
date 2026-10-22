@@ -2,7 +2,7 @@
 
 ## 1. Constitution amendment
 
-- [ ] 1.1 Amend the Upstream Alignment section of `.specify/memory/constitution.md` to pin protocol v1.2.0 (referencing alignment issue zero-dot-force/reading-stone#1) and bump the constitution version footer to 1.0.1; verify the document still names all five principles unchanged
+- [x] 1.1 Amend the Upstream Alignment section of `.specify/memory/constitution.md` to pin protocol v1.2.0 (referencing alignment issue zero-dot-force/reading-stone#1) and bump the constitution version footer to 1.0.1; verify the document still names all five principles unchanged
 
 ## 2. Protocol layer
 
