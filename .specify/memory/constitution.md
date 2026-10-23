@@ -1,7 +1,7 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: none (initial ratification)
+Version change: 1.0.0 → 1.0.1 (protocol pin amendment)
 
 This is the initial Reading Stone constitution, adapted from the
 Snake Eyes constitution (v1.1.0) for a TypeScript analyzer, aligned
@@ -19,7 +19,8 @@ Unchanged from Snake Eyes v1.1.0 (wording adapted only):
 - I. Protocol Fidelity (includes determinism MUST rules)
 - II. Detection Accuracy
 - IV. Testability
-- Development Workflow, Governance, protocol v1.1.0 pin
+- Development Workflow, Governance (protocol pin amended from v1.1.0 to
+  v1.2.0; see Upstream Alignment)
 
 Org alignment check: ALIGNED
 - All five principles are compatible with org v1.3.1
@@ -225,16 +226,17 @@ principles defined above.
   proposed work aligns with all active principles.
 - **Upstream Alignment**: This constitution is subordinate to
   Gaze's analyzer protocol specification. Reading Stone
-  implements **protocol v1.1.0** (defined at
+  implements **protocol v1.2.0** (defined at
   `unbound-force/gaze/docs/protocol.md`). Protocol conformance
   MUST be verified by an automated conformance suite (canned
   request/response pairs validated against the protocol schema).
   When Gaze bumps the protocol version, Reading Stone MUST open
-  an alignment issue within one release cycle.
+  an alignment issue within one release cycle. (Current pin
+  alignment: zero-dot-force/reading-stone#1.)
 - **Conflict Resolution**: When two principles appear to conflict
   in a specific scenario, the tradeoff MUST be explicitly
   documented in the relevant spec or plan. No principle has
   implicit priority over another; resolution is context-dependent
   and requires written justification.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-22
+**Version**: 1.0.1 | **Ratified**: 2026-10-22

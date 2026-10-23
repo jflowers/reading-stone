@@ -4,7 +4,7 @@ export const METHOD_NOT_FOUND = -32601;
 export const INVALID_PARAMS = -32602;
 export const INTERNAL_ERROR = -32603;
 
-export const PROTOCOL_VERSION = "1.1.0";
+export const PROTOCOL_VERSION = "1.2.0";
 export const ANALYZER_NAME = "reading-stone";
 export const LANGUAGE = "typescript";
 
@@ -42,6 +42,8 @@ export interface Capabilities {
   test_mapping: boolean;
   classify_signals: boolean;
   streaming: boolean;
+  doc_coverage: boolean;
+  cognitive_complexity: boolean;
 }
 
 export interface InitializeResult {
@@ -88,6 +90,8 @@ export function initializeResult(): InitializeResult {
       test_mapping: false,
       classify_signals: false,
       streaming: false,
+      doc_coverage: false,
+      cognitive_complexity: false,
     },
   };
 }
