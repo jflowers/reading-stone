@@ -86,7 +86,7 @@ export function initializeResult(): InitializeResult {
     language_version: process.versions.node,
     protocol_version: PROTOCOL_VERSION,
     capabilities: {
-      discover: false,
+      discover: true,
       test_mapping: false,
       classify_signals: false,
       streaming: false,
