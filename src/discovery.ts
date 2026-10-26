@@ -1,6 +1,8 @@
 import type { Dirent, Stats } from "node:fs";
-import { readdir, realpath, stat } from "node:fs/promises";
+import { access, readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { Writable } from "node:stream";
+import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
 
 /**
  * Deterministic tree walker for file discovery (FR-002/FR-003, research R2).
@@ -18,8 +20,11 @@ import { join, resolve } from "node:path";
  * `classifyFiles` layers classification on top (`.d.ts` exclusion,
  * test-vs-source) and lexicographically sorts the two final lists;
  * generated-marker exclusion (US4) joins the precedence chain in a later
- * task. Both surfaces are exported and composable; `discover` below
- * sequences them behind root-path validation (FR-010) and assembles the
+ * task. `detectFramework` (US4, FR-006) reports the test framework from
+ * configuration presence at the resolved root, reading `package.json`
+ * through the shared safe reader; the US4 wiring task sequences it into
+ * `discover`. All three surfaces are exported and composable; `discover`
+ * below runs them behind root-path validation (FR-010) and assembles the
  * wire-shaped result (FR-001).
  */
 
@@ -302,6 +307,214 @@ export function classifyFiles(candidates: readonly string[]): FileClassification
   sourceFiles.sort();
   testFiles.sort();
   return { sourceFiles, testFiles };
+}
+
+/**
+ * Root-level vitest configuration basenames (FR-006, research R7): any
+ * one of these present at the resolved project root reports `"vitest"`.
+ * Exactly these four, matched by exact case-sensitive name.
+ */
+const VITEST_CONFIG_BASENAMES: readonly string[] = [
+  "vitest.config.ts",
+  "vitest.config.js",
+  "vitest.config.mts",
+  "vitest.config.mjs",
+];
+
+/**
+ * Root-level jest configuration basenames (FR-006, research R7): any one
+ * of these present at the resolved project root reports `"jest"`. Exactly
+ * these five, matched by exact case-sensitive name.
+ */
+const JEST_CONFIG_BASENAMES: readonly string[] = [
+  "jest.config.ts",
+  "jest.config.js",
+  "jest.config.mjs",
+  "jest.config.cjs",
+  "jest.config.json",
+];
+
+/**
+ * Reports whether `name` exists directly at the analysis root (research
+ * R7: root only, never recursive).
+ *
+ * Existence only — the candidate's contents are never read, so the probe
+ * cannot block on a FIFO or any other non-regular entry named like a
+ * config. `access` with no mode argument is the canonical F_OK existence
+ * check; it follows a symlink, which is the ordinary meaning of "this
+ * file exists at the root" — FR-018's never-follow rule governs tree
+ * walking and file reading, and neither happens here. Any failure — the
+ * usual absent name (ENOENT), or an inaccessible path — reads as "not
+ * present".
+ *
+ * @param root Resolved absolute analysis root.
+ * @param name Candidate basename, joined onto the root directly.
+ * @returns `true` when `name` exists at the root.
+ */
+async function nameExistsAtRoot(root: string, name: string): Promise<boolean> {
+  try {
+    await access(join(root, name));
+    return true;
+  } catch {
+    // Absent (or uncheckable) at the root: not present.
+    return false;
+  }
+}
+
+/**
+ * Reports whether any of `names` exists directly at the analysis root
+ * (FR-006, research R7).
+ *
+ * The loop short-circuits at the first name found; the boolean result is
+ * independent of the declared order, which exists only to keep the probe
+ * sequence itself deterministic.
+ *
+ * @param root Resolved absolute analysis root.
+ * @param names Candidate basenames, joined onto the root directly.
+ * @returns `true` when at least one name exists at the root.
+ */
+async function anyConfigPresentAtRoot(
+  root: string,
+  names: readonly string[],
+): Promise<boolean> {
+  for (const name of names) {
+    if (await nameExistsAtRoot(root, name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The read budget for the root `package.json` (FR-006, research R7).
+ *
+ * The full shared hard cap rather than a smaller prefix budget: JSON
+ * cannot be parsed from a truncated prefix, so a partial read would only
+ * manufacture a misleading parse failure. At the full cap, a
+ * `package.json` over 16 MiB flows through `readBounded`'s own size-cap
+ * skip — one honest diagnostic — instead of a phantom "malformed"
+ * verdict, and every readable `package.json` within the cap is parsed in
+ * full.
+ */
+const PACKAGE_JSON_BUDGET = MAX_FILE_BYTES;
+
+/**
+ * Reports whether the root `package.json` carries a `jest` key (FR-006,
+ * research R7), reading the file through the shared safe reader.
+ *
+ * The read runs `readBounded`'s full guarded sequence (FR-017, FR-018):
+ * containment, `lstat` (a symlinked `package.json` is skipped, never
+ * followed), the regular-file check, the 16 MiB cap, and strict UTF-8
+ * decoding. Every skip there — unreadable, symlink, oversized,
+ * undecodable — resolves `null` after `readBounded` itself has written
+ * the one `reading-stone: skipping package.json: <reason>` line, so this
+ * function writes nothing on that path: the spec pins exactly one line
+ * per skip (FR-017). A file that reads successfully but fails
+ * `JSON.parse` is the one skip `readBounded` cannot see, so this function
+ * writes the same-shaped line itself — still exactly one — and both
+ * conditions land in the same place: no `jest` key, and the request
+ * continues.
+ *
+ * A well-formed document whose top level is not an object with an own
+ * `jest` property (a number, a string, `null`, an array) simply carries
+ * no `jest` key — valid JSON in an unexpected shape is not a
+ * diagnostic-worthy condition. Neither is absence: the guarded read is
+ * gated on presence, because a root with no `package.json` is the normal
+ * state of a project without one, and FR-017's one-diagnostic skip rules
+ * exist for files that are present but cannot be read or parsed — a
+ * missing file (or a symlink whose target is missing) is silently treated
+ * as carrying no `jest` key, so it never manufactures a diagnostic.
+ *
+ * @param resolvedRoot Realpath-resolved absolute analysis root.
+ * @param stderr Injected diagnostic sink (Testability principle); stdout
+ * is never touched.
+ * @returns `true` only when the file read, parsed, and carried an own
+ * `jest` property.
+ */
+async function packageJsonHasJestKey(
+  resolvedRoot: string,
+  stderr: Writable,
+): Promise<boolean> {
+  // Gate: absence is not a skip condition — only a package.json that
+  // exists flows into readBounded's one-diagnostic guarded sequence.
+  if (!(await nameExistsAtRoot(resolvedRoot, "package.json"))) {
+    return false;
+  }
+  const content = await readBounded(
+    resolvedRoot,
+    "package.json",
+    PACKAGE_JSON_BUDGET,
+    stderr,
+  );
+  if (content === null) {
+    // readBounded's skip path has already written the one diagnostic
+    // line; a second one here would violate the FR-017 contract.
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // The malformed-JSON skip readBounded cannot see: this function
+    // writes the one line itself, in readBounded's shape.
+    stderr.write("reading-stone: skipping package.json: malformed JSON\n");
+    return false;
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    // Valid JSON whose top level is not an object carries no jest key.
+    return false;
+  }
+  return Object.hasOwn(parsed, "jest");
+}
+
+/**
+ * Detects the project's test framework from configuration presence at the
+ * resolved project root (FR-006; research R7; Constitution Principle I).
+ *
+ * The detection basis is exactly what the spec pins (Assumption 2):
+ * configuration presence at the root, non-recursive, independent of
+ * source-file contents and of the process environment — so the same tree
+ * reports the same framework on every run (US4 scenario 3):
+ *
+ * 1. `"vitest"` when any of the four vitest config basenames exists at
+ *    the root;
+ * 2. otherwise `"jest"` when any of the five jest config basenames exists
+ *    at the root, or the root `package.json` carries a `jest` key;
+ * 3. otherwise `"unknown"`.
+ *
+ * vitest wins when both frameworks are configured (FR-006). The
+ * `package.json` read happens only on the jest-key fallback — a vitest
+ * or jest config file has already decided the answer — and flows through
+ * the shared safe reader with its 16 MiB cap and one-diagnostic skip
+ * rules: an unreadable or malformed `package.json` writes exactly one
+ * stderr diagnostic and is treated as having no `jest` key (FR-017),
+ * while a root with no `package.json` is silent — absence is not a skip
+ * condition.
+ *
+ * Not yet sequenced into `discover()`: the wiring task (T024) replaces
+ * the US1 `"unknown"` placeholder with a call to this function, passing
+ * the server's stderr sink. Exported now so that wiring — and the
+ * module's public surface — is directly testable.
+ *
+ * @param resolvedRoot Realpath-resolved absolute analysis root, the form
+ * `resolveRoot` returns; every probe and read is relative to it.
+ * @param stderr Injected diagnostic sink (Testability principle — the
+ * server passes its own `stderr`); stdout is never touched.
+ * @returns The lowercase framework string: `"vitest"`, `"jest"`, or
+ * `"unknown"` (spec Assumption 11).
+ */
+export async function detectFramework(
+  resolvedRoot: string,
+  stderr: Writable,
+): Promise<"vitest" | "jest" | "unknown"> {
+  if (await anyConfigPresentAtRoot(resolvedRoot, VITEST_CONFIG_BASENAMES)) {
+    return "vitest";
+  }
+  if (await anyConfigPresentAtRoot(resolvedRoot, JEST_CONFIG_BASENAMES)) {
+    return "jest";
+  }
+  const hasJestKey = await packageJsonHasJestKey(resolvedRoot, stderr);
+  return hasJestKey ? "jest" : "unknown";
 }
 
 /**
