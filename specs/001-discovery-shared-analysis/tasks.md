@@ -102,7 +102,7 @@ Single project: `src/` and `tests/` at the repository root (per plan.md Project 
 
 ### Tests for User Story 3 (write FIRST; must FAIL before implementation)
 
-- [ ] T019 [P] [US3] Create tests/safeio.test.ts — safety fixtures (US3 scenarios 1–6, SC-002; research R11), each asserting skip-and-continue (`readBounded` resolves `null`), exactly one `reading-stone: skipping <relPath>: <reason>` line on the injected stderr sink, no thrown error, and nothing written to any stdout stream: an oversized file created via `fs.truncate` to 16 MiB + 1 byte (instant sparse file); a non-regular file created via `execFileSync("mkfifo", [path])`; an unreadable file created via `fs.chmod(path, 0o000)`; a symlinked file and a symlinked directory inside the tree (never followed or read); and a traversal-escape candidate (relPath such as `../outside.txt`) rejected unread
+- [x] T019 [P] [US3] Create tests/safeio.test.ts — safety fixtures (US3 scenarios 1–6, SC-002; research R11), each asserting skip-and-continue (`readBounded` resolves `null`), exactly one `reading-stone: skipping <relPath>: <reason>` line on the injected stderr sink, no thrown error, and nothing written to any stdout stream: an oversized file created via `fs.truncate` to 16 MiB + 1 byte (instant sparse file); a non-regular file created via `execFileSync("mkfifo", [path])`; an unreadable file created via `fs.chmod(path, 0o000)`; a symlinked file and a symlinked directory inside the tree (never followed or read); and a traversal-escape candidate (relPath such as `../outside.txt`) rejected unread
 
 ### Implementation for User Story 3
 
