@@ -24,7 +24,7 @@ export class RpcError extends Error {
   }
 }
 
-export type Handler = (params: object | null) => object;
+export type Handler = (params: object | null) => object | Promise<object>;
 
 const MAX_LINE_CHARS = 16 * 1024 * 1024;
 const MAX_METHOD_ECHO = 64;
@@ -65,7 +65,7 @@ export class Server {
     try {
       for await (const line of rl) {
         const text = line.endsWith("\r") ? line.slice(0, -1) : line;
-        this.handleLine(text);
+        await this.handleLine(text);
         if (this.brokenPipe || this.shuttingDown) {
           break;
         }
@@ -75,7 +75,7 @@ export class Server {
     }
   }
 
-  private handleLine(text: string): void {
+  private async handleLine(text: string): Promise<void> {
     if (text.trim().length === 0) {
       return;
     }
@@ -114,7 +114,7 @@ export class Server {
       return;
     }
     try {
-      const result = handler(params);
+      const result = await handler(params);
       this.writeResponse(successResponse(id, result));
     } catch (error) {
       if (error instanceof RpcError) {
