@@ -1594,6 +1594,25 @@ export interface DelegateCommandData {
   artifact_created: boolean
   /** Whether checkpoint_step was recorded through the progress state store. */
   checkpoint_recorded: boolean
+  /**
+   * Task classification declared by the caller (delegation-skill-enforcement
+   * D5); null when a command-path call omitted it. Judgment-classified and
+   * unclassified calls never carry a skill reference or absence reason.
+   */
+  task_classification: "deterministic" | "judgment" | null
+  /**
+   * Resolved repo-relative skill reference for deterministic-classified work
+   * (D5: the audit trail records the resolved reference, never the raw
+   * input); null when no skill was supplied.
+   */
+  skill: string | null
+  /**
+   * Recorded absence reason for deterministic-classified work with no
+   * applicable repo skill or script, verbatim -- the checkpoint store's
+   * JSON serialization is the sanitization boundary, no additional content
+   * filtering is applied; null when none was supplied.
+   */
+  skill_absent_reason: string | null
   /** Child session usage, when the executor reported step-finish parts. */
   usage: InvocationUsage | null
   /** Request, host-resolution, and child-report provenance. */
@@ -1640,6 +1659,21 @@ const DelegateCommandInputSchema = z
     checkpoint_step: z.string().min(1).max(128).optional(),
     phase: z.number().int().min(1).max(1000).optional(),
     timeout: TimeoutSchema.optional(),
+    // Delegation-skill-enforcement D1: the caller classifies the delegated
+    // work and the tool validates the declared answer's consequences.
+    // Absence of a skill reference is expressed by omitting the field or
+    // recording a reason, never by an empty string.
+    task_classification: z.enum(["deterministic", "judgment"]).optional(),
+    skill: z
+      .string()
+      .min(1, "empty string is invalid -- pass a skill reference or record skill_absent_reason instead")
+      .max(256)
+      .optional(),
+    skill_absent_reason: z
+      .string()
+      .min(1, "empty string is invalid -- absence is expressed by omitting the field")
+      .max(512)
+      .optional(),
   })
   .strict()
   .superRefine((input, context) => {
@@ -1651,6 +1685,44 @@ const DelegateCommandInputSchema = z
         path: ["prompt"],
         message: "one of command_path or prompt is required",
       })
+    }
+    // D1: prompt-only delegation must declare its classification. The
+    // command file is the procedure of record for command-path calls, so
+    // only those may omit it.
+    if (input.command_path === undefined && input.task_classification === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["task_classification"],
+        message:
+          "prompt-only delegation (no command_path) must declare task_classification -- " +
+          "classify the work as deterministic or judgment before delegating",
+      })
+    }
+    // D1: name the skill, or record why none exists -- never both.
+    if (input.skill !== undefined && input.skill_absent_reason !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["skill"],
+        message:
+          "skill and skill_absent_reason are mutually exclusive -- " +
+          "pass a skill reference or an absence reason, never both",
+      })
+    }
+    // D1: the skill directive asserts deterministic work, so each field is
+    // valid only with deterministic classification. Judgment-classified and
+    // unclassified calls must not supply either.
+    if (input.task_classification !== "deterministic") {
+      for (const field of ["skill", "skill_absent_reason"] as const) {
+        if (input[field] !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message:
+              "skill references apply to deterministic work only -- " +
+              "classify the work as deterministic or omit the field",
+          })
+        }
+      }
     }
   })
 
@@ -1712,6 +1784,118 @@ function resolveToolParam(
   return { ok: true, abs }
 }
 
+/**
+ * Repo skill roots searched for a `skill` value carrying no path
+ * separator, in resolution order (delegation-skill-enforcement D2).
+ * Both roots exist in this repository; a name present in both resolves
+ * to the first root. A future layout change is a one-constant edit.
+ */
+const SKILL_ROOTS = [".opencode/skills", ".opencode/skill"] as const
+
+/**
+ * Resolve a deterministic delegation's skill reference (design D2): a
+ * value without `/` is a skill name probed under each repo skill root in
+ * order — first root wins on collision; a value containing `/` is a
+ * repo-relative script path under the standard traversal guard.
+ * Resolution is an existence check on the injected fileExists dependency
+ * — no content is read (the child loads the skill or runs the script
+ * through its own tooling). Returns the resolved repo-relative reference
+ * for the prompt directive (task 1.4) and the audit trail (task 1.5), or
+ * the failure-output JSON (SKILL_TRAVERSAL / SKILL_NOT_FOUND, both
+ * non-retryable) naming the searched locations.
+ */
+function resolveSkillReference(
+  cwd: string,
+  skill: string,
+  fileExists: FileExists,
+): { ok: true; resolved: string } | { ok: false; failureOutput: string } {
+  const remediation =
+    "Remediation: pass an existing skill name or a repo-relative script path, " +
+    "or record skill_absent_reason when no repo skill applies; retrying will not fix this."
+  if (!skill.includes("/")) {
+    // Skill name: probe each root in order; the first existing entry wins
+    // (spec scenario: skill-root collision resolves to the first root).
+    for (const root of SKILL_ROOTS) {
+      const candidate = `${root}/${skill}/SKILL.md`
+      if (fileExists(resolve(cwd, candidate))) {
+        return { ok: true, resolved: candidate }
+      }
+    }
+    const searchedLocations = SKILL_ROOTS.map((root) => `${root}/${skill}/SKILL.md`).join(", ")
+    return {
+      ok: false,
+      failureOutput: JSON.stringify(
+        failure(
+          `Skill reference "${skill}" does not resolve. Searched: ${searchedLocations}. ${remediation}`,
+          { retryable: false, code: "SKILL_NOT_FOUND" },
+        ),
+      ),
+    }
+  }
+  // Script path: repo-relative resolution with the standard traversal
+  // guard (the command_path / expected_artifact precedent).
+  const pathParam = resolveToolParam(cwd, skill, "skill", "SKILL_TRAVERSAL")
+  if (!pathParam.ok) {
+    return { ok: false, failureOutput: pathParam.failureOutput }
+  }
+  if (!fileExists(pathParam.abs)) {
+    return {
+      ok: false,
+      failureOutput: JSON.stringify(
+        failure(
+          `Skill reference "${skill}" does not resolve. Searched: ${skill} (repo-relative path). ${remediation}`,
+          { retryable: false, code: "SKILL_NOT_FOUND" },
+        ),
+      ),
+    }
+  }
+  return { ok: true, resolved: skill }
+}
+
+/** Suffix every skill-root resolution produces (D2: `<root>/<name>/SKILL.md`). */
+const SKILL_FILE_SUFFIX = "/SKILL.md"
+
+/**
+ * The `skill`-tool invocation name for a resolved skill reference: the
+ * directory under a skill root when the reference resolved as (or points
+ * at) a skill-root SKILL.md, and the reference itself otherwise. A script
+ * reference carries no skill name — its "run the script" clause is the
+ * operative one in the directive.
+ */
+function skillToolName(resolvedReference: string): string {
+  for (const root of SKILL_ROOTS) {
+    const prefix = `${root}/`
+    if (!resolvedReference.startsWith(prefix) || !resolvedReference.endsWith(SKILL_FILE_SUFFIX)) {
+      continue
+    }
+    const name = resolvedReference.slice(prefix.length, -SKILL_FILE_SUFFIX.length)
+    if (name !== "" && !name.includes("/")) {
+      return name
+    }
+  }
+  return resolvedReference
+}
+
+/**
+ * Render the tool-rendered skill directive injected into the composed
+ * prompt (delegation-skill-enforcement D3, task 1.4). The exact wording
+ * is a design constant — tool-rendered, never agent-reconstructed
+ * (DE-003) — pinned by golden-shape tests: a header line naming the
+ * resolved reference, then the fixed paragraph instructing the child to
+ * load the skill (naming its `skill`-tool name) or run the script at the
+ * resolved path and execute its full procedure. Rendered only for calls
+ * carrying a resolved skill reference; task 1.5 records the same
+ * reference in the audit trail.
+ */
+function renderSkillDirective(resolvedReference: string): string {
+  return (
+    `Required skill: ${resolvedReference}\n\n` +
+    "This task is classified as deterministic work. Load the skill (invoke the `skill` tool " +
+    `with name "${skillToolName(resolvedReference)}") or run the script at ${resolvedReference}, ` +
+    "and execute its full procedure. Do not substitute an improvised procedure."
+  )
+}
+
 /** Standard catch-all failure envelope from a thrown unknown error. */
 function failureFromError(err: unknown, code: string, retryable = false): string {
   const msg = err instanceof Error ? err.message : String(err)
@@ -1747,10 +1931,18 @@ function expectedArtifactStopMessage(expectedArtifact: string): string {
  * - command_path is optional: prompt-only delegation (per-task implement
  *   and code-fix calls) omits it and passes the raw task or fix
  *   description through prompt
+ * - the classification contract (delegation-skill-enforcement D1):
+ *   prompt-only delegation must declare task_classification
+ *   ("deterministic" | "judgment"); skill (1-256 chars) and
+ *   skill_absent_reason (1-512 chars) are mutually exclusive, and each is
+ *   valid only with deterministic classification, so judgment-classified
+ *   and unclassified command-path calls cannot carry either field
  * - the command file is read repo-relative with traversal protection (the
  *   statePath guard) and a 1 MiB size bound
  * - the prompt is composed deterministically: command text when present,
- *   then feature-dir context, then the extra prompt
+ *   then feature-dir context, then the tool-rendered skill directive
+ *   (delegation-skill-enforcement D3, rendered only when a skill
+ *   reference resolved), then the extra prompt
  * - the child session runs through the shared executeAgentSession executor
  *   (host model resolution via parent introspection, parenting, abort
  *   linkage, timeout — default 600,000 ms) and expected_artifact is
@@ -1759,7 +1951,10 @@ function expectedArtifactStopMessage(expectedArtifact: string): string {
  * - on success (child completed and artifact verified when supplied) the
  *   tool auto-checkpoints checkpoint_step for command "uf.unleash" through
  *   the same writeState path as the checkpoint tool (D5), recording the
- *   delegation facts as data
+ *   delegation facts as data -- including the classification contract's
+ *   audit trail (delegation-skill-enforcement D5): task_classification,
+ *   the resolved skill reference, and skill_absent_reason when present,
+ *   also surfaced in the success envelope
  *
  * @param exec Git executor used to derive the auto-checkpoint state key.
  * @param cwd Repository root used for repo-relative path resolution.
@@ -1806,6 +2001,20 @@ export function createDelegateCommandTool(
       timeout: DelegateCommandInputSchema.shape.timeout.describe(
         "Optional run timeout in milliseconds (bounded to 1_800_000; default 600_000).",
       ),
+      task_classification: DelegateCommandInputSchema.shape.task_classification.describe(
+        "Optional classification of the delegated work: \"deterministic\" or \"judgment\". " +
+          "Required for prompt-only delegation (no command_path); command-path delegation may omit it.",
+      ),
+      skill: DelegateCommandInputSchema.shape.skill.describe(
+        "Optional repo skill or script reference named for deterministic-classified work " +
+          "(1-256 chars). Mutually exclusive with skill_absent_reason and valid only with " +
+          "task_classification \"deterministic\".",
+      ),
+      skill_absent_reason: DelegateCommandInputSchema.shape.skill_absent_reason.describe(
+        "Optional reason recorded when deterministic-classified work has no applicable repo " +
+          "skill or script, stating what was searched and what was found (1-512 chars). " +
+          "Mutually exclusive with skill and valid only with task_classification \"deterministic\".",
+      ),
     },
     async execute(args, context) {
       try {
@@ -1824,6 +2033,49 @@ export function createDelegateCommandTool(
           return { output: invalidInputOutput(parsed.error) }
         }
         const input = parsed.data
+
+        // Delegation-skill-enforcement D4 (task 1.2): deterministic
+        // classification requires a skill reference or a recorded absence
+        // reason. The schema owns the structural rules (mutual exclusivity,
+        // deterministic-only pairing, prompt-only classification); this rule
+        // lives in execute() because it carries a dedicated failure code
+        // with remediation text (the COMMAND_FILE_READ_FAILED /
+        // EXPECTED_ARTIFACT_MISSING precedent). Like every validation here
+        // it runs before the command-file read, host-model resolution, and
+        // the child spawn -- a rejected call costs one tool round-trip,
+        // zero sessions.
+        if (
+          input.task_classification === "deterministic" &&
+          input.skill === undefined &&
+          input.skill_absent_reason === undefined
+        ) {
+          return {
+            output: JSON.stringify(
+              failure(
+                "Deterministic-classified delegation requires a skill reference or a recorded absence reason. " +
+                  "Remediation: pass a skill reference (skill), record the absence reason (skill_absent_reason), " +
+                  "or classify the work as judgment; retrying will not fix this.",
+                { retryable: false, code: "SKILL_REFERENCE_REQUIRED" },
+              ),
+            ),
+          }
+        }
+
+        // Delegation-skill-enforcement D2 (task 1.3): a supplied skill
+        // reference MUST resolve before the command-file read, host-model
+        // resolution, and the child spawn — a rejected reference costs one
+        // tool round-trip, zero sessions. Resolution is an existence check
+        // on the injected fileExists dependency (no content read); the
+        // resolved reference feeds the prompt directive (task 1.4) and the
+        // audit trail (task 1.5).
+        let resolvedSkill: string | null = null
+        if (input.skill !== undefined) {
+          const skillRef = resolveSkillReference(cwd, input.skill, deps.fileExists)
+          if (!skillRef.ok) {
+            return { output: skillRef.failureOutput }
+          }
+          resolvedSkill = skillRef.resolved
+        }
 
         // Read the command file when supplied: repo-relative resolution with
         // traversal protection, then a size bound (invoke-agent prompt-file
@@ -1885,13 +2137,20 @@ export function createDelegateCommandTool(
         }
 
         // Compose the prompt deterministically: command text (when present),
-        // then feature-dir context, then extra instructions.
+        // then feature-dir context, then the tool-rendered skill directive
+        // (delegation-skill-enforcement D3: fixed position — after command
+        // text and feature-dir context, immediately before the extra
+        // prompt), then extra instructions. The directive renders only on
+        // calls carrying a resolved skill reference.
         const sections: string[] = []
         if (commandText !== undefined) {
           sections.push(commandText)
         }
         if (input.feature_dir !== undefined) {
           sections.push(`Feature directory: ${input.feature_dir}`)
+        }
+        if (resolvedSkill !== null) {
+          sections.push(renderSkillDirective(resolvedSkill))
         }
         if (input.prompt !== undefined) {
           sections.push(input.prompt)
@@ -2016,6 +2275,22 @@ export function createDelegateCommandTool(
           if (input.phase !== undefined) {
             checkpointData.phase = input.phase
           }
+          // Delegation-skill-enforcement D5 (task 1.5): the audit trail.
+          // task_classification is recorded when declared (command-path
+          // calls may omit it); skill records the RESOLVED reference, not
+          // the raw input; skill_absent_reason is recorded verbatim when
+          // present. Judgment-classified and unclassified calls add no
+          // skill keys, so calls omitting the new fields keep the exact
+          // pre-change checkpoint shape (backward compatibility).
+          if (input.task_classification !== undefined) {
+            checkpointData.task_classification = input.task_classification
+          }
+          if (resolvedSkill !== null) {
+            checkpointData.skill = resolvedSkill
+          }
+          if (input.skill_absent_reason !== undefined) {
+            checkpointData.skill_absent_reason = input.skill_absent_reason
+          }
           recordAutoCheckpoint(cwd, key, "uf.unleash", input.checkpoint_step, checkpointData)
           checkpointRecorded = true
         }
@@ -2026,6 +2301,12 @@ export function createDelegateCommandTool(
           child_session_id: result.childSessionID ?? null,
           artifact_created: artifactCreated,
           checkpoint_recorded: checkpointRecorded,
+          // Delegation-skill-enforcement D5 (task 1.5): the same audit
+          // fields the checkpoint records, surfaced machine-parseably in
+          // the success envelope (null when the call supplied none).
+          task_classification: input.task_classification ?? null,
+          skill: resolvedSkill,
+          skill_absent_reason: input.skill_absent_reason ?? null,
           usage: result.usage,
           provenance: result.provenance,
           text: result.text,
@@ -3996,7 +4277,7 @@ export function createFormatUnleashExitTool(cwd: string): ReturnType<typeof tool
         "spec-review: workflow tier selecting the recovery guidance (speckit or openspec).",
       ).optional(),
       findings: ExitStringListSchema.describe(
-        "spec-review (HIGH/CRITICAL findings with context) or code-review-preflight " +
+        "spec-review (unresolved findings with context) or code-review-preflight " +
           "(branch-caused failures as CRITICAL findings with full output).",
       ).optional(),
       change_name: ExitChangeNameSchema.describe(

@@ -1,9 +1,9 @@
 ---
 description: >
-  Finalize a branch: commit, push, create PR, watch CI
-  checks, and return to main. The PR stays open for
-  review. One command to wrap up any feature, OpenSpec,
-  or quick branch.
+  Finalize a branch: commit, sync with the base branch,
+  push, create PR, watch CI checks, and return to main.
+  The PR stays open for review. One command to wrap up
+  any feature, OpenSpec, or quick branch.
 ---
 <!-- scaffolded by uf vdev -->
 
@@ -17,7 +17,7 @@ $ARGUMENTS
 
 ## Description
 
-Automate the end-of-branch workflow. Stages, commits,
+Automate the end-of-branch workflow. Stages, commits, base-syncs,
 pushes, creates a PR, watches CI, and returns to `main`.
 
 ## Usage
@@ -57,7 +57,8 @@ Switch to a feature branch first."
 ### 2. Check for Changes
 
 **No changes** (`!hasChanges`): if `unpushedCommits` is
-non-empty, skip to step 4. Else check step 5 for
+non-empty, skip to step 4 (Sync with Base Branch) — it
+flows through to step 5 (Push). Else check step 6 for
 existing PR. If no PR either, report "Nothing to
 finalize" and stop.
 
@@ -126,21 +127,78 @@ explicit confirmation.
 **Checkpoint**: `step: "commit"`,
 `data: '{"commit": "<hash>"}'`.
 
-### 4. Push
+### 4. Sync with Base Branch
+
+Call `uf_finale_base_state` → `{remote, baseBranch, baseRef,
+aheadBy, behindBy}`.
+
+**Base sync failure** (`retryable: true`, code `BASE_SYNC_FETCH`
+or `BASE_SYNC_COUNT`): **soft gate** — warn that base freshness
+or counts are unknown, skip the sync-base checkpoint, and
+proceed to step 5; steps 5 and 6 treat an absent checkpoint
+as no rebase. Never block on a freshness check.
+
+**`behindBy` is 0**: The branch is current with `<baseRef>`.
+Proceed to step 5 without presenting a gate.
+
+**`behindBy` > 0**: The branch is `<behindBy>` commits
+behind `<baseRef>` (and `<aheadBy>` ahead).
+
+>>> MANDATORY GATE <<<
+
+**Session-resume guard**: Re-present and re-confirm if
+resumed. NEVER rebase without explicit confirmation.
+
+Use **question tool**: `["Rebase onto <baseRef> (recommended)",
+"Continue without rebase -- PR will be behind",
+"Abort -- keep commits local"]`.
+- **Rebase**: Call `git_rebase` with ref `<baseRef>`
+  (`<remote>/<baseBranch>`). If it reports conflicts: call
+  `git_rebase_abort`, report the conflicted files, **STOP** —
+  the pre-rebase branch state is preserved. On success a
+  rebase occurred; step 5 selects the push mode accordingly.
+- **Continue**: No rebase; step 6 MUST include a warning
+  that the branch is behind the base by `<behindBy>`
+  commits.
+- **Abort**: **STOP**.
+
+>>> END GATE <<<
+
+**Checkpoint**: `step: "sync-base"`,
+`data: '{"behindBy": <N>, "rebased": <bool>}'`.
+
+### 5. Push
 
 Call `uf_finale_push_state` → `{upstreamExists, diverged,
 aheadBy, behindBy}`.
+
+**Push state failure** (`retryable: true`, code `PUSH_SYNC_COUNT`):
+**soft gate** — warn that the branch's upstream state and
+divergence are unknown, then present the gate with a safe push
+mode: `git_push_force_with_lease` after a step-4 rebase (the
+lease protects any existing remote branch), else `git_push` with
+`{setUpstream: true, branch}` (safe whether or not an upstream
+exists). Never block on a push-state check.
 
 >>> MANDATORY GATE <<<
 
 **Session-resume guard**: Re-present and re-confirm if
 resumed. Warn if `diverged` is true.
 
+**Push mode selection** — read the step-4 `sync-base`
+checkpoint `{behindBy, rebased}` and `upstreamExists`:
+- A step-4 rebase occurred AND `upstreamExists`: "Push to
+  remote" MUST call `git_push_force_with_lease`. The gate
+  copy MUST state why: the rebase rewrote history, so the
+  remote branch must be replaced under lease protection.
+- A step-4 rebase occurred AND `!upstreamExists` (first
+  push): call `git_push` with `{setUpstream: true, branch}`.
+- No rebase occurred: call `git_push` exactly as before
+  (with `{setUpstream: true, branch}` if `!upstreamExists`).
+
 Use **question tool**: `["Push to remote",
 "Abort -- keep commits local"]`.
-- **Push**: Call `git_push` (with
-  `{setUpstream: true, branch}` if `!upstreamExists`).
-  If fails, **STOP**.
+- **Push**: Call the selected push mode. If fails, **STOP**.
 - **Abort**: **STOP**.
 
 NEVER push without explicit confirmation.
@@ -149,11 +207,18 @@ NEVER push without explicit confirmation.
 
 **Checkpoint**: `step: "push"`.
 
-### 5. Create or Find PR
+### 6. Create or Find PR
 
 Call `uf_finale_pr_context` → `{existingPr, isFork,
 forkParent, templateSections, commitLog, diffStat,
 originatingIssue, unleashSummary}`.
+
+**Behind-base warning** — read the step-4 `sync-base`
+checkpoint `{behindBy, rebased}`; when `rebased` is false
+and `behindBy` > 0, include a warning in the PR body (or
+the finale report for an existing PR) that the branch is
+behind the base by `<behindBy>` commits (scenario "User
+continues without rebase").
 
 **If `existingPr`**: use its number/URL, skip creation.
 
@@ -208,12 +273,12 @@ targetRepo?}` → `{number, url}`. Report PR URL.
 **Checkpoint**: `step: "create-pr"`,
 `data: '{"pr_number": <N>, "pr_url": "<url>"}'`.
 
-### 6. Watch CI Checks
+### 7. Watch CI Checks
 
 Call `uf_finale_ci_poll` with `{prNumber}` → `{status,
 failedChecks, mergeable, workflowsConfigured}`.
 
-**`"pass"`**: Proceed to step 7.
+**`"pass"`**: Proceed to step 8.
 
 **`"fail"`**:
 
@@ -226,15 +291,15 @@ what likely went wrong. Use **question tool**:
 
 >>> END GATE <<<
 
-**`"conflict"`**: Proceed to 6b.
+**`"conflict"`**: Proceed to 7b.
 
 **`"no-checks-workflows-exist"`**: Use **question tool**:
 `["Proceed without CI checks", "Stop and investigate"]`.
 
 **`"no-checks-no-workflows"`**: Report "No CI workflows
-configured" and proceed to step 7.
+configured" and proceed to step 8.
 
-#### 6b. Conflict Recovery
+#### 7b. Conflict Recovery
 
 Determine target remote (upstream if fork, else origin)
 and base branch.
@@ -263,7 +328,7 @@ conflicted: `git_rebase_abort`, report files, **STOP**.
 
 **Option 3 — Stop**: Report conflict, **STOP**.
 
-**Option 4 — Continue**: Proceed to step 7 with CI
+**Option 4 — Continue**: Proceed to step 8 with CI
 skipped warning flag.
 
 **Option 5 — Sub-agent**: `git_fetch` → `git_merge`
@@ -282,17 +347,17 @@ show staged diff. Use **question tool**:
 - **Edits**: User edits, re-show diff, re-present menu.
 - **Abort**: `git_merge_abort`, return to 5-option menu.
 
-**POST-CI MOMENTUM**: After Step 6, proceed immediately
-to Step 7 without CI output. Defer to Step 8.
+**POST-CI MOMENTUM**: After Step 7, proceed immediately
+to Step 8 without CI output. Defer to Step 9.
 
 **Checkpoint**: `step: "watch-ci"`.
 
-### 7. Return to Main
+### 8. Return to Main
 
 Call `uf_finale_return_to_main` → `{success}`.
 **Checkpoint**: `step: "return-to-main"`.
 
-### 8. Summary
+### 9. Summary
 
 ```
 ## Finale Complete

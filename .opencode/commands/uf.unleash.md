@@ -614,60 +614,98 @@ sections instead of embedding their text.
 - If the verdict is APPROVE or APPROVE WITH ADVISORIES:
   record any advisories for the final report and
   proceed to Step 5 (Implement) — approving verdicts
-  never trigger the consent gate below.
+  never trigger the decision gate below.
 
-- If the verdict is REQUEST CHANGES with only LOW and
-  MEDIUM findings (any HIGH/CRITICAL finding bypasses
-  this gate): present the spec auto-fix consent gate.
-  Spec artifacts MUST NOT be modified on LOW/MEDIUM
-  findings without explicit human consent. The
-  council's session-resume guard applies to this
-  gate: consent captured before a context compression
-  or session resume is not valid, and the question
-  MUST be re-presented on resume. Use the **question
-  tool** with the council's three options, exactly as
-  labeled below:
-  - **"Apply auto-fixes"** (consent): the parent
-    command itself applies the LOW/MEDIUM fixes per
-    `.opencode/uf/packs/severity.md` -- formatting,
-    status fields, terminology, cross-references,
-    obvious gaps, stale metadata. HIGH/CRITICAL
-    findings are report-only and MUST NOT be
-    auto-fixed.
-  - **"Review findings first"**: display the findings,
-    then the question tool re-presents the same three
-    options. No spec edits occur until a selection is
-    made.
-  - **"Skip auto-fixes -- report only"** (decline):
-    exit using the same exit path as the HIGH/CRITICAL
-    branch below (the tool-rendered `spec-review`
-    exit), making no spec edits.
+- If the verdict is REQUEST CHANGES: present the
+  per-finding spec review decision gate. The council's
+  "Spec Review Mode" MANDATORY GATE in
+  `.opencode/commands/uf.review-council.md` governs the
+  protocol -- present each finding one at a time, in
+  severity order (CRITICAL, HIGH, MEDIUM, LOW), printing
+  the finding details, per-option reasoning, and a
+  recommendation as session text, then the **question
+  tool** below it with the same options, the recommended
+  option first and labeled "(Recommended)". Repeat for
+  each finding until every finding is fixed, overridden,
+  or the human pauses. Spec artifacts MUST NOT be
+  modified and findings MUST NOT be waived without an
+  explicit per-finding human choice. The options, exactly
+  as labeled in the council protocol:
+  - **"Apply suggested fix"** (consent): the parent
+    command itself applies the suggested fix for this
+    one finding. Available for every severity -- a
+    human-directed fix is a consented edit, not an
+    autonomous auto-fix.
+  - **"Override & continue"** (waive): obtain a recorded
+    justification, then record the override (severity,
+    description, justification) in the checkpoint data
+    below and as a final-report advisory, and continue.
+  - **"Show more context"**: print the full finding
+    context, then re-present the same options. No spec
+    edit occurs.
+  - **"Pause & exit"**: stop the review, making no
+    further spec edits -- exit through the tool-rendered
+    `spec-review` exit path below.
+  - **"Apply all remaining LOW/MEDIUM fixes"** (bulk
+    shortcut, offered only when the current finding is
+    LOW/MEDIUM): apply the remaining LOW/MEDIUM
+    findings' fixes in one consented action. This option
+    MUST NOT appear for HIGH/CRITICAL findings and
+    MUST NOT modify any HIGH/CRITICAL finding.
 
-  After consented fixes, re-run the review: re-resolve
-  the immutable input, re-validate the full plan, and
-  rerun every included reviewer (not just failing or
+  While any HIGH/CRITICAL finding is unresolved, the
+  pipeline MUST NOT proceed past it: no autonomous fix,
+  waiver, or advancement to Step 5 occurs except through
+  an explicit per-finding human choice. The council's
+  session-resume guard applies to this gate: decisions
+  captured before a context compression or session
+  resume are not valid -- on resume, re-present
+  unresolved findings with fresh question-tool
+  invocations; resolutions recorded in durable
+  checkpoint data stand.
+
+  The loop completes when every finding is fixed or
+  overridden. Overrides alone require no re-run; when the
+  loop completes via overrides alone (no fixes applied),
+  the final report and pipeline summary record the
+  outcome as REQUEST CHANGES resolved by recorded overrides,
+  listing each override (severity, description,
+  justification). Findings matching a
+  recorded override (same file and root cause)
+  carry forward as resolved on re-runs and are not
+  re-presented unless materially new information emerges;
+  the overrides array below carries all overrides recorded
+  across iterations. After applied fixes (per-finding
+  choices or the bulk shortcut), re-run the review:
+  re-resolve the immutable
+  input, re-validate the full plan, and rerun every
+  included reviewer (not just failing or
   content-affected ones), reusing a single
   sibling-evidence acquisition across the iteration.
   Keep the iteration counter. Each re-run verdict is
   processed through these same rules -- the gate
-  re-presents on REQUEST CHANGES with only LOW/MEDIUM
-  findings. Cap at 3 iterations: if REQUEST CHANGES
-  persists to a fourth encounter, exit through the
-  same tool-rendered `spec-review` exit path.
+  re-presents on every REQUEST CHANGES verdict. Cap at
+  3 iterations: if REQUEST CHANGES persists to a fourth
+  encounter, exit through the tool-rendered
+  `spec-review` exit path below without presenting the
+  gate again.
 
   > CHECKPOINT: Call `checkpoint` with `command:
   > "uf.unleash"`, `step: "spec-review"`, and
-  > `data: '{"iteration": N}'`.
+  > `data: '{"iteration": N, "overrides": [...]}'` -- the
+  > overrides array carries each waived finding's
+  > severity, description, and justification (an empty
+  > array when none).
 
-- If HIGH or CRITICAL findings remain after auto-fixing
-  LOW/MEDIUM: **EXIT** by calling `format_unleash_exit`
-  with:
+- If the human chooses "Pause & exit", or the 3 iteration
+  cap is reached with findings unresolved: **EXIT** by
+  calling `format_unleash_exit` with:
 
   ```
   format_unleash_exit
     variant: "spec-review"
     tier: WORKFLOW_TIER
-    findings: [HIGH/CRITICAL findings with context]
+    findings: [unresolved findings with context]
     change_name: [change name]
   ```
 
@@ -678,11 +716,12 @@ sections instead of embedding their text.
   ```
   ## /uf.unleash paused at: spec review
 
-  **Reason**: HIGH/CRITICAL findings in spec artifacts
+  **Reason**: Unresolved spec review findings (pause or
+  iteration cap)
 
   ### Findings
 
-  [list each HIGH/CRITICAL finding with context]
+  [list each unresolved finding with context]
 
   ### What to do next
   [tier-specific recovery guidance]
@@ -712,12 +751,23 @@ from the pre-flight gate below):
   implementation prompt from the routed change description
   (recovered on a resumed run from the `tier-routing`
   checkpoint data via `get_progress` with
-  `command: "uf.unleash"`) and delegate once:
+  `command: "uf.unleash"`), classify the work, and delegate
+  once -- an unclassified prompt-only call fails closed:
 
   ```
   uf_delegate_command
     prompt: [the change description plus an instruction to
       implement the change completely on the current branch]
+    task_classification: [derived from the nature of the
+      work -- "deterministic", with skill or
+      skill_absent_reason, only when a repo skill or script
+      performs the change end-to-end; "judgment" otherwise
+      (docs authorship is judgment work)]
+    skill: [repo skill or script reference that performs the
+      change end-to-end -- only when deterministic]
+    skill_absent_reason: [what was searched and what was
+      found -- only when deterministic and no repo skill or
+      script applies; never together with skill]
     checkpoint_step: "implement"
   ```
 
@@ -727,17 +777,54 @@ from the pre-flight gate below):
 
 Run the `pre-flight` skill in `hard-gate` mode — the
 quick-tier equivalent of the phase checkpoint and the
-tier's only blocking build/test gate. If any check fails,
+tier's only blocking build/test gate. If any check
+fails, classify every failure by causality before
+acting (the causality classification contract that
+opens the fix loop below): only
+`change-caused` or unknown-origin failures enter the
+build/test fix loop (defined below the causality
+classification contract); `pre-existing` and
+`environmental` failures never enter the loop — record
+them in the checkpoint inventory and treat the gate as
+green over them, mirroring the phase checkpoint's
+inventory rule. If a check still fails after the loop's 3 iterations,
 **EXIT** by calling `format_unleash_exit` with variant
 `implement-phase-checkpoint`, `phase: 1`, the failed
-command, and its output. On success, record the gate
-result durably by calling the `checkpoint` tool:
+command, and its output. On success (initially or
+after fix-loop repairs), record the gate result
+durably by calling the `checkpoint` tool:
 
 ```
 checkpoint
   command: "uf.unleash"
   step: "quick-pre-flight"
+  data:
+    inventory:
+      - name: [failing check]
+        classification: pre-existing | environmental
 ```
+
+`quick-pre-flight` is the quick gate's ONLY completion
+claim: `uf_unleash_detect_resume` derives implement-done
+from it, so record it only on success. Persist the
+fix-loop budget through a separate budget-only step
+that resume detection ignores:
+
+```
+checkpoint
+  command: "uf.unleash"
+  step: "quick-fix-budget"
+  data:
+    fixLoopQuick: [fix-loop iterations used, 0 if the
+                   loop never ran]
+```
+
+Record `quick-fix-budget` after every delegated attempt
+and at exhaustion, and read `fixLoopQuick` back on
+resume. It is not a completion claim -- it never
+signals gate completion, so a mid-loop crash or an
+exhaustion exit cannot be mistaken for a passed gate
+on resume.
 
 On failure, emit the envelope's error and **STOP**. Then
 proceed directly to Step 6 (Code Review).
@@ -769,17 +856,156 @@ its Local Tool Detection phase to discover additional
    tools from config files. This is the shared pre-flight
    logic used by `/uf.review-council` and `/uf.review-pr`.
 
-**Mechanical tasks use repo tooling**: when a task
-   describes a mechanical procedure and the repository
-   ships a skill or script for it (e.g. a `renumber-adr`
-   skill for ADR renumbering), the delegation prompt MUST
-   name that skill or script and pass the reference
-   through to the child agent, so the child runs the full
-   procedure (for `renumber-adr`, including its
-   in-flight-claims step). When no skill or script exists,
-   implement the procedure directly; when one exists but
-   was not used, the task's completion summary MUST record
-   why.
+**Classify every delegated task**: before delegating, decide
+   whether the work is deterministic or judgment. Every
+   prompt-only `uf_delegate_command` call MUST declare the
+   answer -- the per-task implement calls and build/test
+   fix-loop call below, the quick-tier whole-change call
+   above, and the code-fix calls in Step 6; an
+   unclassified prompt-only call fails input
+   validation. Command-path delegations may omit the
+   classification: the command file is the procedure of
+   record. Classification is judgment about the nature of the
+   work:
+   - **deterministic**: a repo skill or repo script performs
+     the work end-to-end -- following a fixed, complete
+     procedure yields the correct result with no decisions
+     among alternatives. Pass the verified reference through
+     `skill`, or record through `skill_absent_reason` what
+     was searched and what was found when no repo skill or
+     script applies.
+   - **judgment**: the work requires decisions among
+     alternatives -- design choices, tradeoff evaluation,
+     prose authorship, applying review findings. Pass no
+     skill fields; the tool rejects them on
+     judgment-classified calls.
+
+   Parameter contract, enforced fail-closed before any child
+   session spawns:
+   - `task_classification`: `"deterministic"` or
+     `"judgment"`.
+   - `skill`: a repo skill name or repo-relative script path
+     that performs the work end-to-end. Valid only with a
+     deterministic classification; mutually exclusive with
+     `skill_absent_reason`.
+   - `skill_absent_reason`: a substantive reason stating
+     what was searched and what was found. Valid only with a
+     deterministic classification; mutually exclusive with
+     `skill`.
+
+   A deterministic call supplying neither `skill` nor
+   `skill_absent_reason` fails non-retryably with
+   `SKILL_REFERENCE_REQUIRED`; an unresolvable `skill` value
+   fails non-retryably with `SKILL_NOT_FOUND` naming the
+   searched locations. When `skill` resolves, the tool
+   injects a directive into the child's prompt instructing it
+   to load the skill or run the script and execute its full
+   procedure -- the delegation names the reference and does
+   not restate the procedure. The classification, resolved
+   reference, and any recorded reason are written to the
+   checkpoint data and success envelope, so every delegation
+   is auditable without reconstructing prompts. Swarm-path
+   `[P]` delegations carry the same classification through
+   the spawn tool's `task_classification` parameter (see
+   parallel execution below).
+
+**Build/test fix loop**: a failing check at a blocking
+gate is implement work the agent owns, not a human
+decision point -- code fixes proceed without a human
+choice, mirroring the Step 6 code-review fix loop. When
+the quick-tier pre-flight gate or a phase checkpoint
+below reports a failing check, or Step 6's pre-flight
+soft gate reports a branch-caused (or unknown) failure,
+run this loop before that gate takes its exit path.
+
+**Causality classification contract**: classify each
+failing check as exactly one of `change-caused` (fails
+on this branch, passes at the merge-base baseline),
+`pre-existing` (fails at the baseline too), or
+`environmental` (tool, network, or sandbox
+availability, not code). Only `change-caused` and
+unknown-origin failures enter the loop;
+`pre-existing` and `environmental` failures never
+enter it -- the calling gate records them in its
+checkpoint inventory and treats itself as green over
+them (the phase checkpoint's inventory match rule).
+When the baseline comparison cannot be established --
+`hard-gate` pre-flight mode runs checks without a
+classification phase -- classify the failure as
+`change-caused` (fail closed into the loop).
+
+For each iteration (up to 3 total):
+
+1. Delegate the fix to the `cobalt-crush-dev` agent via
+   `uf_delegate_command`, prompt-only (omit
+   `command_path` and `checkpoint_step`; the calling
+   gate's checkpoint remains the durable record):
+
+   ```
+   uf_delegate_command
+     prompt: [the failing command, its full output, and
+       an instruction to diagnose and fix the failure on
+       the current branch, then verify by re-running the
+       exact failing command]
+     task_classification: [derived from the nature of the
+       fix -- "deterministic", with skill or
+       skill_absent_reason, when a repo skill or script
+       performs the fix end-to-end; "judgment" otherwise,
+       the usual case for diagnosing a broken test]
+     skill: [repo skill or script reference that performs
+       the fix end-to-end -- only when deterministic]
+     skill_absent_reason: [what was searched and what was
+       found -- only when deterministic and no repo skill
+       or script applies; never together with skill]
+     feature_dir: FEATURE_DIR
+   ```
+
+   Omit `feature_dir` for the quick tier, which carries
+   none. On failure, emit the envelope's error and
+   **STOP**.
+
+2. Re-run the `pre-flight` skill in the calling gate's
+   mode (`hard-gate` for both implement gates;
+   `soft-gate` with re-classification for Step 6).
+   Verification is deterministic: re-run the exact
+   detected commands, never paraphrased or substituted
+   ones, and re-classify any remaining failures (the
+   inventory match rule applies for phase checkpoints).
+
+3. If the gate now passes: the calling gate proceeds as
+   green -- a phase checkpoint re-records its verdict as
+   `"green"` (superseding the `"failed"` record, with
+   the inventory carrying forward and the gate's data
+   key recording the spent budget), the quick gate
+   records its `quick-pre-flight` checkpoint (inventory
+   only -- the spent budget stays in its
+   `quick-fix-budget` record), and Step 6 proceeds to
+   its dispatch.
+
+4. If checks still fail: keep the iteration counter in
+   the calling gate's durable checkpoint data — the
+   phase checkpoint's `data.fixLoopPhase[N]` key, the
+   quick gate's budget-only `quick-fix-budget` step
+   (`data.fixLoopQuick`), or Step 6's
+   `data.fixLoopPreflight` — incrementing it after
+   every delegated attempt. At 3 iterations exhausted
+   (total across sessions, never reset by a resume),
+   the calling gate takes its exit path unchanged (the
+   `implement-phase-checkpoint` exit for both
+   implement gates, the `code-review-preflight` exit
+   for Step 6).
+
+Pre-existing and environmental failures never enter the
+loop. A recorded `phases["<N>"]` verdict of `"failed"`
+on resume means the loop re-enters -- the exit fires
+only at exhaustion, and the resume guard's never-re-run
+rule applies only to `"green"` verdicts. On re-entry
+the loop continues from the recorded iteration count:
+the budget is 3 delegated attempts total across
+sessions, never 3 more per resume. The quick gate reads
+its spent budget the same way, from its budget-only
+`quick-fix-budget` checkpoint step, and Step 6 from its
+`data.fixLoopPreflight` key.
 
 **For each phase in tasks.md**:
 
@@ -794,7 +1020,8 @@ its Local Tool Detection phase to discover additional
    incomplete work.
 
 2. **Sequential execution**: for each remaining non-`[P]`
-   task, delegate to the `cobalt-crush-dev` agent via
+   task, classify it per the classification step above, then
+   delegate to the `cobalt-crush-dev` agent via
    `uf_delegate_command`, passing the task description
    as the prompt (prompt-only -- no `command_path` for
    per-task implement calls):
@@ -802,6 +1029,13 @@ its Local Tool Detection phase to discover additional
    ```
    uf_delegate_command
      prompt: [the task description exactly as parsed]
+     task_classification: [the task's classification --
+       deterministic or judgment, per the step above]
+     skill: [repo skill or script reference that performs
+       the task end-to-end -- only when deterministic]
+     skill_absent_reason: [what was searched and what was
+       found -- only when deterministic and no repo skill or
+       script applies; never together with skill]
      feature_dir: FEATURE_DIR
      checkpoint_step: "implement"
      phase: [phase number]
@@ -844,8 +1078,35 @@ its Local Tool Detection phase to discover additional
         path, task ID, and current commit hash to create
         a dedicated worktree.
       - Call `replicator_forge_spawn_subtask` with the task
-        description, files from the task, and the
-        worktree path.
+        description, files from the task, the worktree path, and
+        the delegation parameters:
+
+        ```
+        replicator_forge_spawn_subtask
+          subtask_description: [the task description exactly as
+            parsed]
+          task_classification: [the task's classification --
+            deterministic or judgment, per the step above]
+          skill: [repo skill or script reference that performs
+            the task end-to-end -- only when deterministic]
+          skill_absent_reason: [what was searched and what was
+            found -- only when deterministic and no repo skill or
+            script applies; never together with skill]
+          files: [files from the task]
+          project_path: [the worktree path]
+        ```
+
+        The spawn tool enforces the same parameter contract as
+        `uf_delegate_command`, fail-closed before the subtask
+        spawns: a call omitting `task_classification` fails input
+        validation, a deterministic call supplying neither `skill`
+        nor `skill_absent_reason` fails with
+        `SKILL_REFERENCE_REQUIRED`, an unresolvable reference fails
+        with `SKILL_NOT_FOUND`, and a judgment-classified call
+        supplying either skill field fails input validation. When
+        the spawn envelope carries a `skill_directive`, forward it
+        verbatim into the worker's prompt -- never author skill
+        instructions in prose.
 
    d. Wait for all workers in the batch to complete.
 
@@ -983,17 +1244,34 @@ its Local Tool Detection phase to discover additional
            - name: [failing check]
              classification: pre-existing | environmental
                             | change-caused
+       data:
+         fixLoopPhase[N]: [fix-loop iterations used so far, 0
+                           if the loop never ran]
      ```
 
      `verdict` is `"green"` when every check passed or
      every failure was classified `pre-existing` or
      `environmental` (inventory carries those entries);
      otherwise `"failed"` (inventory carries every
-     classified failure).
+     classified failure). The iteration count rides the
+     free-form `data` parameter as the gate-distinct
+     `fixLoopPhase[N]` key -- the checkpoint tool
+     persists only `number`, `verdict`, and `inventory`
+     from the structured `phase` object, while `data`
+     round-trips through `get_progress` -- so record it
+     on every checkpoint, increment it after each
+     delegated fix attempt, and read it back on resume
+     so the 3-iteration budget spans sessions rather
+     than resetting per resume.
 
    - If green: proceed to the next phase.
-   - If failed: **EXIT** by calling
-     `format_unleash_exit` with:
+   - If failed: run the build/test fix loop (above)
+     before exiting. When the loop succeeds, re-record
+     the phase checkpoint with verdict `"green"`
+     (superseding the `"failed"` record; the inventory
+     carries forward) and proceed to the next phase.
+     When the loop exhausts its 3 iterations, **EXIT**
+     by calling `format_unleash_exit` with:
 
      ```
      format_unleash_exit
@@ -1055,7 +1333,16 @@ text.
      failure per its Phase 4b as `branch-caused`,
      `pre-existing`, or `unknown` (unknown is treated as
      branch-caused).
-   - **Branch-caused (or unknown) failures**: STOP
+   - **Branch-caused (or unknown) failures**: run the
+     build/test fix loop (defined in Step 5) before
+     stopping -- up to 3 iterations of delegated fix
+     plus soft-gate re-run with re-classification. The
+     iteration count is durable: record it via the
+     `checkpoint` tool (command `uf.unleash`, step
+     `code-review-preflight`, data `{"fixLoopPreflight": N}`)
+     after every delegated attempt and read it back on
+     resume, so the 3-attempt budget spans sessions. If
+     the failures persist after 3 iterations, STOP
      before dispatching any reviewers. Report each
      failure as a CRITICAL finding with full output.
      Finalize the dispatch fail-closed with NO child
@@ -1194,6 +1481,16 @@ text.
      ```
      uf_delegate_command
        prompt: [the findings to fix, exactly as reported]
+       task_classification: [derived from the nature of the
+         fix -- "deterministic", with skill or
+         skill_absent_reason, when a repo skill or script
+         performs the fix end-to-end; "judgment" for
+         applying prose findings, which is authorship work]
+       skill: [repo skill or script reference that performs
+         the fix end-to-end -- only when deterministic]
+       skill_absent_reason: [what was searched and what was
+         found -- only when deterministic and no repo skill
+         or script applies; never together with skill]
        feature_dir: FEATURE_DIR
      ```
 
@@ -1443,16 +1740,19 @@ retains its no-artifact fallback.
 
 - **NEVER pause between steps to ask for human
   confirmation** -- proceed immediately from one step to
-  the next. The single exception is the spec auto-fix
-  consent gate in Step 4: when a spec review returns
-  REQUEST CHANGES with only LOW/MEDIUM findings, the
-  question tool MUST be presented before any spec
-  artifact is modified. That gate is the only legitimate
-  mid-pipeline human interaction. The valid reasons to
-  exit the pipeline are: unanswerable clarification
-  questions, HIGH/CRITICAL spec findings, build/test
-  failures, merge conflicts, and 3 review iterations
-  exhausted. All other transitions are autonomous.
+  the next. The single exception is the per-finding spec
+  review decision gate in Step 4: when a spec review
+  returns REQUEST CHANGES, each finding's question tool
+  MUST be presented and answered before any spec
+  artifact is modified or any finding is waived. That
+  gate is the only legitimate mid-pipeline human
+  interaction. The valid reasons to exit the pipeline
+  are: unanswerable clarification questions, unresolved
+  spec findings after the per-finding gate (pause choice
+  or iteration cap), build/test failures that persist
+  after the fix loop's 3 iterations, merge conflicts,
+  and 3 review iterations exhausted. All other
+  transitions are autonomous.
 - **NEVER modify content on `main`** -- tier routing may
   start on main, but the route decision tool creates the
   `quick/<name>` branch and the speckit/openspec entry
@@ -1463,9 +1763,11 @@ retains its no-artifact fallback.
   matching `opsx/*`, `NNN-*`, or `quick/*` has already
   committed to its workflow; missing artifacts there are
   a STOP, never a routing trigger
-- **NEVER skip spec review exit on HIGH/CRITICAL** --
+- **NEVER proceed past HIGH/CRITICAL spec findings
+  without an explicit per-finding human choice** --
   these findings block implementation to prevent wasted
-  effort on a flawed spec
+  effort on a flawed spec; "Pause & exit" still routes
+  through the tool-rendered `spec-review` exit
 - **NEVER merge worktrees with unresolved semantic
   conflicts** -- conflict markers in files after
   cherry-pick mean the merge failed and requires human

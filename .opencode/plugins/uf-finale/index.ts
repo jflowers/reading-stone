@@ -50,11 +50,58 @@ function isSecretCandidate(filename: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Rev-list count parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse `git rev-list --count` output as a finite non-negative
+ * integer.
+ *
+ * The trimmed output must be entirely digits — git emits only
+ * digits and a newline on success — so partially numeric output
+ * ("2x") is rejected rather than prefix-parsed by parseInt.
+ * Unparseable-but-successful output (empty, garbage, or partially
+ * numeric) throws so callers route it through their
+ * count-failure envelope — the `parseInt(x, 10) || 0` coercion
+ * this replaces silently produced the 0 sentinel, making
+ * "genuinely zero" indistinguishable from "failed to count" and
+ * suppressing the gate the counts decide.
+ *
+ * @param output - Raw stdout of a `git rev-list --count` command.
+ * @returns The parsed commit count.
+ * @throws When the trimmed output is not entirely digits or does
+ *   not parse as a finite integer.
+ */
+function parseRevCount(output: string): number {
+  // parseInt is prefix-tolerant ("2x" parses as 2), so the full
+  // trimmed token must be digits before parseInt runs; the
+  // finiteness check stays as defense-in-depth for digit strings
+  // long enough to overflow to Infinity.
+  const trimmed = output.trim()
+  const count = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : NaN
+  if (!Number.isFinite(count)) {
+    throw new Error(
+      `unparseable rev-list --count output: ${JSON.stringify(trimmed)}`,
+    )
+  }
+  return count
+}
+
+// ---------------------------------------------------------------------------
 // 1. uf_finale_startup — Branch safety and working tree context
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_startup tool. */
-export function createUfFinaleStartupTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_startup tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_startup tool.
+ */
+export function createUfFinaleStartupTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Gather branch safety and working tree context for the finale " +
@@ -138,8 +185,17 @@ export function createUfFinaleStartupTool(exec: GitExec, cwd: string) {
 // 2. uf_finale_stage — Stage all changes
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_stage tool. */
-export function createUfFinaleStageTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_stage tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_stage tool.
+ */
+export function createUfFinaleStageTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Stage all changes in the working tree via `git add .` and return " +
@@ -172,8 +228,17 @@ export function createUfFinaleStageTool(exec: GitExec, cwd: string) {
 // 3. uf_finale_commit_context — Diff stat, recent log, normalized model
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_commit_context tool. */
-export function createUfFinaleCommitContextTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_commit_context tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_commit_context tool.
+ */
+export function createUfFinaleCommitContextTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Gather commit context: cached diff stat, recent log, and " +
@@ -213,11 +278,122 @@ export function createUfFinaleCommitContextTool(exec: GitExec, cwd: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. uf_finale_push_state — Upstream and divergence info
+// 4. uf_finale_base_state — PR base remote, branch, and ahead/behind counts
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_push_state tool. */
-export function createUfFinalePushStateTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_base_state tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_base_state tool.
+ */
+export function createUfFinaleBaseStateTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
+  return tool({
+    description:
+      "Resolve the PR base remote (upstream when configured, else origin) " +
+      "and base branch (remote HEAD symbolic ref, main fallback), fetch " +
+      "the base, and report how far HEAD is ahead of and behind the base.",
+    execute: async () => {
+      try {
+        // Remote resolution: upstream preferred when listed, else origin.
+        const remotes = exec(["remote"], cwd)
+          .split("\n")
+          .map((r) => r.trim())
+          .filter((r) => r.length > 0)
+        const remote = remotes.includes("upstream") ? "upstream" : "origin"
+
+        // Base branch resolution: remote HEAD symbolic ref, main fallback.
+        let baseBranch = "main"
+        try {
+          const symref = exec(
+            ["symbolic-ref", `refs/remotes/${remote}/HEAD`],
+            cwd,
+          ).trim()
+          const prefix = `refs/remotes/${remote}/`
+          if (symref.startsWith(prefix) && symref.length > prefix.length) {
+            baseBranch = symref.slice(prefix.length)
+          }
+        } catch {
+          // Symbolic ref unset — the main fallback stands.
+        }
+
+        const baseRef = `${remote}/${baseBranch}`
+
+        // Fetch the base branch — the tool's only side effect.
+        try {
+          exec(["fetch", remote, baseBranch], cwd)
+        } catch (fetchErr: unknown) {
+          const msg =
+            fetchErr instanceof Error ? fetchErr.message : String(fetchErr)
+          return {
+            output: JSON.stringify(
+              failure(`Could not fetch ${remote} ${baseBranch}: ${msg}`, {
+                retryable: true,
+                code: "BASE_SYNC_FETCH",
+              }),
+            ),
+          }
+        }
+
+        // Ahead/behind counts versus the fetched base ref. Count
+        // failures — exec throws and unparseable output alike —
+        // route through a retryable failure envelope: behindBy
+        // decides the step-4 sync gate and MUST NOT silently
+        // read as 0.
+        let aheadBy = 0
+        let behindBy = 0
+        try {
+          const ahead = exec(["rev-list", `${baseRef}..HEAD`, "--count"], cwd)
+          aheadBy = parseRevCount(ahead)
+          const behind = exec(["rev-list", `HEAD..${baseRef}`, "--count"], cwd)
+          behindBy = parseRevCount(behind)
+        } catch (countErr: unknown) {
+          const msg =
+            countErr instanceof Error ? countErr.message : String(countErr)
+          return {
+            output: JSON.stringify(
+              failure(`Could not count commits versus ${baseRef}: ${msg}`, {
+                retryable: true,
+                code: "BASE_SYNC_COUNT",
+              }),
+            ),
+          }
+        }
+
+        const data = { remote, baseBranch, baseRef, aheadBy, behindBy }
+
+        return { output: JSON.stringify(success(data)) }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return {
+          output: JSON.stringify(
+            failure(msg, { retryable: false, code: "BASE_STATE_ERROR" }),
+          ),
+        }
+      }
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 5. uf_finale_push_state — Upstream and divergence info
+// ---------------------------------------------------------------------------
+
+/**
+ * Factory for the uf_finale_push_state tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_push_state tool.
+ */
+export function createUfFinalePushStateTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Check push state: whether an upstream exists, and if so, how " +
@@ -232,6 +408,13 @@ export function createUfFinalePushStateTool(exec: GitExec, cwd: string) {
           // No upstream tracking configured.
         }
 
+        // Ahead/behind counts versus the tracking upstream. Count
+        // failures — exec throws and unparseable output alike —
+        // route through a retryable failure envelope, mirroring
+        // the sibling uf_finale_base_state BASE_SYNC_COUNT fix:
+        // diverged decides the step-5 push gate's divergence
+        // warning and MUST NOT silently read as false through
+        // swallowed zero counts.
         let aheadBy = 0
         let behindBy = 0
         let diverged = false
@@ -239,15 +422,20 @@ export function createUfFinalePushStateTool(exec: GitExec, cwd: string) {
         if (upstreamExists) {
           try {
             const ahead = exec(["rev-list", "@{u}..HEAD", "--count"], cwd)
-            aheadBy = parseInt(ahead, 10) || 0
-          } catch {
-            // Count failure.
-          }
-          try {
+            aheadBy = parseRevCount(ahead)
             const behind = exec(["rev-list", "HEAD..@{u}", "--count"], cwd)
-            behindBy = parseInt(behind, 10) || 0
-          } catch {
-            // Count failure.
+            behindBy = parseRevCount(behind)
+          } catch (countErr: unknown) {
+            const msg =
+              countErr instanceof Error ? countErr.message : String(countErr)
+            return {
+              output: JSON.stringify(
+                failure(`Could not count commits versus @{u}: ${msg}`, {
+                  retryable: true,
+                  code: "PUSH_SYNC_COUNT",
+                }),
+              ),
+            }
           }
           diverged = aheadBy > 0 && behindBy > 0
         }
@@ -268,11 +456,20 @@ export function createUfFinalePushStateTool(exec: GitExec, cwd: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. uf_finale_pr_context — PR metadata, fork info, templates, issue link
+// 6. uf_finale_pr_context — PR metadata, fork info, templates, issue link
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_pr_context tool. */
-export function createUfFinalePrContextTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_pr_context tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_pr_context tool.
+ */
+export function createUfFinalePrContextTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Gather PR context: existing PR, fork status, PR template sections, " +
@@ -476,11 +673,20 @@ export function createUfFinalePrContextTool(exec: GitExec, cwd: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. uf_finale_create_pr — Create a PR with secure temp file lifecycle
+// 7. uf_finale_create_pr — Create a PR with secure temp file lifecycle
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_create_pr tool. */
-export function createUfFinaleCreatePrTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_create_pr tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_create_pr tool.
+ */
+export function createUfFinaleCreatePrTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Create a GitHub pull request. Uses a secure temp file for the PR " +
@@ -599,11 +805,20 @@ export function createUfFinaleCreatePrTool(exec: GitExec, cwd: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 7. uf_finale_ci_poll — Poll CI checks until completion or timeout
+// 8. uf_finale_ci_poll — Poll CI checks until completion or timeout
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_ci_poll tool. */
-export function createUfFinaleCiPollTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_ci_poll tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_ci_poll tool.
+ */
+export function createUfFinaleCiPollTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Poll CI checks for a PR until all complete or timeout. Reports " +
@@ -796,11 +1011,20 @@ export function createUfFinaleCiPollTool(exec: GitExec, cwd: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 8. uf_finale_return_to_main — Checkout main and pull
+// 9. uf_finale_return_to_main — Checkout main and pull
 // ---------------------------------------------------------------------------
 
-/** Factory for the uf_finale_return_to_main tool. */
-export function createUfFinaleReturnToMainTool(exec: GitExec, cwd: string) {
+/**
+ * Factory for the uf_finale_return_to_main tool.
+ *
+ * @param exec - Injectable git executor for command execution.
+ * @param cwd - Working directory for git operations.
+ * @returns The uf_finale_return_to_main tool.
+ */
+export function createUfFinaleReturnToMainTool(
+  exec: GitExec,
+  cwd: string,
+): ReturnType<typeof tool> {
   return tool({
     description:
       "Return to the main branch by checking out main and pulling " +
@@ -836,6 +1060,7 @@ const UfFinalePlugin = {
         uf_finale_startup: createUfFinaleStartupTool(defaultGitExec, cwd),
         uf_finale_stage: createUfFinaleStageTool(defaultGitExec, cwd),
         uf_finale_commit_context: createUfFinaleCommitContextTool(defaultGitExec, cwd),
+        uf_finale_base_state: createUfFinaleBaseStateTool(defaultGitExec, cwd),
         uf_finale_push_state: createUfFinalePushStateTool(defaultGitExec, cwd),
         uf_finale_pr_context: createUfFinalePrContextTool(defaultGitExec, cwd),
         uf_finale_create_pr: createUfFinaleCreatePrTool(defaultGitExec, cwd),

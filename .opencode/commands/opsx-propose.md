@@ -82,6 +82,36 @@ In both branches, never create the root as a side effect: do not run `openspec i
    ```
    This creates a scaffolded change in the planning home resolved by the CLI with `.openspec.yaml`.
 
+4a. **Check for uncommitted changes**
+
+    Before creating or switching branches, run `git status --short`. If there are uncommitted changes (staged, unstaged, or untracked files that appear related to work):
+    - **STOP** and ask the user for confirmation before switching branches. Show what uncommitted changes exist and warn that switching branches with a dirty working tree may cause changes to be applied to the wrong branch.
+    - If the user confirms, proceed. If not, abort.
+    - Exception: if the user explicitly requested a new change, this still requires confirmation -- never silently switch branches with uncommitted work.
+
+4b. **Create and checkout a branch**
+
+    ```bash
+    git checkout -b opsx/<name>
+    ```
+
+    **Guard**: Before creating the branch, check the current branch:
+    - If already on `opsx/<name>` (exact match): skip branch creation, proceed.
+    - If on a different `opsx/*` branch: **STOP** with error: "Already on branch `opsx/<other>` -- finish or archive that change first."
+    - If on `main` or any non-opsx branch: create and checkout `opsx/<name>`.
+
+4c. **Retrieve context from Dewey**
+
+    Before drafting the proposal, query Dewey for relevant context:
+
+    - `dewey_semantic_search` with the change description to find related specs, past proposals, and similar changes
+    - `dewey_semantic_search_filtered` with `source_type: "github"` to find related issues across the organization
+    - `dewey_traverse` on any discovered related specs to understand dependencies
+
+    Use the retrieved context to inform the proposal's scope, identify potential conflicts with existing work, and reference relevant prior decisions.
+
+    If Dewey is unavailable, proceed without cross-repo context -- use direct file reads of local specs and backlog items instead.
+
 5. **Get the artifact build order**
    ```bash
    openspec status --change "<name>" --json
@@ -165,3 +195,15 @@ After completing all artifacts, summarize:
 - Ask about ambiguities that would materially change scope, externally observable behavior, compatibility, or acceptance criteria; for minor details, make reasonable assumptions and record them
 - If a change with that name already exists, ask if user wants to continue it or create a new one
 - Verify each artifact file exists after writing before proceeding to next
+
+## Guardrails
+
+- **NEVER implement code changes** — this command
+  creates artifacts ONLY (proposal, design, specs,
+  tasks)
+- **NEVER commit, push, or create PRs** — those are
+  /uf.finale's responsibility
+- **NEVER run /uf.unleash, /opsx-apply, or /uf.cobalt-crush**
+  — the user decides when to implement
+- After artifacts are complete, STOP and prompt the
+  user to run /uf.unleash, /opsx-apply, or /uf.cobalt-crush

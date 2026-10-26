@@ -116,7 +116,7 @@ export interface ClarifyExitData {
 export interface SpecReviewExitData {
   /** Workflow tier selecting the recovery guidance. */
   readonly tier: UnleashTier
-  /** HIGH/CRITICAL findings, each with context. */
+  /** Unresolved findings (pause choice or iteration cap), each with context. */
   readonly findings: readonly string[]
   /**
    * Optional change name interpolated into the openspec recovery guidance
@@ -355,11 +355,11 @@ function renderClarifyExit(data: ClarifyExitData): string {
   })
 }
 
-/** Render the spec-review exit: HIGH/CRITICAL findings plus tier guidance. */
+/** Render the spec-review exit: unresolved findings plus tier guidance. */
 function renderSpecReviewExit(data: SpecReviewExitData): string {
   return assemblePausedExit({
     step: "spec review",
-    reason: "HIGH/CRITICAL findings in spec artifacts",
+    reason: "Unresolved spec review findings (pause or iteration cap)",
     body: `### Findings\n\n${bulletList(data.findings)}`,
     whatToDoNext: specReviewRecoveryGuidance(data.tier, data.change_name),
     resume: "Run `/uf.unleash` to continue from spec review.",

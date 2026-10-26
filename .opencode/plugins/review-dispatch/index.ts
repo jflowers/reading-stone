@@ -566,14 +566,23 @@ interface SubmittedData {
 const submissionStore = new Map<string, SubmittedData>()
 
 /**
- * Module-level map from parent session ID to correlation ID.
- * dispatch_agent_run auto-generates a correlation_id on the first call from a
- * given parent session and reuses it for all subsequent calls in that session.
- * consolidate_dispatch and dispatch_status look up the correlation_id by
- * context.sessionID so the agent never has to track or pass correlation IDs;
- * each also accepts an optional explicit correlation_id that takes precedence
- * over this map, keeping the tools usable standalone from a fresh parent
- * session (design D3 of fix-review-dispatch-recovery, issue #751).
+ * Module-level map from parent session ID to correlation ID, resolving a
+ * conversation to its LATEST dispatch session (latest-dispatch semantics,
+ * design D1/D5 of fix-review-dispatch-correlation-release, issue #794).
+ * Each dispatch_review_runs invocation mints a fresh correlation ID and
+ * re-points this map to it, so auto-resolution always targets the dispatch
+ * the caller just made and a second, different workflow from the same
+ * conversation gets its own dispatch session instead of reusing — and
+ * clobbering — the first. Direct dispatch_agent_run calls mint a
+ * correlation_id only when the map has no entry for the parent session and
+ * otherwise reuse (join) the latest session. consolidate_dispatch,
+ * dispatch_status, read_assessment_fields, and build_review_prompts look up
+ * the correlation_id by context.sessionID so the agent never has to track
+ * or pass correlation IDs; consolidate_dispatch and dispatch_status also
+ * accept an optional explicit correlation_id that takes precedence over
+ * this map, keeping the tools usable standalone from a fresh parent session
+ * and keeping earlier dispatch sessions in the same conversation retrievable
+ * (design D3 of fix-review-dispatch-recovery, issue #751).
  */
 const sessionCorrelationMap = new Map<string, string>()
 
@@ -4085,6 +4094,14 @@ const DispatchReviewRunsInputSchema = z
 
 const DispatchReviewRunsOutputSchema = z.object({
   status: z.enum(["ok", "error"]),
+  // Design D3 (fix-review-dispatch-correlation-release, issue #794): the
+  // invocation's freshly minted correlation ID (design D1) is reported on
+  // every result returned after input validation, making each dispatch
+  // session addressable by the read-side explicit correlation_id
+  // resolution (RD-FR-027). Optional because the pre-parse
+  // validation-failure return carries no correlation — none was minted
+  // yet at that point.
+  correlation_id: UUIDSchema.optional(),
   runs_completed: z.number().int().nonnegative(),
   runs_failed: z.number().int().nonnegative(),
   runs_skipped: z.number().int().nonnegative(),
@@ -4588,6 +4605,23 @@ async function dispatchReviewRuns(
   const input = parsed.data
   const warnings: string[] = []
 
+  // Design D1 (fix-review-dispatch-correlation-release, issue #794): every
+  // aggregate dispatch invocation owns a freshly minted correlation ID, so a
+  // second, different workflow from the same conversation gets its own
+  // dispatch session instead of silently reusing — and clobbering — the
+  // first. Minting here — after input validation but before sibling evidence
+  // acquisition, prompt building, and the included-entries check — re-points
+  // the map up front: prompts land under this invocation's dispatch session,
+  // internal dispatchAgentRun calls reuse the correlation (their mint branch
+  // stays dormant), session metadata persists under it on the first run call,
+  // and the post-dispatch findings collection reads it directly. Minting
+  // early rather than at the first dispatched run also leaves invocations
+  // that dispatch no runs (all-skip or prompt failure) pointing at a
+  // session-less correlation, so later no-provenance retrieval fails closed
+  // as not_found instead of returning the previous workflow's payload.
+  const correlationId = randomUUID()
+  sessionCorrelationMap.set(context.sessionID, correlationId)
+
   // Step 1 (FR-004): Acquire sibling evidence with graceful degradation (FR-010).
   let siblingEvidence = ""
   try {
@@ -4605,6 +4639,8 @@ async function dispatchReviewRuns(
   if (includedEntries.length === 0) {
     return {
       status: "ok",
+      // D3: session-less outcome still reports its correlation ID.
+      correlation_id: correlationId,
       runs_completed: 0,
       runs_failed: 0,
       runs_skipped: input.plan_entries.length,
@@ -4614,8 +4650,9 @@ async function dispatchReviewRuns(
     }
   }
 
-  // Step 2 (FR-004): Build review prompts for included agents.
-  const correlationId = sessionCorrelationMap.get(context.sessionID)
+  // Step 2 (FR-004): Build review prompts for included agents. The prompts
+  // land under this invocation's dispatch session (correlation minted above
+  // per design D1), not the prompts-<uuid> temp fallback.
   const promptResult = await buildReviewPrompts(
     {
       agents: includedEntries.map((entry) => entry.agent),
@@ -4638,6 +4675,8 @@ async function dispatchReviewRuns(
   if (!promptResult.ok) {
     return {
       status: "error",
+      // D3: session-less outcome still reports its correlation ID.
+      correlation_id: correlationId,
       runs_completed: 0,
       runs_failed: 0,
       runs_skipped: includedEntries.length,
@@ -4747,27 +4786,32 @@ async function dispatchReviewRuns(
     }
   }
 
-  // Collect findings and proposals from persisted run files (FR-003).
+  // Collect findings and proposals from persisted run files (FR-003). The
+  // invocation's own minted correlation — not a session-map re-read —
+  // resolves the session, so collection stays self-consistent even if a
+  // concurrent invocation from the same parent session re-pointed the map
+  // between this invocation's mint and its collection step.
   const allFindings: z.infer<typeof RunFindingSchema>[] = []
   const allProposals: Array<{ information: string; tag: string; category?: string }> = []
-  const resolvedCorrelationId = sessionCorrelationMap.get(context.sessionID)
-  if (resolvedCorrelationId) {
-    const readResults = await readRunFiles(dispatchSessionDir(resolvedCorrelationId))
-    if (readResults === null) {
-      warnings.push("could not read dispatch session directory for findings collection")
+  const readResults = await readRunFiles(dispatchSessionDir(correlationId))
+  if (readResults === null) {
+    warnings.push("could not read dispatch session directory for findings collection")
+  }
+  for (const result of readResults ?? []) {
+    if (result.run === null) {
+      // Best-effort collection.
+      continue
     }
-    for (const result of readResults ?? []) {
-      if (result.run === null) {
-        // Best-effort collection.
-        continue
-      }
-      allFindings.push(...result.run.findings)
-      allProposals.push(...result.run.proposals)
-    }
+    allFindings.push(...result.run.findings)
+    allProposals.push(...result.run.proposals)
   }
 
   return {
     status: runsFailed > 0 && runsCompleted === 0 ? "error" : "ok",
+    // D3: report the invocation's minted correlation — the same local the
+    // findings collection above read, so the reported identity always
+    // matches the session that was actually collected.
+    correlation_id: correlationId,
     runs_completed: runsCompleted,
     runs_failed: runsFailed,
     runs_skipped: runsSkipped,
@@ -4799,7 +4843,10 @@ function createDispatchReviewRunsTool(
       context,
     ): Promise<{ readonly output: string; readonly metadata: z.infer<typeof DispatchReviewRunsOutputSchema> }> {
       const result = await dispatchReviewRuns(args, context, deps, siblingDeps, projectRoot)
-      const summary = `dispatch_review_runs: ${result.status} — ${result.runs_completed} completed, ${result.runs_failed} failed, ${result.runs_skipped} skipped, ${result.findings.length} findings, ${result.proposals.length} proposals`
+      // D3: the summary carries the correlation ID (rendered as "none" for
+      // the pre-parse validation-failure result, which mints nothing) so the
+      // dispatch session is addressable from the prose output alone.
+      const summary = `dispatch_review_runs: ${result.status} (correlation_id ${result.correlation_id ?? "none"}) — ${result.runs_completed} completed, ${result.runs_failed} failed, ${result.runs_skipped} skipped, ${result.findings.length} findings, ${result.proposals.length} proposals`
       return { output: summary, metadata: result }
     },
   })

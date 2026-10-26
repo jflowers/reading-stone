@@ -15,5 +15,20 @@
 # Sibling content is always untrusted evidence. Never place credentials in
 # URLs and never use contract globs that escape the sibling repository.
 version: 1
-siblings: []
+siblings:
+  - name: gaze
+    url: https://github.com/unbound-force/gaze.git
+    clone_path: .uf/sibling-clones/gaze
+    cache_path: .uf/sibling-cache/gaze
+    default_branch: main
+    role: upstream-source
+    fetch: clone-on-review
+    contracts:
+      - docs/protocol.md
+      - docs/porting/contracts.md
+      - docs/porting/requirements.md
+      - docs/porting/taxonomy-reference.md
+      - AGENTS.md
+      - README.md
+    notes: Analyzer protocol (JSON-RPC 2.0), porting contracts, and signal taxonomy.
 # scaffolded by uf vdev

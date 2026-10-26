@@ -1163,64 +1163,114 @@ step, determine which artifacts to review:
    Calculate `REQUEST CHANGES`, `APPROVE WITH ADVISORIES`, `APPROVE`,
    `INCONCLUSIVE`, or `UNAVAILABLE` through the shared protocol.
 
-   If there are no findings or advisories, skip the auto-fix gate and
-   proceed to the final report. Otherwise apply the mandatory gate below.
+   If the verdict is APPROVE or APPROVE WITH ADVISORIES, or
+   there are no findings, skip the decision gate and proceed
+   to the final report. Otherwise apply the mandatory gate
+   below.
 
 >>> MANDATORY GATE: HUMAN CONFIRMATION REQUIRED <<<
 
 **Session-resume guard**: If this session was resumed
 from compressed context, or if you cannot verify that
-the human explicitly confirmed the auto-fix plan in
+a finding's resolution was recorded in durable
+checkpoint data or explicitly chosen by the human in
 the current uncompressed conversation history, you
-MUST re-present the findings summary below and obtain
-fresh confirmation via the **question tool** before
-applying fixes. Do NOT rely on confirmation recorded
-in compressed context. When in doubt, re-confirm —
-false re-confirmation is harmless; editing spec files
+MUST re-present that unresolved finding with a fresh
+question tool invocation. Decisions captured before a
+context compression or session resume are NOT valid.
+When in doubt, re-present — false re-confirmation is
+harmless; editing spec files or waiving findings
 without consent is a violation.
 
-Present the auto-fix plan to the user:
+Present the findings to the user one at a time, in
+severity order (CRITICAL, HIGH, MEDIUM, LOW). For each
+finding:
 
-> **Spec Auto-Fix Plan:**
->
-> LOW findings to auto-fix: N
-> MEDIUM findings to auto-fix: N
-> HIGH/CRITICAL findings (report only): N
->
-> Files to be modified:
-> - <file1>: <finding summary>
-> - <file2>: <finding summary>
->
-> Auto-fixes will address formatting, terminology,
-> cross-references, and metadata issues. HIGH/CRITICAL
-> findings will be reported without modification.
+1. Print the finding as plain session text **above**
+   the question tool (visibility directive — the
+   printed text and the question tool MUST present the
+   same details and options):
+   - Severity, file, and location
+   - Description and root cause, with surrounding
+     context
+   - Per-option reasoning: what each choice does and
+     when it fits this finding
+   - A recommendation with its justification (advisory
+     only — the human decides)
+2. Present the **question tool** below the printed text
+   with the same options, the recommended option FIRST
+   and labeled "(Recommended)".
 
-Use the **question tool** with options
-`["Apply auto-fixes",
-"Review findings first",
-"Skip auto-fixes -- report only"]`.
+The per-finding options are exactly
+`["Apply suggested fix",
+"Override & continue",
+"Show more context",
+"Pause & exit"]`
+— plus `"Apply all remaining LOW/MEDIUM fixes"` as an
+additional option ONLY when the current finding is LOW
+or MEDIUM.
 
-- **"Apply auto-fixes"**: Proceed to apply LOW/MEDIUM
-  fixes per the hybrid fix policy below.
-- **"Review findings first"**: Display each finding
-  with full context before proceeding.
-- **"Skip auto-fixes -- report only"**: Skip all
-  auto-fixes and report all findings as-is.
+- **"Apply suggested fix"**: Apply the fix for this
+  finding now. Available for EVERY severity: a
+  human-directed fix is a consented edit, not an
+  autonomous auto-fix. Derive the suggested fix per
+  the hybrid fix policy below; for HIGH/CRITICAL
+  findings the printed recommendation MUST explain the
+  proposed fix and its trade-offs.
+- **"Override & continue"**: Waive the finding. Obtain
+  and record a justification, then carry the override
+  (severity, description, justification) into
+  checkpoint data and the final report as an advisory.
+  An override without a recorded justification is
+  invalid.
+- **"Show more context"**: Print the full finding
+  context (surrounding spec text, the reviewers that
+  reported it, related findings), then re-present the
+  same options. No spec edit occurs.
+- **"Pause & exit"**: Stop the review, making no
+  further spec edits. The `/uf.unleash` embedding exits
+  through the tool-rendered `spec-review` exit path
+  (`format_unleash_exit`); a standalone
+  `/uf.review-council` run stops and reports the
+  unresolved findings.
+- **"Apply all remaining LOW/MEDIUM fixes"** (bulk
+  shortcut, LOW/MEDIUM findings only): Apply the
+  remaining LOW/MEDIUM findings' fixes per the hybrid
+  fix policy in one consented action, mark them
+  resolved, and continue at the next unresolved finding.
+  This option MUST NOT modify any HIGH/CRITICAL finding.
 
-**CRITICAL RULE**: NEVER apply auto-fixes to spec
-files without explicit human confirmation via the
-**question tool**.
+Repeat for each finding until every finding is fixed,
+overridden, or the human pauses. While any HIGH or
+CRITICAL finding is unresolved, the command MUST NOT
+edit any spec file, proceed past this gate, or exit
+the loop except through a human question-tool choice.
+
+**CRITICAL RULE**: NEVER edit spec files or waive
+findings without explicit per-finding human
+confirmation via the **question tool**. The pipeline
+MUST NOT proceed past a HIGH/CRITICAL finding without
+an explicit per-finding human choice.
 
 >>> END MANDATORY GATE <<<
 
-3. When findings exist and the human confirms fixes, apply the
-   **hybrid fix policy**:
+**Checkpoint**: Call `checkpoint` with `command:
+"uf.review-council"`, `step: "spec-review-fix-loop"`, and
+`data: {"iteration": N, "overrides": [...]}` after each
+human decision (per-finding choice, override, or bulk
+shortcut). The overrides array carries every override
+recorded across iterations (severity, description,
+justification).
+
+3. Suggested fixes follow the **hybrid fix policy**:
 
    Severity levels are defined in the shared severity convention pack at
-   `.opencode/uf/packs/severity.md`. The existing auto-fix boundary
-   remains LOW/MEDIUM auto-fix and HIGH/CRITICAL report only.
+   `.opencode/uf/packs/severity.md`. The autonomous auto-fix boundary
+   remains LOW/MEDIUM only. HIGH/CRITICAL fixes are applied only
+   through an explicit per-finding "Apply suggested fix" choice — a
+   human-directed consented edit, not an autonomous auto-fix.
 
-   **Auto-fix (LOW and MEDIUM findings)** — Apply these fixes directly to the spec files:
+   **Suggested fixes (LOW and MEDIUM findings)** — trivial fixes the command applies after consent, individually or via the bulk shortcut:
    - Formatting and template compliance issues
    - Status field updates (e.g., "Draft" on a completed feature)
    - Terminology inconsistencies (same concept named differently across specs)
@@ -1228,7 +1278,7 @@ files without explicit human confirmation via the
    - Coverage gaps with obvious fixes (e.g., a requirement with zero tasks when the task is clearly implied by the plan)
    - Stale or incorrect metadata (dates, branch names, prerequisite lists)
 
-   **Report only (HIGH and CRITICAL findings)** — Do NOT attempt to fix these. Report them with full context and recommendations so the user can make an informed decision:
+   **Judgment-call findings (HIGH and CRITICAL)** — never fixed autonomously; resolved only through the per-finding gate. Present them with full context, a suggested fix where one exists, and a recommendation so the user can make an informed decision:
    - Missing user stories or acceptance criteria
    - Scope creep or under-specification
    - Design-level security gaps or unaddressed failure modes
@@ -1236,11 +1286,17 @@ files without explicit human confirmation via the
    - Constitution violations
    - Ambiguous requirements that require human judgment to resolve
 
-4. After confirmed LOW/MEDIUM fixes, re-resolve immutable input context,
+4. After applied fixes (per-finding choices or the bulk shortcut),
+   re-resolve immutable input context,
    recompute and validate the full plan, and rerun every included plan
    run, not only prior blockers. Do not rerun absent, content-only, or
    skipped personas. Reuse the one sibling-evidence acquisition. Keep
-   the iteration counter. Repeat until `APPROVE`, `APPROVE WITH
+   the iteration counter. Findings matching a recorded override
+   (same file and root cause) carry forward as resolved and are not
+   re-presented unless materially new information emerges; the
+   checkpoint overrides array carries all overrides recorded across
+   iterations. The per-finding gate re-presents on each
+   REQUEST CHANGES re-run. Repeat until `APPROVE`, `APPROVE WITH
    ADVISORIES`, a no-success result, or more than three iterations.
 
 5. If 3 iterations are exceeded, ask the user whether to continue or stop.
@@ -1250,8 +1306,16 @@ files without explicit human confirmation via the
    - **Discovery summary**: discovered review/content personas, included
      runs, exclusions/skips with reasons, errors, and absent roles
    - What was found in each iteration
-   - What was auto-fixed (LOW/MEDIUM)
-   - Outstanding HIGH/CRITICAL findings that require human decision, with full context and recommendations
+   - What was fixed, per finding and via the bulk shortcut
+     (with severities)
+   - Every override: severity, description, and the recorded
+     justification
+   - When the loop completes via overrides alone (no fixes
+     applied), the final report and pipeline summary record
+     the outcome as REQUEST CHANGES resolved by recorded overrides,
+     listing each override (severity, description,
+     justification)
+   - Outstanding unresolved findings (pause or iteration limit), with full context and recommendations
    - The Architect's Alignment Score for spec quality (if provided)
    - If there were persistent circular findings, report those with additional detail
    - Suggested next steps (e.g., "Run `/speckit.clarify` on spec 007 to resolve the ambiguous credential migration behavior")
@@ -1271,7 +1335,8 @@ Failures are informational when another run succeeds.
 Availability-only no-success returns **UNAVAILABLE**. Policy, plan,
 budget, limit, persistence, calculation, or mixed no-success returns
 **INCONCLUSIVE**. Both block automated progression. Spec Review Mode
-retains its confirmed LOW/MEDIUM auto-fix path, HIGH/CRITICAL report-only
-boundary, advisory result, and three-iteration limit.
+retains its per-finding consent gate (human-directed fixes at any
+severity; autonomous auto-fixes LOW/MEDIUM only), advisory result,
+and three-iteration limit.
 
 </protect>
