@@ -1,5 +1,6 @@
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { discover, InvalidRootPathError } from "./discovery.js";
 import {
   errorResponse,
   INTERNAL_ERROR,
@@ -156,6 +157,46 @@ export class Server {
     dispatch.set("shutdown", () => {
       this.shuttingDown = true;
       return shutdownResult();
+    });
+    // `discover` (FR-009, FR-019): params must be an object carrying exactly
+    // one string `root_path`; the validation order and message strings are
+    // pinned by contracts/discover.md's error table and must not drift.
+    dispatch.set("discover", async (params) => {
+      if (params === null || Array.isArray(params) || typeof params !== "object") {
+        throw new RpcError(INVALID_PARAMS, "Invalid params: params must be an object");
+      }
+      const record = params as Record<string, unknown>;
+      const rootPath = record.root_path;
+      if (typeof rootPath !== "string") {
+        throw new RpcError(
+          INVALID_PARAMS,
+          "Invalid params: root_path must be a string",
+        );
+      }
+      const keys = Object.keys(record);
+      if (keys.length !== 1 || keys[0] !== "root_path") {
+        throw new RpcError(
+          INVALID_PARAMS,
+          "Invalid params: params must contain only root_path",
+        );
+      }
+      try {
+        return await discover(rootPath);
+      } catch (error) {
+        // Every root failure (nonexistent, non-directory, inaccessible) maps
+        // to one shared -32602 message (FR-010). The path is the error's
+        // cwd-resolved rootPath — not the realpath form — so the echoed path
+        // is a deterministic function of the request (InvalidRootPathError).
+        if (error instanceof InvalidRootPathError) {
+          throw new RpcError(
+            INVALID_PARAMS,
+            `Invalid params: root_path is not a directory: ${error.rootPath}`,
+          );
+        }
+        // Anything else is an analyzer bug, not a client error: rethrow so
+        // handleLine's catch maps it to -32603 with a stderr stack trace.
+        throw error;
+      }
     });
     return dispatch;
   }
