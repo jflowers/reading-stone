@@ -17,15 +17,15 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * response lists.
  *
  * The walker decides only what is visited and what is collected.
- * `classifyFiles` layers classification on top (`.d.ts` exclusion,
- * test-vs-source) and lexicographically sorts the two final lists;
- * generated-marker exclusion (US4) joins the precedence chain in a later
- * task. `detectFramework` (US4, FR-006) reports the test framework from
+ * `discover` (T024) sequences the per-candidate precedence chain — safety
+ * skip, `.d.ts` exclusion, generated-marker exclusion — over the walk
+ * results and hands the survivors to `classifyFiles`, which applies
+ * test-vs-source classification and lexicographically sorts the two final
+ * lists. `detectFramework` (US4, FR-006) reports the test framework from
  * configuration presence at the resolved root, reading `package.json`
  * through the shared safe reader, and `hasGeneratedMarker` (US4, FR-007)
- * scans a file's leading comment trivia for generated-code markers over
- * a bounded prefix read; the US4 wiring task sequences both into
- * `discover`. All four surfaces are exported and composable; `discover`
+ * is the exported single-boolean view of the leading-comment scan the
+ * chain runs. All four surfaces are exported and composable; `discover`
  * below runs them behind root-path validation (FR-010) and assembles the
  * wire-shaped result (FR-001).
  */
@@ -137,10 +137,12 @@ async function* walkDirectory(
  * as root-relative POSIX-separator paths in deterministic walk order.
  *
  * The caller (`discover`, T009) validates and realpath-resolves `root`
- * before walking; this function assumes `root` is an existing, accessible
- * directory. A `readdir` failure on a subdirectory propagates to the
- * caller: silently skipping an unreadable subtree would silently omit its
- * files — a silent false negative the constitution forbids (Principle II).
+ * before walking, and `resolveRoot`'s root-level readability probe (T024)
+ * has already proven the root readable by the time the walk starts; this
+ * function assumes an existing, accessible directory. A `readdir` failure
+ * on a subdirectory propagates to the caller: silently skipping an
+ * unreadable subtree would silently omit its files — a silent false
+ * negative the constitution forbids (Principle II).
  *
  * @param root Absolute path of an existing directory to walk.
  * @returns Walk candidates in deterministic depth-first order. The list is
@@ -278,8 +280,11 @@ export interface FileClassification {
  * from both lists first (silent documented policy, no diagnostic); then
  * any test signal — name or directory — classifies the file into
  * `testFiles`, because test wins over source; every other candidate is a
- * source file. Generated-marker exclusion (US4) will join the chain
- * between `.d.ts` and the test signals in a later task.
+ * source file. The chain's async stages — safety skip and
+ * generated-marker exclusion (FR-007) — run earlier, in `discover`'s
+ * screen (`screenCandidates`); a candidate arriving here from `discover`
+ * has already passed them, and the `.d.ts` check below is kept so direct
+ * callers of this composable surface get the same policy.
  *
  * Determinism (FR-008 / research R8): both lists are sorted with the
  * default `Array.prototype.sort()` comparator — UTF-16 code-unit
@@ -493,10 +498,10 @@ async function packageJsonHasJestKey(
  * while a root with no `package.json` is silent — absence is not a skip
  * condition.
  *
- * Not yet sequenced into `discover()`: the wiring task (T024) replaces
- * the US1 `"unknown"` placeholder with a call to this function, passing
- * the server's stderr sink. Exported now so that wiring — and the
- * module's public surface — is directly testable.
+ * Sequenced into `discover()` (T024): the call replaced the US1
+ * `"unknown"` placeholder, and the caller's stderr sink flows through —
+ * the server handler forwards the server's own `stderr` — so a skipped
+ * `package.json` diagnostic reaches the process stderr, never stdout.
  *
  * @param resolvedRoot Realpath-resolved absolute analysis root, the form
  * `resolveRoot` returns; every probe and read is relative to it.
@@ -690,6 +695,52 @@ function leadingCommentBlockHasMarker(content: string): boolean {
 }
 
 /**
+ * The verdict of one candidate's leading-comment scan (T024): the
+ * safety-skip fact and the marker verdict as separate fields.
+ *
+ * `hasGeneratedMarker`'s public contract collapses both into one boolean
+ * (`false` on either), which is correct for the scanner's own semantics
+ * but loses the fact `discover`'s precedence chain needs: a skipped file
+ * is excluded from both lists — readBounded's diagnostic is already
+ * written — while an unmarked file continues toward classification. This
+ * internal shape keeps the two apart so the chain can act on each
+ * precisely: one canonical scan, two honest views.
+ */
+interface MarkerScan {
+  /** `true` when readBounded skipped the file (diagnostic already written). */
+  readonly skipped: boolean;
+  /** `true` when the leading comment block carries a generated marker. */
+  readonly marked: boolean;
+}
+
+/**
+ * Runs the bounded leading-comment scan for one walk candidate (T024):
+ * `readBounded`'s guarded 64 KiB prefix read, then the marker scan over
+ * the decoded prefix — one read per candidate, shared by the exported
+ * `hasGeneratedMarker` and `discover`'s precedence chain.
+ *
+ * @param resolvedRoot Realpath-resolved absolute analysis root; the read
+ * is contained within it (FR-018).
+ * @param relPath Walk-built root-relative POSIX path, echoed verbatim in
+ * `readBounded`'s diagnostics.
+ * @param stderr Injected diagnostic sink; stdout is never touched.
+ * @returns The skip fact and the marker verdict as separate fields.
+ */
+async function scanLeadingComments(
+  resolvedRoot: string,
+  relPath: string,
+  stderr: Writable,
+): Promise<MarkerScan> {
+  const prefix = await readBounded(resolvedRoot, relPath, MARKER_PREFIX_BUDGET, stderr);
+  if (prefix === null) {
+    // readBounded's skip path has already written the one diagnostic
+    // line; the caller excludes the file from both lists on this fact.
+    return { skipped: true, marked: false };
+  }
+  return { skipped: false, marked: leadingCommentBlockHasMarker(prefix) };
+}
+
+/**
  * Reports whether a walked file's leading comment block carries a
  * generated-code marker (FR-007; research R6) — the signal that
  * excludes the file from both discover lists.
@@ -710,10 +761,12 @@ function leadingCommentBlockHasMarker(content: string): boolean {
  * diagnostic, because nothing is wrong with the file; it is generated
  * code, out of scope by policy.
  *
- * Not yet sequenced into `discover()`: the wiring task (T024) applies
- * marker exclusion in the classification precedence chain. Exported
- * now, like `detectFramework`, so the wiring — and the scanner's own
- * surface — is directly testable.
+ * Sequenced into `discover()` (T024): the precedence chain runs this
+ * same scan through the shared internal `scanLeadingComments`, which
+ * keeps the safety-skip fact distinguishable from the marker verdict.
+ * The exported boolean view preserves T023's single-`false` contract: a
+ * safety-skipped file reads as not marked, sound in the chain because
+ * the skip itself — not the verdict — excludes the file from both lists.
  *
  * @param resolvedRoot Realpath-resolved absolute analysis root; the read
  * is contained within it (FR-018).
@@ -731,14 +784,72 @@ export async function hasGeneratedMarker(
   relPath: string,
   stderr: Writable,
 ): Promise<boolean> {
-  const prefix = await readBounded(resolvedRoot, relPath, MARKER_PREFIX_BUDGET, stderr);
-  if (prefix === null) {
-    // readBounded's skip path has already written the one diagnostic
-    // line, and the skip itself excludes the file from the lists, so
-    // "not marked" keeps the precedence chain intact.
-    return false;
+  const { marked } = await scanLeadingComments(resolvedRoot, relPath, stderr);
+  return marked;
+}
+
+/**
+ * Applies the per-candidate precedence chain's excluding stages to the
+ * walk results (T024; FR-004, FR-007, FR-017; research R13) and returns
+ * the candidates that survive into path-only classification.
+ *
+ * The chain, in the spec's order — safety skip → `.d.ts` → generated
+ * marker — with test-vs-source classification (in `classifyFiles`) as
+ * the final stages:
+ *
+ * 1. **Safety skip** (FR-017): every walked candidate flows through
+ *    `readBounded`'s guarded 64 KiB prefix read first — the scan's own
+ *    read, so each file is read exactly once. A `null` return (FIFO,
+ *    oversized, unreadable, decode error, symlink) excludes the file
+ *    from both lists; readBounded has already written the one
+ *    `reading-stone: skipping <relPath>: <reason>` line. This is why
+ *    the read precedes even the `.d.ts` name check: the safety reader —
+ *    not the name — decides whether a candidate named like a source
+ *    file is readable (a FIFO named `types.d.ts` is diagnosed, not
+ *    silently dropped).
+ * 2. **`.d.ts` exclusion** (FR-004): silent documented policy.
+ * 3. **Generated-marker exclusion** (FR-007): silent documented policy —
+ *    a marked file is generated code, out of scope by policy, and the
+ *    exclusion wins over test classification (spec edge case).
+ *
+ * Candidates are screened in deterministic walk order, so the skip
+ * diagnostics land in walk order too (research R8).
+ *
+ * @param resolvedRoot Realpath-resolved absolute analysis root.
+ * @param candidates Walk candidates (`walkTree`'s output), in walk order.
+ * @param stderr Injected diagnostic sink; stdout is never touched.
+ * @returns The candidates that survive all three excluding stages, in
+ * walk order, for `classifyFiles` to split into test and source lists.
+ */
+async function screenCandidates(
+  resolvedRoot: string,
+  candidates: readonly string[],
+  stderr: Writable,
+): Promise<string[]> {
+  const surviving: string[] = [];
+  for (const relPath of candidates) {
+    // Stage 1 — safety skip: the guarded prefix read runs for every
+    // candidate; a null return has already written its one diagnostic.
+    const { skipped, marked } = await scanLeadingComments(
+      resolvedRoot,
+      relPath,
+      stderr,
+    );
+    if (skipped) {
+      continue;
+    }
+    // Stage 2 — `.d.ts` exclusion: silent documented policy (FR-004).
+    if (isDeclarationFileName(basenameOf(relPath))) {
+      continue;
+    }
+    // Stage 3 — generated-marker exclusion: silent documented policy
+    // (FR-007); wins over the test signals classifyFiles applies later.
+    if (marked) {
+      continue;
+    }
+    surviving.push(relPath);
   }
-  return leadingCommentBlockHasMarker(prefix);
+  return surviving;
 }
 
 /**
@@ -780,6 +891,23 @@ export class InvalidRootPathError extends Error {
 }
 
 /**
+ * Reports whether a filesystem error is a permission failure (`EACCES` or
+ * `EPERM`) — the codes whose meaning on the resolved root itself is "this
+ * root cannot be read" and therefore belongs to root validation (FR-010),
+ * not to the fail-loud mid-walk surface.
+ *
+ * @param error A caught fs error from a root-level probe.
+ * @returns `true` when the error's code is `EACCES` or `EPERM`.
+ */
+function isPermissionDenied(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EACCES" || code === "EPERM";
+}
+
+/**
  * Validates and resolves the discovery root (FR-010, FR-018; research
  * R5) in a fixed, security-relevant order:
  *
@@ -793,6 +921,13 @@ export class InvalidRootPathError extends Error {
  *    fails here.
  * 3. `stat` the real path and require a directory — a file used as the
  *    root rejects.
+ * 4. `readdir` the real root once as a readability probe — `realpath`
+ *    and `stat` both succeed on an unreadable (mode 000) directory, so
+ *    only this probe surfaces a root-level `EACCES`/`EPERM` as an
+ *    `InvalidRootPathError` (T024, the T005-flagged src fix) rather than
+ *    letting the walk's root `readdir` fail as an unexpected internal
+ *    error; every other probe failure rethrows, and mid-walk
+ *    subdirectory `readdir` failures stay fail-loud (Principle II).
  *
  * Containment downstream (FR-018) is enforced against the returned
  * resolved root: the walker only ever joins root-relative segments onto
@@ -821,6 +956,22 @@ async function resolveRoot(rootPath: string): Promise<string> {
     // A file (or any non-directory entry) used as the root rejects. The
     // error carries the cwd-resolved path — see InvalidRootPathError.
     throw new InvalidRootPathError(resolved);
+  }
+  // Step 4 — root readability probe (T024, the T005-flagged src fix):
+  // a chmod-000 root passes realpath and stat — only readdir surfaces
+  // the EACCES — so without this probe the walk's root readdir failure
+  // would escape as an internal error (-32603) instead of the contract's
+  // invalid-params surface (-32602). The listing is discarded — walkTree
+  // re-reads the root — because the probe's job is the permission
+  // verdict, kept here where the cwd-resolved path is in scope for
+  // InvalidRootPathError.
+  try {
+    await readdir(realRoot);
+  } catch (cause) {
+    if (isPermissionDenied(cause)) {
+      throw new InvalidRootPathError(resolved, { cause });
+    }
+    throw cause;
   }
   return realRoot;
 }
@@ -855,41 +1006,50 @@ export interface DiscoveryResult {
 }
 
 /**
- * Discovers a project's source and test files (FR-001, FR-010; research
- * R5) — the implementation behind the `discover` JSON-RPC method.
+ * Discovers a project's source and test files (FR-001, FR-006, FR-007,
+ * FR-010; research R5) — the implementation behind the `discover`
+ * JSON-RPC method.
  *
  * Composes the exported building blocks: `resolveRoot` validates and
- * realpath-resolves the root, `walkTree` collects the walk candidates
- * in deterministic order, and `classifyFiles` splits them into the
- * disjoint, sorted lists. The returned object is already the
+ * realpath-resolves the root, `walkTree` collects the walk candidates in
+ * deterministic order, `screenCandidates` applies the per-candidate
+ * precedence chain's excluding stages (safety skip → `.d.ts` → generated
+ * marker), `classifyFiles` splits the survivors into the disjoint,
+ * sorted lists, and `detectFramework` reports the test framework from
+ * configuration presence at the root. The returned object is already the
  * wire-shaped result, so the server handler returns it as the JSON-RPC
  * result unchanged (byte-level determinism is the protocol layer's
  * serializer).
+ *
+ * Diagnostics (FR-017) flow to the injected stderr sink — the server
+ * handler forwards the server's own `stderr`, so a skip line reaches the
+ * process stderr, never stdout; direct callers that omit the sink get
+ * `process.stderr`.
  *
  * @param rootPath Absolute or relative project root; a relative path
  * resolves against the analyzer process working directory (spec
  * Assumption 8), and a symlinked root is realpath-resolved exactly once
  * at the boundary (FR-018 / research R5).
+ * @param stderr Diagnostic sink for safe-reader skip lines
+ * (Testability principle); defaults to `process.stderr`.
  * @returns The discovery result: sorted, root-relative POSIX
  * `source_files` and `test_files`, and the detected test `framework`.
  * @throws InvalidRootPathError when the root does not exist, is not a
  * directory, or cannot be accessed (FR-010); the server handler maps it
  * to the contract's `-32602` response.
  */
-export async function discover(rootPath: string): Promise<DiscoveryResult> {
+export async function discover(
+  rootPath: string,
+  stderr: Writable = process.stderr,
+): Promise<DiscoveryResult> {
   const realRoot = await resolveRoot(rootPath);
   const candidates = await walkTree(realRoot);
-  const { sourceFiles, testFiles } = classifyFiles(candidates);
+  const surviving = await screenCandidates(realRoot, candidates, stderr);
+  const { sourceFiles, testFiles } = classifyFiles(surviving);
+  const framework = await detectFramework(realRoot, stderr);
   return {
     source_files: sourceFiles,
     test_files: testFiles,
-    // Incremental placeholder (FR-006 lands in US4, T022-T024):
-    // spec.md's US4 priority rationale frames framework detection as a
-    // refinement of US1's raw enumeration — "valuable for downstream
-    // interpretation but not required for the core discovery value" —
-    // so US1 ships the contract's neutral sentinel (spec Assumption 1)
-    // and US4's wiring task replaces this literal with
-    // detectFramework(resolvedRoot).
-    framework: "unknown",
+    framework,
   };
 }
