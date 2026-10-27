@@ -11,7 +11,7 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 |--------|--------|
 | `initialize` | Implemented |
 | `shutdown` | Implemented |
-| `discover` | Not implemented (`-32601`) |
+| `discover` | Implemented (params `{root_path}`; result `{source_files, test_files, framework}`) |
 | `analyze` | Not implemented (`-32601`) |
 | `analyze/stream` | Not implemented (`-32601`) |
 | `complexity` | Not implemented (`-32601`) |
@@ -21,7 +21,8 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 | `doc_coverage` | Not implemented (`-32601`) |
 | `cognitive_complexity` | Not implemented (`-32601`) |
 
-All capability flags are advertised as `false` at handshake. TypeScript side-effect
+`discover` is implemented and advertised via `capabilities.discover: true`; the
+remaining capability flags are `false` at handshake. TypeScript side-effect
 detection is the roadmap; see `openspec/changes/`.
 
 ## Installation
@@ -57,10 +58,14 @@ analyzers:
 ```text
 reading-stone/
 ├── src/
-│   ├── index.ts          # Package surface (VERSION export)
+│   ├── index.ts          # Package surface (VERSION + taxonomy/model re-exports)
 │   ├── main.ts           # Entry point (reading-stone --stdio)
 │   ├── server.ts         # JSON-RPC server (stdin/stdout)
-│   └── protocol.ts       # Request/response types
+│   ├── protocol.ts       # Request/response types
+│   ├── taxonomy.ts       # Side-effect taxonomy (48 types, tiers, aliases)
+│   ├── models.ts         # Effect/FunctionRecord/classification records, serializers, derivePackage
+│   ├── safeio.ts         # Bounded safe file reader with skip diagnostics
+│   └── discovery.ts      # Project walking, file classification, framework detection, discover()
 ├── tests/
 ├── openspec/
 ├── package.json

@@ -93,7 +93,11 @@ reading-stone/
 │   ├── index.ts             # Package entry point (VERSION)
 │   ├── main.ts              # Entry point (reading-stone --stdio)
 │   ├── server.ts            # JSON-RPC server (stdin/stdout)
-│   └── protocol.ts          # Request/response types
+│   ├── protocol.ts          # Request/response types
+│   ├── taxonomy.ts          # Side-effect taxonomy (48 types, tiers, aliases)
+│   ├── models.ts            # Effect/FunctionRecord/classification records, serializers, derivePackage
+│   ├── safeio.ts            # Bounded safe file reader with skip diagnostics
+│   └── discovery.ts         # Project walking, file classification, framework detection, discover()
 ├── tests/
 ├── .github/workflows/       # CI: biome, tsc, vitest gates
 ├── openspec/                # OpenSpec changes and specs
