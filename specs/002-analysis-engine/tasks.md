@@ -28,7 +28,7 @@ Single project: `src/` and `tests/` at the repository root (per plan.md Project 
 
 **Purpose**: Confirm the baseline is green and land the runtime dependency promotion before any analysis code exists.
 
-- [ ] T001 Verify the baseline before any change: from the repository root run `npm ci`, `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage`, and confirm all four protected gates pass (CI parity gate, AGENTS.md / .github/workflows/ci.yml — never lower a gate to make it pass)
+- [x] T001 Verify the baseline before any change: from the repository root run `npm ci`, `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage`, and confirm all four protected gates pass (CI parity gate, AGENTS.md / .github/workflows/ci.yml — never lower a gate to make it pass)
 - [ ] T002 [P] Promote `typescript` from `devDependencies` to `dependencies` in package.json (FR-029): same range `^7.0.2`, no version change — the runtime promotion of an existing dependency (Principle III: `ts.createSourceFile`, `ts.Program`, and `ts.TypeChecker` are required at runtime when Gaze spawns the analyzer; no new supply-chain surface, same package already in the lockfile). Run `npm install` to refresh package-lock.json's dev flags, then re-run `npm ci` and `npm run build` to prove lockfile integrity and the strict build still pass
 
 **Checkpoint**: Clean baseline confirmed; `typescript` is a runtime dependency with an intact lockfile.
