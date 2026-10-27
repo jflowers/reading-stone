@@ -32,6 +32,8 @@ function request(id: number | string | null, method: string, params?: unknown): 
 
 interface DriveResult {
   responses: Record<string, unknown>[];
+  /** Raw non-empty stdout lines (pre-parse) for byte-level assertions. */
+  rawLines: string[];
   stderr: string;
 }
 
@@ -48,12 +50,14 @@ async function drive(
     dispatch,
   );
   await server.run();
-  const responses = out
+  // The raw lines are kept pre-parse so byte-level determinism assertions
+  // compare exactly what the server wrote (SC-006).
+  const rawLines = out
     .text()
     .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { responses, stderr: err.text() };
+    .filter((line) => line.length > 0);
+  const responses = rawLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  return { responses, rawLines, stderr: err.text() };
 }
 
 function errorBody(response: Record<string, unknown>): {
@@ -64,6 +68,10 @@ function errorBody(response: Record<string, unknown>): {
 }
 
 const INIT = request(1, "initialize", { root_path: "/abs/project" });
+
+// chmod-based inaccessibility is meaningless for root, where mode bits do
+// not restrict the owner (the same guard tests/discovery.test.ts uses).
+const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 describe("server: initialize", () => {
   it("round-trips a valid initialize request", async () => {
@@ -268,6 +276,215 @@ describe("server: discover", () => {
   });
 });
 
+describe("server: analyze", () => {
+  const activeFixtures: FixtureTree[] = [];
+  const lockedDirectories: string[] = [];
+
+  // Creates a fixture tree registered for afterEach cleanup; returns the
+  // tree's root path to use as the analyze request's root_path.
+  async function fixtureTree(files: Readonly<Record<string, string>>): Promise<string> {
+    const tree = await createFixtureTree(files);
+    activeFixtures.push(tree);
+    return tree.root;
+  }
+
+  afterEach(async () => {
+    // Recursive cleanup cannot descend into a chmod-000 directory, so every
+    // locked directory is unlocked before its fixture tree is removed.
+    for (const directory of lockedDirectories.splice(0)) {
+      await chmod(directory, 0o755);
+    }
+    await Promise.all(activeFixtures.splice(0).map((tree) => tree.cleanup()));
+  });
+
+  // The canned tree (FR-020) pins the record wire shape without depending
+  // on effect wording: research R6.6 makes description strings
+  // implementation-defined (pinned by golden tests, not the contract), so
+  // both fixture functions are pure by construction — `alpha`'s single
+  // bare `return;` never matches ReturnValue (FR-011) and `beta`'s empty
+  // body has no constructs to match — leaving `side_effects: []` (SC-002)
+  // as the exact, spec-guaranteed prediction. Records order by
+  // (file, line, name) per FR-020.
+  const analyzedTree: Readonly<Record<string, string>> = {
+    "src/alpha.ts": "export function alpha(): void {\n  return;\n}\n",
+    "src/beta.ts": "export function beta(): void {}\n",
+  };
+  const expectedRecords = [
+    {
+      name: "alpha",
+      package: "src.alpha",
+      file: "src/alpha.ts",
+      line: 1,
+      side_effects: [],
+    },
+    {
+      name: "beta",
+      package: "src.beta",
+      file: "src/beta.ts",
+      line: 1,
+      side_effects: [],
+    },
+  ];
+
+  it("round-trips a valid analyze request", async () => {
+    const root = await fixtureTree(analyzedTree);
+    const { responses, stderr } = await drive([
+      request(20, "analyze", { root_path: root }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(20);
+    expect(responses[0]?.result).toEqual({ functions: expectedRecords });
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["absent params", undefined],
+    ["null params", null],
+    ["array params", []],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(21, "analyze", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must be an object",
+    );
+    expect(responses[0]?.id).toBe(21);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["missing root_path", {}],
+    ["non-string root_path", { root_path: 42 }],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(22, "analyze", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: root_path must be a string",
+    );
+    expect(responses[0]?.id).toBe(22);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["non-array patterns", { root_path: "/abs/project", patterns: "src/**/*.ts" }],
+    ["number patterns", { root_path: "/abs/project", patterns: 42 }],
+    [
+      "patterns array with a non-string element",
+      { root_path: "/abs/project", patterns: ["src", 7] },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(23, "analyze", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: patterns must be an array of strings",
+    );
+    expect(responses[0]?.id).toBe(23);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["an extra key beside root_path", { root_path: "/abs/project", extra: true }],
+    [
+      "an extra key beside root_path and patterns",
+      { root_path: "/abs/project", patterns: ["src/**"], extra: true },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(24, "analyze", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must contain only root_path and patterns",
+    );
+    expect(responses[0]?.id).toBe(24);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a nonexistent root_path with -32602", async () => {
+    const root = await fixtureTree({});
+    const missing = join(root, "does-not-exist");
+    const { responses, stderr } = await drive([
+      request(25, "analyze", { root_path: missing }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${missing}`,
+    );
+    expect(responses[0]?.id).toBe(25);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a non-directory root_path with -32602", async () => {
+    const root = await fixtureTree({ "not-a-dir.ts": "export {};\n" });
+    const file = join(root, "not-a-dir.ts");
+    const { responses, stderr } = await drive([
+      request(26, "analyze", { root_path: file }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${file}`,
+    );
+    expect(responses[0]?.id).toBe(26);
+    expect(stderr).toBe("");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "rejects an inaccessible root_path with -32602",
+    async () => {
+      const root = await fixtureTree({
+        "locked/nested/a.ts": "export const a = 1;\n",
+      });
+      const locked = join(root, "locked");
+      const nested = join(locked, "nested");
+      await chmod(locked, 0o000);
+      lockedDirectories.push(locked);
+      const { responses, stderr } = await drive([
+        request(27, "analyze", { root_path: nested }),
+      ]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+      expect(errorBody(responses[0] ?? {}).message).toBe(
+        `Invalid params: root_path is not a directory: ${nested}`,
+      );
+      expect(responses[0]?.id).toBe(27);
+      expect(stderr).toBe("");
+    },
+  );
+
+  it("answers a repeated request with byte-identical response lines", async () => {
+    const root = await fixtureTree(analyzedTree);
+    const line = request(28, "analyze", { root_path: root });
+    const { responses, rawLines, stderr } = await drive([line, line]);
+    expect(responses).toHaveLength(2);
+    expect(rawLines).toHaveLength(2);
+    expect(rawLines[0]).toBe(rawLines[1]);
+    expect(responses[0]?.id).toBe(28);
+    expect(responses[0]?.result).toEqual({ functions: expectedRecords });
+    expect(stderr).toBe("");
+  });
+
+  // FR-028: `analyze` is a core method, not gated by a capability flag, so
+  // the initialize handshake must stay exactly as it was when the analyze
+  // handler registers. The initialize tests above compare against
+  // `initializeResult()` (tautologically green if the function drifts);
+  // tests/protocol.test.ts pins the unit output — this literal pin makes a
+  // capability flip visible through the server wire too.
+  it("leaves the initialize capability response unchanged", async () => {
+    const { responses } = await drive([INIT]);
+    expect(responses[0]?.result).toEqual({
+      analyzer_name: "reading-stone",
+      language: "typescript",
+      language_version: process.versions.node,
+      protocol_version: "1.2.0",
+      capabilities: {
+        discover: true,
+        test_mapping: false,
+        classify_signals: false,
+        streaming: false,
+        doc_coverage: false,
+        cognitive_complexity: false,
+      },
+    });
+  });
+});
+
 describe("server: request validation", () => {
   it("answers malformed JSON with -32700 and stays alive", async () => {
     const { responses } = await drive([
@@ -344,8 +561,10 @@ describe("server: dispatch", () => {
 
   // `discover` is implemented (see "server: discover" above), so it is no
   // longer part of the reserved-but-unimplemented surface (SC-007).
+  // `analyze` is pinned by the "server: analyze" block above — those cases
+  // stay red until the handler registers (T019) — so it is dropped here
+  // rather than double-pinned as reserved once it lands (FR-028).
   it.each([
-    "analyze",
     "complexity",
     "coverage",
     "test_mapping",
