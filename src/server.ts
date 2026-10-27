@@ -181,7 +181,10 @@ export class Server {
         );
       }
       try {
-        return await discover(rootPath);
+        // The server's stderr is forwarded (T024) so discover's
+        // safe-reader skip diagnostics reach the process stderr — never
+        // stdout, which is reserved for JSON-RPC responses (FR-017).
+        return await discover(rootPath, this.stderr);
       } catch (error) {
         // Every root failure (nonexistent, non-directory, inaccessible) maps
         // to one shared -32602 message (FR-010). The path is the error's
