@@ -821,7 +821,7 @@ export async function hasGeneratedMarker(
  * @returns The candidates that survive all three excluding stages, in
  * walk order, for `classifyFiles` to split into test and source lists.
  */
-async function screenCandidates(
+export async function screenCandidates(
   resolvedRoot: string,
   candidates: readonly string[],
   stderr: Writable,
@@ -939,7 +939,7 @@ function isPermissionDenied(error: unknown): boolean {
  * @throws InvalidRootPathError when the root does not exist, is not a
  * directory, or cannot be accessed.
  */
-async function resolveRoot(rootPath: string): Promise<string> {
+export async function resolveRoot(rootPath: string): Promise<string> {
   const resolved = resolve(rootPath);
   let realRoot: string;
   let rootStat: Stats;
