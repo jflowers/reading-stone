@@ -1,13 +1,26 @@
+import type { Writable } from "node:stream";
+import { classifyFiles, resolveRoot, screenCandidates, walkTree } from "./discovery.js";
+import { type ExtractionRecord, extractFunctions } from "./extract.js";
+import {
+  buildProgramContext,
+  type PreReadSource,
+  type ProgramContext,
+} from "./program.js";
+import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
+
 /**
- * Pattern rules for analysis scoping (FR-001; research R11; data-model.md
- * PatternSet).
+ * Pattern rules and the shared analysis pipeline (FR-001, FR-002; research
+ * R11, R12; data-model.md PatternSet and the ProgramContext →
+ * ExtractionRecord pipeline order).
  *
- * Pure functions only — no filesystem, no walk (tasks.md T012). The two
- * surfaces here are shared by every pattern-filtered method: the analyze
- * and complexity scope filter (T014's `prepareAnalysis`) and coverage
- * entry filtering (FR-024), so "the same path-prefix rules" is structural.
- * `prepareAnalysis` (T014) extends this module with the shared pipeline;
- * these rules stay pure and deterministic (Constitution Principle I).
+ * The pattern rules (T012) are pure — no filesystem, no walk — and shared
+ * by every pattern-filtered method: the analyze and complexity scope filter
+ * below, and coverage entry filtering (FR-024), so "the same path-prefix
+ * rules" is structural. `prepareAnalysis` (T014) composes the exported
+ * discovery, bootstrap, and extraction stages into the one pipeline both
+ * analysis handlers consume, so FR-022's same-extraction-set, scope, and
+ * ordering guarantee is structural — there is no second extraction path
+ * to drift.
  */
 
 /**
@@ -104,4 +117,135 @@ export function pathInScope(relPath: string, patternSet: PatternSet): boolean {
   return patternSet.some(
     (prefix) => relPath === prefix || relPath.startsWith(`${prefix}/`),
   );
+}
+
+/**
+ * The `prepareAnalysis` result (data-model.md's internal pipeline order:
+ * `ProgramContext` → `ExtractionRecord`) — the two surfaces the analyze
+ * and complexity computations run over (FR-022: the identical extraction
+ * set, scope, and ordering both methods report).
+ */
+export interface PreparedAnalysis {
+  /**
+   * The bootstrapped analysis context (FR-003/FR-004). A program-mode
+   * context owns a live native compiler server; the consumer that drops
+   * it disposes it — the analysis handlers own that lifetime, exactly as
+   * direct pipeline callers must. A parse-only context owns nothing to
+   * dispose.
+   */
+  readonly context: ProgramContext;
+
+  /**
+   * The extracted function-likes, sorted by `(relPath, line, name)`
+   * (FR-008) — the record set the detector (FR-009 attribution) and the
+   * complexity engine (FR-021) both consume.
+   */
+  readonly records: readonly ExtractionRecord[];
+}
+
+/**
+ * Prepares the shared analysis over a project tree (FR-002; research R12):
+ * resolve, walk, screen, classify, exclude, filter, bootstrap, extract —
+ * the one pipeline the analyze and complexity handlers both consume, so
+ * FR-022's same-extraction-set/scope/ordering guarantee is structural.
+ *
+ * Composition, in order:
+ *
+ * 1. `resolveRoot` validates and realpath-resolves the root (FR-010) —
+ *    the same validation `discover` runs; an invalid root throws
+ *    `InvalidRootPathError` here, for the server to map to `-32602`
+ *    (no layering inversion).
+ * 2. `walkTree` → `screenCandidates` → `classifyFiles`: the same
+ *    walk/screen/classify chain `discover()` composes, minus framework
+ *    detection — deterministic walk order, the safety-skip → `.d.ts` →
+ *    generated-marker exclusion chain, then the test/source partition.
+ * 3. Test files are additionally excluded from analysis (FR-002): only
+ *    the classification's source arm proceeds. Generated files never
+ *    reach this point (`screenCandidates` already dropped them), so test
+ *    files and generated files are never analyzed. The exclusion precedes
+ *    the pattern filter and is absolute: a pattern naming a test file
+ *    still yields no records (FR-001 narrows within the analyzable set).
+ * 4. The FR-001 pattern filter — `normalizePatterns` then `pathInScope`
+ *    over classifyFiles' sorted list — keeps the in-scope subset; a set
+ *    matching nothing yields an empty analysis, never an error.
+ * 5. Each in-scope file is pre-read through the async `readBounded` at
+ *    the full 16 MiB budget (a JSON-free whole-file read),
+ *    `buildProgramContext` bootstraps the program or parse-only context
+ *    over exactly those files (FR-003/FR-004; a `null` read excludes its
+ *    file after `readBounded`'s own one-diagnostic skip), and
+ *    `extractFunctions` walks the context's sources into the sorted
+ *    record list (FR-007/FR-008).
+ *
+ * Diagnostics flow to the injected stderr; stdout is never touched (it is
+ * reserved for JSON-RPC responses). The returned context's lifetime is
+ * the consumer's — the analysis handlers dispose a program-mode context
+ * when finished with it.
+ *
+ * @param rootPath Absolute or relative project root; a relative path
+ * resolves against the analyzer process working directory, and a symlinked
+ * root is realpath-resolved exactly once at the boundary (FR-018).
+ * @param patterns The raw `patterns` parameter value. The server validates
+ * its shape (`-32602`, T019) before analysis runs; this surface only
+ * normalizes.
+ * @param stderr Injected diagnostic sink (Testability principle); defaults
+ * to `process.stderr`.
+ * @returns The bootstrapped `ProgramContext` and the extraction records.
+ * @throws InvalidRootPathError when the root does not exist, is not a
+ * directory, or cannot be accessed; the server handler maps it to the
+ * contract's `-32602` response.
+ */
+export async function prepareAnalysis(
+  rootPath: string,
+  patterns: unknown,
+  stderr: Writable = process.stderr,
+): Promise<PreparedAnalysis> {
+  const realRoot = await resolveRoot(rootPath);
+  const candidates = await walkTree(realRoot);
+  const surviving = await screenCandidates(realRoot, candidates, stderr);
+  // FR-002: test files are additionally excluded from analysis. Only the
+  // classification's source arm proceeds — classifyFiles owns the
+  // test/source partition, so taking the one arm is the whole exclusion,
+  // with no second copy of the test signals to drift. Generated files
+  // were already screened out above; test files and generated files are
+  // never analyzed.
+  const { sourceFiles } = classifyFiles(surviving);
+  // FR-001 narrows within the analyzable set, after the structural
+  // exclusion: the same normalize-then-test pair every pattern-filtered
+  // method applies, over the sorted source list (deterministic order).
+  const patternSet = normalizePatterns(patterns);
+  const inScope = sourceFiles.filter((relPath) => pathInScope(relPath, patternSet));
+  const preRead = await preReadSources(realRoot, inScope, stderr);
+  const context = buildProgramContext(realRoot, preRead, stderr);
+  const records = extractFunctions(realRoot, context, stderr);
+  return { context, records };
+}
+
+/**
+ * Pre-reads the in-scope files for the bootstrap (research R12): each file
+ * through the async `readBounded` at the full 16 MiB budget — a JSON-free
+ * whole-file read, the form `buildProgramContext`'s pre-read pairs expect.
+ * A skipped read resolves `null` after `readBounded`'s own one-diagnostic
+ * skip; the `null` text is passed through for the bootstrap to exclude the
+ * file silently (never a second diagnostic for one skip). Reads are
+ * sequential, so per-file skip diagnostics land in the sorted list's order
+ * (research R8's deterministic-diagnostic discipline).
+ *
+ * @param realRoot Realpath-resolved absolute analysis root; every read is
+ * contained within it (FR-018).
+ * @param inScope The pattern-filtered, test-excluded source files, in
+ * classifyFiles' sorted order.
+ * @param stderr Injected diagnostic sink; stdout is never touched.
+ * @returns One `(relPath, text)` pair per in-scope file, in order.
+ */
+async function preReadSources(
+  realRoot: string,
+  inScope: readonly string[],
+  stderr: Writable,
+): Promise<PreReadSource[]> {
+  const preRead: PreReadSource[] = [];
+  for (const relPath of inScope) {
+    const text = await readBounded(realRoot, relPath, MAX_FILE_BYTES, stderr);
+    preRead.push([relPath, text]);
+  }
+  return preRead;
 }
