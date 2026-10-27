@@ -1,4 +1,4 @@
-import type { Stats } from "node:fs";
+import { closeSync, lstatSync, openSync, readSync, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import type { Writable } from "node:stream";
@@ -9,8 +9,10 @@ import { TextDecoder } from "node:util";
  * research R4, R5 — Constitution Principle V).
  *
  * Analyzed trees are untrusted input, so no caller reads files under its own
- * discipline: all reading funnels through `readBounded`, one guarded
- * sequence whose order is load-bearing:
+ * discipline: all reading funnels through `readBounded` — or, for callers
+ * bound to a synchronous contract (the TypeScript `CompilerHost.readFile`
+ * signature), through `readBoundedSync` — one guarded sequence whose order
+ * is load-bearing:
  *
  * 1. **Containment** (FR-018, research R5) runs before any filesystem
  *    access — the candidate is the resolved root joined with the walk-built
@@ -36,6 +38,14 @@ import { TextDecoder } from "node:util";
  * never touched (it is reserved for JSON-RPC responses, FR-017). Reason
  * strings are short and stable, so stderr output is deterministic for the
  * same tree (Constitution Principle I).
+ *
+ * `readBoundedSync` runs the same sequence minus containment: it receives
+ * an absolute path from the caller (the compiler host resolves paths the
+ * analyzer never walked, including the `typescript` package's own lib
+ * files), so root containment stays the caller's decision. Its skips
+ * return `undefined` — the `CompilerHost.readFile` absent-file signal —
+ * after the same one-line diagnostic, with the absolute path echoed
+ * verbatim.
  */
 
 /**
@@ -198,6 +208,124 @@ async function readPrefix(candidate: string, readLength: number): Promise<Buffer
   } finally {
     try {
       await handle.close();
+    } catch {
+      // A close failure after the bytes were read does not invalidate
+      // them; swallowing it keeps this helper's failure surface limited
+      // to the open and the read (both mapped to skips by the caller).
+    }
+  }
+}
+
+/**
+ * The synchronous bounded read for callers bound to a sync contract — the
+ * TypeScript `CompilerHost.readFile` signature (research R1). The guard
+ * sequence is `readBounded`'s minus containment (see the module header):
+ * the caller hands back compiler-resolved absolute paths, so root
+ * containment stays the caller's decision.
+ *
+ * In order: `lstatSync` regular-file check (FIFOs, devices, sockets, and
+ * symlinks skipped before the open — the FIFO DoS defense, research R4),
+ * `MAX_FILE_BYTES` size cap checked before open, bounded synchronous
+ * read, strict UTF-8 decode through the shared module decoder.
+ *
+ * Every skip returns `undefined` after writing exactly one diagnostic
+ * line to `stderr`; `readBoundedSync` never throws for skip conditions.
+ * `undefined` — not `null` — matches the `CompilerHost.readFile`
+ * absent-file signal the caller serves.
+ *
+ * @param absPath Absolute candidate path, echoed verbatim in diagnostics.
+ * @param stderr Injected diagnostic sink (Testability principle — the
+ * compiler host passes the server's own `stderr`); stdout is never touched.
+ * @returns The decoded file content, or `undefined` when the file was
+ * skipped.
+ */
+export function readBoundedSync(absPath: string, stderr: Writable): string | undefined {
+  const skip = (reason: string): undefined => {
+    stderr.write(`reading-stone: skipping ${absPath}: ${reason}\n`);
+    return undefined;
+  };
+
+  // (1) lstatSync — never statSync, so the final symlink is not followed. A
+  // file that vanished (ENOENT), or that cannot be stat'd (EACCES on a
+  // parent directory), is a skip like any other.
+  let stats: Stats;
+  try {
+    stats = lstatSync(absPath);
+  } catch {
+    return skip("unreadable");
+  }
+  if (stats.isSymbolicLink()) {
+    return skip("symlink");
+  }
+  if (!stats.isFile()) {
+    return skip("not a regular file");
+  }
+
+  // (2) Size cap — from the lstat result, before open: an oversized file is
+  // never opened.
+  if (stats.size > MAX_FILE_BYTES) {
+    return skip("exceeds 16 MiB size limit");
+  }
+
+  // (3) Bounded synchronous read. Any filesystem failure here — including
+  // the permission-denied open of a chmod-000 file — is the same skip.
+  let bytes: Buffer;
+  try {
+    bytes = readPrefixSync(absPath, stats.size);
+  } catch {
+    return skip("unreadable");
+  }
+
+  try {
+    return UTF_8_DECODER.decode(bytes);
+  } catch {
+    return skip("decode error");
+  }
+}
+
+/**
+ * Synchronous counterpart of `readPrefix`: opens `candidate` and reads at
+ * most `readLength` bytes from its start into a fresh `Buffer`, closing
+ * the descriptor before returning.
+ *
+ * `fs.readFileSync` is deliberately not used: it accepts no length bound
+ * (its options object silently ignores one), so a file that grew between
+ * the lstat and the read would be read whole — unbounded memory on an
+ * untrusted tree. The explicit `readSync` loop holds the read at the
+ * lstat size, exactly as `readPrefix` does for `readBounded`.
+ *
+ * @param candidate Absolute candidate path already proven a regular file
+ * within the size cap by `readBoundedSync`'s guards.
+ * @param readLength Maximum number of bytes to read; never negative.
+ * @returns The bytes actually read (a view of length at most `readLength`).
+ */
+function readPrefixSync(candidate: string, readLength: number): Buffer {
+  // TOCTOU residual (research R4): the sync sequence has no await points,
+  // so only an external process can swap or shrink the target between the
+  // lstat and this open. The "r"-mode open plus the guarded read below
+  // keep a swap on the error path (the same skip) rather than hanging the
+  // request; the pre-open lstat remains the actual FIFO DoS defense.
+  const descriptor = openSync(candidate, "r");
+  try {
+    const buffer = Buffer.alloc(readLength);
+    let bytesRead = 0;
+    while (bytesRead < readLength) {
+      const chunkBytes = readSync(
+        descriptor,
+        buffer,
+        bytesRead,
+        readLength - bytesRead,
+        bytesRead,
+      );
+      if (chunkBytes === 0) {
+        break; // EOF before readLength: the file shrank since lstat.
+      }
+      bytesRead += chunkBytes;
+    }
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    try {
+      closeSync(descriptor);
     } catch {
       // A close failure after the bytes were read does not invalidate
       // them; swallowing it keeps this helper's failure surface limited
