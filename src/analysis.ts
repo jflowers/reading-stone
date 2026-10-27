@@ -1,6 +1,8 @@
 import type { Writable } from "node:stream";
+import { assembleFunctionRecords, detectEffects } from "./detector.js";
 import { classifyFiles, resolveRoot, screenCandidates, walkTree } from "./discovery.js";
 import { type ExtractionRecord, extractFunctions } from "./extract.js";
+import { serializeFunctionRecord } from "./models.js";
 import {
   buildProgramContext,
   type PreReadSource,
@@ -20,7 +22,10 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * discovery, bootstrap, and extraction stages into the one pipeline both
  * analysis handlers consume, so FR-022's same-extraction-set, scope, and
  * ordering guarantee is structural — there is no second extraction path
- * to drift.
+ * to drift. `analyze` (T018) closes that pipeline over the detector:
+ * detection, FR-020's response assembly, and serialization, with the
+ * program-mode context's lifetime owned by the handler (disposed in a
+ * `finally` — no native compiler server outlives one analysis).
  */
 
 /**
@@ -218,6 +223,51 @@ export async function prepareAnalysis(
   const context = buildProgramContext(realRoot, preRead, stderr);
   const records = extractFunctions(realRoot, context, stderr);
   return { context, records };
+}
+
+/**
+ * The `analyze` method's handler (FR-020; the analyze contract): the
+ * serialized `FunctionRecord[]` payload — detection effects attributed per
+ * record, assembled in the `(file, line, name)` total order, and mapped
+ * through `serializeFunctionRecord` so every entry on the returned array
+ * is already wire-shaped (fixed key order, validated fields — the
+ * protocol layer's sorted-key serializer then only re-orders keys).
+ *
+ * The returned array — not a `{functions: [...]}` wrapper — is the
+ * documented result shape the server wraps into its JSON-RPC success
+ * response (T019); both this entry and the payload are deterministic
+ * pure functions of the analyzed tree (Constitution Principle I:
+ * byte-identical repeat responses).
+ *
+ * The program-mode context's lifetime is this handler's: the native
+ * compiler server behind it is closed in the `finally` whatever the
+ * detection outcome, so no subprocess outlives one analysis. A
+ * parse-only context owns nothing to dispose.
+ *
+ * @param rootPath Absolute or relative project root; validated and
+ * realpath-resolved by `prepareAnalysis` (an invalid root throws
+ * `InvalidRootPathError`, the server maps to `-32602`).
+ * @param patterns The raw `patterns` parameter value; shape-validated by
+ * the server (`-32602`, T019) before analysis runs, normalized here.
+ * @param stderr Injected diagnostic sink (Testability principle); defaults
+ * to `process.stderr`. Stdout is never touched.
+ * @returns The serialized function records, `(file, line, name)`-sorted.
+ */
+export async function analyze(
+  rootPath: string,
+  patterns: unknown,
+  stderr: Writable = process.stderr,
+): Promise<readonly Record<string, unknown>[]> {
+  const prepared = await prepareAnalysis(rootPath, patterns, stderr);
+  try {
+    const effects = detectEffects(prepared.records, prepared.context);
+    const assembled = assembleFunctionRecords(prepared.records, effects);
+    return assembled.map(serializeFunctionRecord);
+  } finally {
+    if (prepared.context.mode === "program") {
+      prepared.context.dispose();
+    }
+  }
 }
 
 /**

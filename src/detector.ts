@@ -60,9 +60,9 @@ import {
   type VariableStatement,
   type YieldExpression,
 } from "typescript/unstable/ast";
-import type { Checker, Type } from "typescript/unstable/sync";
+import { type Checker, type Type, TypeFlags } from "typescript/unstable/sync";
 import type { ExtractionRecord } from "./extract.js";
-import type { Effect } from "./models.js";
+import { derivePackage, type Effect, type FunctionRecord } from "./models.js";
 import type { ProgramContext } from "./program.js";
 import { resolveSideEffectType } from "./taxonomy.js";
 
@@ -131,9 +131,14 @@ import { resolveSideEffectType } from "./taxonomy.js";
  *   R6.4) — the fs write/delete/meta name lists (with `Sync`/promises
  *   variants) on `fs`-spelled, `.promises`-chained, or import-tracked
  *   fs receivers; the database write/transaction name lists on any
- *   receiver; `CallbackInvocation` for invoked function-typed
- *   parameters and parameter properties (the resolved half — FR-017's
- *   ambiguity carrier is T018); `LogWrite` on log/logger-named or
+ *   receiver; `CallbackInvocation` as FR-017's ambiguity carrier —
+ *   `eval(...)` and `new Function(...)` (both modes), computed-member
+ *   calls (`obj[key]()`, both modes), lexically unresolvable receivers
+ *   (parse-only), and, program mode only, `any`/error-typed receivers
+ *   and bare callees resolving to no declaration — each with
+ *   `detail: {"confidence": "ambiguous"}`; resolved callees are never
+ *   re-reported (research R7's zero-false-positive carve-out);
+ *   `LogWrite` on log/logger-named or
  *   Logger-typed receivers; `ContextCancellation` for `.abort()` and
  *   `AbortSignal.throwIfAborted()`; `AsyncGeneratorYield` in async
  *   generators; `MetaprogrammingMutation` for `Reflect.set`/
@@ -542,6 +547,62 @@ export function detectEffects(
 }
 
 /**
+ * FR-020's response assembly: turns the detection result into the
+ * `(file, line, name)`-sorted `FunctionRecord[]` — the analyze method's
+ * record payload (research R8's record-level total order). Extraction
+ * already emits in that order; sorting here makes the order structural
+ * rather than inherited, so the wire guarantee holds whatever order the
+ * records arrive in.
+ *
+ * Each record's `package` is derived through `derivePackage` and its
+ * `side_effects` are the detector's attribution for that record (empty
+ * for records the detection walk left clean — never fabricated).
+ *
+ * @param records The extraction records, any order.
+ * @param effects The detection result — `detectEffects`' per-record map.
+ * @returns The assembled records, sorted by `(file, line, name)`.
+ */
+export function assembleFunctionRecords(
+  records: readonly ExtractionRecord[],
+  effects: ReadonlyMap<ExtractionRecord, readonly Effect[]>,
+): readonly FunctionRecord[] {
+  const assembled = records.map(
+    (record): FunctionRecord => ({
+      name: record.name,
+      package: derivePackage(record.relPath),
+      file: record.relPath,
+      line: record.line,
+      side_effects: effects.get(record) ?? [],
+    }),
+  );
+  assembled.sort(compareFunctionRecords);
+  return assembled;
+}
+
+/**
+ * The `(file, line, name)` record comparison (research R8): codepoint
+ * ordering on the file path and name — the platform-default string
+ * comparison the wire contract's golden tests pin — with numeric line
+ * ordering between them. Total on the assembled record set.
+ *
+ * @param a Left record.
+ * @param b Right record.
+ * @returns The three-key comparison result.
+ */
+function compareFunctionRecords(a: FunctionRecord, b: FunctionRecord): number {
+  if (a.file !== b.file) {
+    return a.file < b.file ? -1 : 1;
+  }
+  if (a.line !== b.line) {
+    return a.line - b.line;
+  }
+  if (a.name !== b.name) {
+    return a.name < b.name ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
  * FR-020's within-record effect order: `(line, column, canonical type
  * name)` with codepoint comparison for the type name and `0` on
  * full-key ties so the platform-default stable sort keeps emission
@@ -565,13 +626,23 @@ function comparePendingEffects(a: PendingEffect, b: PendingEffect): number {
 }
 
 /**
+ * The one detail payload every FR-017 ambiguity effect carries
+ * (`{"confidence": "ambiguous"}`) — shared so the wire shape is
+ * structurally uniform across every ambiguity rule (the wire test pins
+ * the exact object on every `detail`-bearing effect).
+ */
+const AMBIGUOUS_DETAIL: Readonly<Record<string, unknown>> = Object.freeze({
+  confidence: "ambiguous",
+});
+
+/**
  * Constructs one pending effect through the canonical-type resolver
  * (FR-018): `resolveSideEffectType` passes canonical names through, so a
  * miss is a programming error in this module's rules and fails loud
  * (Constitution Principle I) rather than emitting an invalid type.
  * `location` is the construct's root-relative `file:line:col` from the
- * node's no-trivia start (R6.6); `target` is included only when the
- * rule pins one.
+ * node's no-trivia start (R6.6); `target` and `detail` are included only
+ * when the rule pins one (the omit-unset-optionals rule, models.md).
  *
  * @param type The canonical side-effect type name.
  * @param description Deterministic description template.
@@ -579,6 +650,7 @@ function comparePendingEffects(a: PendingEffect, b: PendingEffect): number {
  * @param node The construct node — the location's anchor.
  * @param sourceFile The declaring source, for position math.
  * @param target The R6.6 target, when the rule pins one.
+ * @param detail The opaque detail payload, when the rule pins one.
  * @returns The pending effect, with its numeric sort keys.
  * @throws Error when `type` resolves to no canonical side-effect type.
  */
@@ -589,25 +661,21 @@ function constructEffect(
   node: Node,
   sourceFile: SourceFile,
   target?: string,
+  detail?: Readonly<Record<string, unknown>>,
 ): PendingEffect {
   const canonical = resolveSideEffectType(type);
   if (canonical === undefined) {
     throw new Error(`Invalid side effect type: ${type}`);
   }
   const position = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-  const effect: Effect =
-    target === undefined
-      ? {
-          type: canonical,
-          description,
-          location: `${relPath}:${position.line + 1}:${position.character + 1}`,
-        }
-      : {
-          type: canonical,
-          description,
-          location: `${relPath}:${position.line + 1}:${position.character + 1}`,
-          target,
-        };
+  const location = `${relPath}:${position.line + 1}:${position.character + 1}`;
+  const effect: Effect = {
+    type: canonical,
+    description,
+    location,
+    ...(target === undefined ? {} : { target }),
+    ...(detail === undefined ? {} : { detail }),
+  };
   return {
     effect,
     line: position.line + 1,
@@ -1502,6 +1570,27 @@ class RecordWalker {
   }
 
   /**
+   * Emits one FR-017 ambiguity effect: `CallbackInvocation` carrying
+   * `detail: {"confidence": "ambiguous"}`, the carrier the wire contract
+   * reserves for detection that cannot resolve the invoked function.
+   * The description names the unresolved construct (research R7's
+   * decision text); it is a deterministic template like every other.
+   */
+  private emitAmbiguous(description: string, node: Node): void {
+    this.pending.push(
+      constructEffect(
+        "CallbackInvocation",
+        description,
+        this.record.relPath,
+        node,
+        this.sourceFile,
+        undefined,
+        AMBIGUOUS_DETAIL,
+      ),
+    );
+  }
+
+  /**
    * The dispatch: nested extracted function-likes stop the walk; other
    * function-likes are entered anonymously with their own scope; each
    * pinned construct family emits and continues the descent — constructs
@@ -1684,10 +1773,15 @@ class RecordWalker {
    * callee of the former is the `import` keyword token itself), then
    * the bare-identifier channel/stream globals (`postMessage`, the
    * Worker/window global form; `pipeline`, the node:stream/promises
-   * form), then `CallbackInvocation`'s bare-parameter arm — a parameter
-   * used as the callee, the callback idiom, type-blind in both modes
-   * (the invocation is the function-typed evidence, the array-mutator
-   * precedent). Any other bare callee reports nothing here.
+   * form). The unclaimed callee forms then fall to FR-017's ambiguity
+   * remainder: computed-member calls (`obj[key]()`, a syntactic form
+   * reported in both modes), `eval(...)`, and — program mode only —
+   * bare callees the checker resolves to no declaration (unknown
+   * globals). Everything else reports nothing: research R7's carve-out
+   * treats lexically-bound bare callees (parameters, locally-defined
+   * functions, imported symbols) as resolved, their effects belonging
+   * to their own records, and the parse-only mode boundary leaves
+   * unresolvable bare callees unreported rather than flooding the mode.
    */
   private visitP1Call(node: CallExpression): void {
     if (isSpawnCall(node)) {
@@ -1703,6 +1797,13 @@ class RecordWalker {
       this.visitMethodCall(node, callee);
       return;
     }
+    if (isElementAccessExpression(callee)) {
+      // A syntactic ambiguity form (research R7): no name-form family
+      // can match a computed callee — there is no property name to key
+      // on — so the dynamic dispatch itself is the reportable fact.
+      this.emitAmbiguous("calls through a computed member", node);
+      return;
+    }
     if (isIdentifier(callee)) {
       if (callee.text === "postMessage") {
         this.emit("ChannelSend", "sends a message to a channel", node);
@@ -1716,10 +1817,34 @@ class RecordWalker {
         this.emit("ImportSideEffect", "requires a module", node);
         return;
       }
-      if (this.isParameter(callee.text)) {
-        this.emit("CallbackInvocation", "invokes a function-typed parameter", node);
+      // `eval` is one of R7's always-forms: it resolves to a lib
+      // declaration in program mode, so the syntactic check must
+      // precede the symbol-resolution rule.
+      if (callee.text === "eval") {
+        this.emitAmbiguous("evaluates a string dynamically through eval", node);
+        return;
+      }
+      if (this.isUnresolvedCallee(callee)) {
+        this.emitAmbiguous(`calls the unresolved global ${callee.text}`, node);
       }
     }
+  }
+
+  /**
+   * Whether a bare-identifier callee resolves to no declaration — the
+   * program-mode half of FR-017's type-based ambiguity (unknown
+   * globals; research R7). Parse-only has no symbol resolution, and R7
+   * documents that boundary explicitly: unresolvable bare callees stay
+   * unreported there instead of turning every non-lexical helper call
+   * into noise. A callee the checker resolves — a parameter, a
+   * locally-defined function, an import, a known global — keeps the
+   * zero-false-positive carve-out.
+   */
+  private isUnresolvedCallee(callee: Node): boolean {
+    if (this.checker === undefined) {
+      return false;
+    }
+    return this.checker.getSymbolAtLocation(callee) === undefined;
   }
 
   /**
@@ -1825,16 +1950,54 @@ class RecordWalker {
       this.emit("FinalizerRegistration", "registers a finalizer", node);
       return;
     }
-    // CallbackInvocation's property arm: a property of a parameter used
-    // as the callee (the options-callback idiom) — after every
-    // name-form family, so claimed method names keep their specific
-    // types.
-    if (this.isParamReceiver(receiver)) {
-      this.emit(
-        "CallbackInvocation",
-        "invokes a function-typed property of a parameter",
-        node,
-      );
+    // FR-017's receiver ambiguity — the final remainder, after every
+    // name-form family (a claimed call is never ambiguous; research
+    // R7's precedence carve-out).
+    this.visitReceiverAmbiguity(node, receiver);
+  }
+
+  /**
+   * FR-017's receiver-based ambiguity remainder for property-form calls
+   * (research R7), replacing the earlier parameter-property callback
+   * arm: the pinned tests contract `resolve()` inside a Promise
+   * executor and `parts.join("-")` to zero effects, so resolved
+   * callback invocations are never re-reported — their effects belong
+   * to their own records.
+   *
+   * Parse-only reports the one syntactic form: a receiver the lexical
+   * scope stack cannot resolve. Every lexically-resolvable receiver —
+   * parameter, local, import, module binding — is treated as resolved
+   * (R7's documented parse-only boundary).
+   *
+   * Program mode reports the type-based form instead, which subsumes
+   * the syntactic one: a receiver whose checker type is `any` or the
+   * error type. An undeclared receiver types as error (which carries
+   * the Any flag, exactly as in classic ts), while a checker-resolved
+   * global receiver (`JSON.parse`, declared globals) keeps the
+   * zero-false-positive carve-out.
+   */
+  private visitReceiverAmbiguity(node: CallExpression, receiver: Expression): void {
+    let base = receiver;
+    while (isParenthesizedExpression(base)) {
+      base = base.expression;
+    }
+    if (!isIdentifier(base)) {
+      // Property chains (`this.items.push`), `this`/`super`, and every
+      // non-identifier receiver carry no name-form ambiguity surface.
+      return;
+    }
+    if (this.checker === undefined) {
+      if (this.bindingScopeIndex(base.text) < 0) {
+        this.emitAmbiguous(
+          `calls a method on the unresolvable receiver ${base.text}`,
+          node,
+        );
+      }
+      return;
+    }
+    const type = this.typeAt(base);
+    if (type !== undefined && (type.flags & TypeFlags.Any) !== 0) {
+      this.emitAmbiguous(`calls a method on the any-typed receiver ${base.text}`, node);
     }
   }
 
@@ -2127,10 +2290,9 @@ class RecordWalker {
    * `GoroutineSpawn`; the alias never appears on the wire) — plus the
    * P3/P4 construction rows: `new Date()` (`TimeDependency`), `new
    * FinalizationRegistry(...)` (`FinalizerRegistration`), and `new
-   * WebAssembly.Instance(...)` (`CgoCall`). Every other construction is
-   * inert here (unclaimed constructor calls are T018's ambiguity
-   * surface, never fabricated by these rules); each argument's
-   * constructs descend normally.
+   * WebAssembly.Instance(...)` (`CgoCall`), then FR-017's `new
+   * Function(...)` ambiguity form. Every other construction is inert
+   * here; each argument's constructs descend normally.
    */
   private visitNew(node: NewExpression): void {
     if (isPromiseConstruction(node)) {
@@ -2144,6 +2306,17 @@ class RecordWalker {
       this.emit("FinalizerRegistration", "creates a finalization registry", node);
     } else if (isWebAssemblyInstanceConstruction(node)) {
       this.emit("CgoCall", "constructs a WebAssembly instance", node);
+    } else if (isIdentifier(node.expression) && node.expression.text === "Function") {
+      // FR-017's second always-form: `new Function(...)` builds a
+      // function from a dynamic string — the executed effects cannot
+      // be resolved statically. It resolves to a lib declaration in
+      // program mode, so the match is syntactic, the `eval` precedent.
+      // No other construction is ambiguous: `new Set<string>()` and
+      // kin resolve to declarations and stay clean (the carve-out).
+      this.emitAmbiguous(
+        "constructs a function dynamically through new Function",
+        node,
+      );
     }
     this.walkChildren(node);
   }
