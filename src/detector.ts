@@ -4,6 +4,7 @@ import {
   type CallExpression,
   type ClassDeclaration,
   type ConstructorDeclaration,
+  type ElementAccessExpression,
   type Expression,
   type FunctionDeclaration,
   type FunctionExpression,
@@ -36,26 +37,33 @@ import {
   isThrowStatement,
   isVariableDeclaration,
   isVariableStatement,
+  isYieldExpression,
   type MethodDeclaration,
+  ModifierFlags,
+  type NewExpression,
   type Node,
   type NodeArray,
   type ParameterDeclaration,
+  type PropertyAccessExpression,
   type SetAccessorDeclaration,
   type SourceFile,
   SyntaxKind,
   type ThrowStatement,
+  type YieldExpression,
 } from "typescript/unstable/ast";
+import type { Checker, Type } from "typescript/unstable/sync";
 import type { ExtractionRecord } from "./extract.js";
 import type { Effect } from "./models.js";
+import type { ProgramContext } from "./program.js";
 import { resolveSideEffectType } from "./taxonomy.js";
 
 /**
- * The P0 side-effect detection rules (FR-011 through FR-014; the six
- * strict rows of data-model.md's disposition table; research R6;
- * Constitution Principles I, II, and III). `detectEffects` walks each
- * extraction record's own body and reports exactly the constructs the
- * strict tier pins — zero false negatives and zero false positives on
- * the conformance fixtures:
+ * The P0 and P1 side-effect detection rules (FR-011 through FR-017; the
+ * six strict rows plus the eleven must rows of data-model.md's
+ * disposition table; research R6; Constitution Principles I, II, and
+ * III). `detectEffects` walks each extraction record's own body and
+ * reports exactly the constructs the pinned tiers cover — zero false
+ * negatives and zero false positives on the conformance fixtures:
  *
  * - `ReturnValue` (FR-011) — a `return` statement carrying an
  *   expression, in any function form, plus arrow expression bodies
@@ -77,14 +85,47 @@ import { resolveSideEffectType } from "./taxonomy.js";
  *   `this`: simple, compound, increment/decrement, element, `delete`.
  * - `PointerArgMutation` — dot-property writes on parameters: simple,
  *   compound, increment/decrement, `delete`.
+ * - The identifier-write split (FR-014; research R5) — a write to a
+ *   module-scope binding from inside a function is `GlobalMutation`;
+ *   a write to an enclosing function-scope binding from inside a
+ *   deferred callback is `DeferredReturnMutation` (the mutation
+ *   executes after the declaring function returned); other
+ *   function-scope closure writes are P4 (`ClosureCaptureMutation`)
+ *   and local writes report nothing.
+ * - `GoroutineSpawn` (FR-016) — the five spawn forms (`new
+ *   Promise(...)`, `setTimeout`, `setInterval`, `queueMicrotask`,
+ *   `process.nextTick`), emitted through the `AsyncTaskSpawn` alias
+ *   that the canonical-type resolver maps to `GoroutineSpawn` before
+ *   the effect is constructed (FR-018) — the alias never appears on
+ *   the wire.
+ * - `GeneratorYield` (FR-016) — `yield` and `yield*` in synchronous
+ *   generators. Async generators are P2 (`AsyncGeneratorYield`), never
+ *   fabricated here.
+ * - The param-write split (FR-015) — element writes and the nine
+ *   mutating array methods on array-typed parameters are
+ *   `SliceMutation`; element writes and `Map.set` on other parameters
+ *   are `MapMutation`; `add`/`delete`/`clear` and non-parameter
+ *   `Map.set` are `ContainerMutation`; `p.length = 0` on an
+ *   array-typed parameter is the `SliceMutation` truncation carve-out
+ *   (never `PointerArgMutation`); every other dot-property write on a
+ *   parameter stays `PointerArgMutation`. The typed arms use the
+ *   checker in program mode; parse-only takes the documented
+ *   type-blind defaults.
+ * - The receiver name-forms (FR-015; research R6.4) —
+ *   `HTTPResponseWrite` on `res`/`response` receivers, `ChannelSend`
+ *   on `postMessage`, `ChannelClose` on port/channel/worker receivers,
+ *   `StreamOutput` on `pipe`, and `WriterOutput` on other writer-like
+ *   receivers — closed method-name lists, receiver-specific families
+ *   first.
  *
  * Every effect is constructed through `resolveSideEffectType` (FR-018 —
  * canonical names only; the resolver passes canonical spellings through
  * and this module fails loud on anything else) and carries no
  * `classification` (FR-019 — the field is omitted entirely). `target`
  * follows research R6.6: the written path as written (`this.x`, `p.x`),
- * the base identifier for element writes (`this` for `this[k] = v`), the
- * constructor name for `throw new X(...)`, and omitted otherwise;
+ * the base identifier for element writes (`this` for `this[k] = v`, the
+ * parameter for `p[k] = v`), the binding name for identifier writes,
+ * the constructor name for `throw new X(...)`, and omitted otherwise;
  * `location` is always the construct's root-relative `file:line:col`
  * with 1-based line and column.
  *
@@ -99,14 +140,21 @@ import { resolveSideEffectType } from "./taxonomy.js";
  * chain function frame corresponds 1:1 to a lexically enclosing
  * function-like node, whose `parameters` recover that frame's parameter
  * names (the chain itself carries names only, not their kinds).
+ * Deferred-callback boundaries (research R6.5) track the scheduling
+ * callbacks a record's walk is inside — seeded for `deferred` records
+ * from the record's own ancestors, grown as the walk enters scheduling
+ * callback arguments — mirroring the `deferred` flag `extract.ts`
+ * computes, so deferral attribution consumes exactly the callbacks the
+ * extractor flags.
  *
- * Extension surface (T016/T017): the walk is a per-record visitor whose
- * `visit` dispatch enumerates construct families; later tiers add rules
- * to the same dispatch and take the `ProgramContext` for the
- * checker-dependent splits then. P0 is purely lexical (research R5) —
- * identical in both context modes. The detector deliberately adds no
- * second AST depth budget: extraction's budget already excluded any
- * file whose AST could exhaust the native stack (records exist only for
+ * Extension surface (T017): the walk is a per-record visitor whose
+ * `visit` dispatch enumerates construct families; the P2/P3/P4 tiers
+ * add rules to the same dispatch. P0 is purely lexical (research R5);
+ * P1's typed splits take the `ProgramContext` — the checker is live
+ * only in program mode, and parse-only takes each split's documented
+ * type-blind default. The detector deliberately adds no second AST
+ * depth budget: extraction's budget already excluded any file whose
+ * AST could exhaust the native stack (records exist only for
  * in-budget files), and this walk revisits exactly those materialized
  * subtrees.
  */
@@ -150,8 +198,112 @@ const BUILTIN_ERROR_CONSTRUCTORS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Detects the P0 side effects of every extraction record (FR-011
- * through FR-014; research R6).
+ * The bare timer globals shared by FR-016's spawn forms and research
+ * R6.5's deferred-callback set: matched as whole callee identifiers,
+ * receiver-blind. Together with the property-form scheduling methods
+ * and `process.nextTick`, these are the closed scheduling set — the
+ * exact set `extract.ts` mirrors for its `deferred` flag.
+ */
+const TIMER_GLOBAL_NAMES: ReadonlySet<string> = new Set([
+  "setTimeout",
+  "setInterval",
+  "queueMicrotask",
+]);
+
+/**
+ * The property-form scheduling methods (research R6.5): promise
+ * continuations and DOM-style event registration, matched on the method
+ * name alone. These set the deferred-callback boundary but are NOT
+ * spawn forms — FR-016's closed spawn list has five members only.
+ */
+const DEFERRED_CALLBACK_METHODS: ReadonlySet<string> = new Set([
+  "then",
+  "catch",
+  "finally",
+  "addEventListener",
+]);
+
+/**
+ * The nine mutating array methods of the param-write split (FR-015):
+ * calls of these names on parameter receivers are `SliceMutation`,
+ * type-blind in BOTH modes — the disposition table's documented
+ * name-form surface (a `push` on a declared array parameter is a
+ * caller-visible slice mutation regardless of what the checker says).
+ */
+const ARRAY_MUTATOR_METHODS: ReadonlySet<string> = new Set([
+  "push",
+  "pop",
+  "shift",
+  "unshift",
+  "splice",
+  "sort",
+  "reverse",
+  "fill",
+  "copyWithin",
+]);
+
+/**
+ * The membership mutators (FR-015): calls of these names fire
+ * `ContainerMutation` on any receiver — `set` is deliberately absent;
+ * it follows the parameter Map/WeakMap split instead.
+ */
+const MEMBERSHIP_MUTATOR_METHODS: ReadonlySet<string> = new Set([
+  "add",
+  "delete",
+  "clear",
+]);
+
+/** `WriterOutput`'s name-form methods (the disposition table). */
+const WRITER_OUTPUT_METHODS: ReadonlySet<string> = new Set([
+  "write",
+  "writeLine",
+  "append",
+]);
+
+/**
+ * `HTTPResponseWrite`'s name-form methods — checked before
+ * `WriterOutput`'s families so `res.write(...)` is HTTP, never a
+ * generic writer (research R6.4's precedence).
+ */
+const HTTP_RESPONSE_METHODS: ReadonlySet<string> = new Set([
+  "send",
+  "json",
+  "jsonp",
+  "writeHead",
+  "write",
+  "end",
+]);
+
+/** `HTTPResponseWrite`'s name-form receiver spellings. */
+const HTTP_RESPONSE_RECEIVER_NAMES: ReadonlySet<string> = new Set(["res", "response"]);
+
+/**
+ * `HTTPResponseWrite`'s checker-mode receiver type names (Node's
+ * `ServerResponse`; the fetch/express-style `Response`).
+ */
+const HTTP_RESPONSE_TYPE_NAMES: ReadonlySet<string> = new Set([
+  "ServerResponse",
+  "Response",
+]);
+
+/** `ChannelClose`'s name-form receiver spellings (the MessagePort family). */
+const CHANNEL_CLOSE_RECEIVER_NAMES: ReadonlySet<string> = new Set([
+  "port",
+  "channel",
+  "worker",
+]);
+
+/** `ChannelClose`'s checker-mode receiver type names. */
+const CHANNEL_CLOSE_TYPE_NAMES: ReadonlySet<string> = new Set([
+  "MessagePort",
+  "MessageChannel",
+  "BroadcastChannel",
+  "Worker",
+]);
+
+/**
+ * Detects the P0 and P1 side effects of every extraction record
+ * (FR-011 through FR-017; research R6).
  *
  * Each record is walked exactly once by a fresh `RecordWalker` (no
  * cross-record state), then `SentinelError` declarations attach per
@@ -163,15 +315,23 @@ const BUILTIN_ERROR_CONSTRUCTORS: ReadonlySet<string> = new Set([
  *
  * @param records The extraction records (any order; the result map
  * preserves the given record order).
+ * @param context The analysis context the records came from: its mode
+ * decides the typed splits' behavior — program mode consults the live
+ * checker, parse-only takes each split's documented type-blind default.
  * @returns Each record's effects, sorted by `(line, column, type)` —
- * empty for a record whose body contains no P0 constructs.
+ * empty for a record whose body contains no pinned constructs.
  */
 export function detectEffects(
   records: readonly ExtractionRecord[],
+  context: ProgramContext,
 ): ReadonlyMap<ExtractionRecord, readonly Effect[]> {
   const pending = new Map<ExtractionRecord, PendingEffect[]>();
+  // The checker is live only in program mode; parse-only walks are
+  // purely lexical, and the typed splits take their documented
+  // type-blind defaults (FR-015).
+  const checker = context.mode === "program" ? context.checker : undefined;
   for (const record of records) {
-    const walker = new RecordWalker(record);
+    const walker = new RecordWalker(record, checker);
     walker.walk();
     pending.set(record, walker.pending);
   }
@@ -566,6 +726,49 @@ function isFunctionLikeNode(node: Node): node is FunctionLikeNode {
 }
 
 /**
+ * The innermost function-like enclosing a node, by parent climb. The
+ * detection walk never descends into extracted function-likes, so for
+ * any visited node this is the record root or an anonymous function
+ * entered during the walk — never a nested record's own scope (the
+ * same invariant `ancestorFunctionLikes` relies on, innermost-first
+ * here because the yield rule wants the immediately enclosing
+ * function only).
+ *
+ * @param node The node to climb from (exclusive).
+ * @returns The innermost enclosing function-like, or `undefined` at
+ * module level.
+ */
+function enclosingFunctionLike(node: Node): FunctionLikeNode | undefined {
+  for (
+    let current: Node | undefined = node.parent;
+    current !== undefined;
+    current = current.parent
+  ) {
+    if (isFunctionLikeNode(current)) {
+      return current;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a function-like is a synchronous generator (`function*`,
+ * method-with-asterisk): carries the asterisk token and no `async`
+ * modifier. Async generators yield `AsyncGeneratorYield` (P2, T017) —
+ * never fabricated here — and plain functions carry no asterisk.
+ *
+ * @param node The function-like, when one encloses the yield.
+ * @returns Whether the function is a synchronous generator.
+ */
+function isSyncGenerator(node: FunctionLikeNode | undefined): boolean {
+  return (
+    node !== undefined &&
+    node.asteriskToken !== undefined &&
+    (node.modifierFlags & ModifierFlags.Async) === 0
+  );
+}
+
+/**
  * Whether a function-like node is one of the R4 forms that owns its own
  * extraction record — the mirrored half of the attribution contract
  * (FR-009): the detection walk stops at exactly these, while
@@ -711,6 +914,148 @@ function isProcessExitCall(node: CallExpression): boolean {
 }
 
 /**
+ * Whether a call is one of the closed scheduling constructs (research
+ * R6.5): bare timer globals, promise continuations, DOM-style event
+ * registration, and Node's `process.nextTick`. This mirrors
+ * `extract.ts`'s scheduling set exactly, so the detector's deferral
+ * attribution consumes precisely the callbacks the extractor's
+ * `deferred` flag names — never a wider or narrower set (Constitution
+ * Principle I: the two walks must agree on what "deferred" means).
+ *
+ * @param node The call expression.
+ * @returns Whether the call schedules a callback.
+ */
+function isSchedulingCall(node: CallExpression): boolean {
+  const callee = node.expression;
+  if (isIdentifier(callee)) {
+    return TIMER_GLOBAL_NAMES.has(callee.text);
+  }
+  if (!isPropertyAccessExpression(callee)) {
+    return false;
+  }
+  if (DEFERRED_CALLBACK_METHODS.has(callee.name.text)) {
+    return true;
+  }
+  return (
+    callee.name.text === "nextTick" &&
+    isIdentifier(callee.expression) &&
+    callee.expression.text === "process"
+  );
+}
+
+/**
+ * Whether a function-like node is a scheduling callback (research
+ * R6.5): an argument of a closed-set scheduling call. Everything it
+ * lexically contains executes after the enclosing function returns —
+ * the deferral boundary `DeferredReturnMutation` attributes.
+ *
+ * @param node The function-like node.
+ * @returns Whether the node is an argument of a scheduling call.
+ */
+function isSchedulingCallbackArgument(node: Node): boolean {
+  const parent = node.parent;
+  return (
+    isCallExpression(parent) &&
+    parent.arguments.some((argument) => argument === node) &&
+    isSchedulingCall(parent)
+  );
+}
+
+/**
+ * Whether a call is one of FR-016's five spawn forms: the three bare
+ * timer globals and Node's `process.nextTick` (with `new Promise(...)`
+ * matched at the `NewExpression` dispatch). Promise continuations and
+ * event registration schedule callbacks but spawn nothing — they are
+ * deliberately absent from the spawn set.
+ *
+ * @param node The call expression.
+ * @returns Whether the call spawns an asynchronous task.
+ */
+function isSpawnCall(node: CallExpression): boolean {
+  const callee = node.expression;
+  if (isIdentifier(callee)) {
+    return TIMER_GLOBAL_NAMES.has(callee.text);
+  }
+  return (
+    isPropertyAccessExpression(callee) &&
+    callee.name.text === "nextTick" &&
+    isIdentifier(callee.expression) &&
+    callee.expression.text === "process"
+  );
+}
+
+/**
+ * Whether a `new` expression is FR-016's fifth spawn form — `new
+ * Promise(...)` over the bare global identifier. Every other
+ * construction is inert here (constructor calls as a whole are T018's
+ * ambiguity surface, never fabricated by the P1 rules).
+ *
+ * @param node The new expression.
+ * @returns Whether the construction spawns a task.
+ */
+function isPromiseConstruction(node: NewExpression): boolean {
+  return isIdentifier(node.expression) && node.expression.text === "Promise";
+}
+
+/**
+ * Whether an expression is spelled `process.stdout` or
+ * `process.stderr` — `WriterOutput`'s documented exclusion: the stdio
+ * streams belong to StdoutWrite/StderrWrite (P2), never WriterOutput
+ * (research R6.4).
+ *
+ * @param receiver The expression to test.
+ * @returns Whether the expression is a process stdio stream.
+ */
+function isProcessStdioReceiver(receiver: Expression): boolean {
+  return (
+    isPropertyAccessExpression(receiver) &&
+    (receiver.name.text === "stdout" || receiver.name.text === "stderr") &&
+    isIdentifier(receiver.expression) &&
+    receiver.expression.text === "process"
+  );
+}
+
+/**
+ * Whether a checker type is array-like (FR-015's `SliceMutation` arm):
+ * tuple types and references to `Array` — plain and `readonly` element
+ * types alike, both are Array references — with unions recursing into
+ * their constituents. The type authority is the checker (Constitution
+ * Principle III): this is a shape test on its answer, never a
+ * re-derivation of TypeScript semantics.
+ *
+ * @param type The checker type, when one is available.
+ * @returns Whether the type is array-like.
+ */
+function isArrayLikeType(type: Type | undefined): boolean {
+  if (type === undefined) {
+    return false;
+  }
+  if (type.isTupleType()) {
+    return true;
+  }
+  if (type.isTypeReference()) {
+    return type.getTarget().getSymbol()?.name === "Array";
+  }
+  if (type.isUnionType()) {
+    return type.getTypes().some((constituent) => isArrayLikeType(constituent));
+  }
+  return false;
+}
+
+/**
+ * The declared name of a checker type's symbol (`Map`, `WeakSet`, a
+ * project class), when it has one — the typed half of the receiver
+ * rules. `undefined` for intrinsics, literals, and unresolved shapes,
+ * which fall back to the name-form rules.
+ *
+ * @param type The checker type, when one is available.
+ * @returns The type symbol's name, or `undefined`.
+ */
+function typeSymbolName(type: Type | undefined): string | undefined {
+  return type?.getSymbol()?.name;
+}
+
+/**
  * The R6.6 target of a `throw`: the constructor name for
  * `throw new X(...)` — the identifier or property-access spelling as
  * written — and omitted for every other thrown expression.
@@ -748,8 +1093,8 @@ function isAssignmentOperator(kind: SyntaxKind): boolean {
 }
 
 /**
- * One record's P0 detection walk (FR-009 attribution; research R6): a
- * fresh pre-order visitor over the record's own function-like node,
+ * One record's P0/P1 detection walk (FR-009 attribution; research R6):
+ * a fresh pre-order visitor over the record's own function-like node,
  * with a scope stack seeded from the record's chain and grown as the
  * walk descends into anonymous function-likes. Effects accumulate into
  * {@link pending} — unsorted; `detectEffects` applies FR-020's order.
@@ -759,11 +1104,24 @@ class RecordWalker {
   private readonly record: ExtractionRecord;
   private readonly sourceFile: SourceFile;
   private readonly scopes: DetectionScope[];
+  /** The live checker in program mode; `undefined` in parse-only. */
+  private readonly checker: Checker | undefined;
+  /**
+   * Scope-stack indices of the deferred-callback frames the walk is
+   * inside (research R6.5): a write to a function-scope binding
+   * declared outside one of these frames, from inside it, is a
+   * `DeferredReturnMutation`. Seeded from a `deferred` record's own
+   * ancestors; grown when the walk enters a scheduling callback
+   * argument; popped when it leaves.
+   */
+  private readonly boundaries: number[];
 
-  constructor(record: ExtractionRecord) {
+  constructor(record: ExtractionRecord, checker: Checker | undefined) {
     this.record = record;
     this.sourceFile = record.node.getSourceFile();
+    this.checker = checker;
     this.scopes = buildInitialScopes(record);
+    this.boundaries = initialDeferredBoundaries(record);
   }
 
   /** Walks the record's own function-like node. */
@@ -798,7 +1156,7 @@ class RecordWalker {
   /**
    * The dispatch: nested extracted function-likes stop the walk; other
    * function-likes are entered anonymously with their own scope; each
-   * P0 construct family emits and continues the descent — constructs
+   * pinned construct family emits and continues the descent — constructs
    * nest (`return promise.then(...)`, writes inside callbacks), so no
    * match short-circuits the traversal.
    */
@@ -837,6 +1195,14 @@ class RecordWalker {
     }
     if (isCallExpression(node)) {
       this.visitCall(node);
+      return;
+    }
+    if (isNewExpression(node)) {
+      this.visitNew(node);
+      return;
+    }
+    if (isYieldExpression(node)) {
+      this.visitYield(node);
       return;
     }
     if (isBinaryExpression(node)) {
@@ -883,9 +1249,9 @@ class RecordWalker {
    * The named-call forms: `Promise.reject(...)` dual-emits
    * `ErrorReturn` + `ErrorSignal` (the rejection channel), and
    * `process.exit(...)` emits `ErrorSignal` + `ProcessExit` — never
-   * `ErrorReturn`, the terminal carve-out. Everything else — including
-   * calls whose callee or arguments nest detectable constructs —
-   * simply descends.
+   * `ErrorReturn`, the terminal carve-out. Everything else falls to
+   * the P1 call families; unmatched calls — including those whose
+   * callee or arguments nest detectable constructs — simply descend.
    */
   private visitCall(node: CallExpression): void {
     if (isPromiseRejectCall(node)) {
@@ -894,36 +1260,237 @@ class RecordWalker {
     } else if (isProcessExitCall(node)) {
       this.emit("ErrorSignal", "signals an error through process exit", node);
       this.emit("ProcessExit", "terminates the process", node);
+    } else {
+      this.visitP1Call(node);
     }
     this.walkChildren(node);
+  }
+
+  /**
+   * The P1 call families (FR-015/FR-016): the spawn forms — emitted as
+   * the `AsyncTaskSpawn` alias, which the canonical-type resolver maps
+   * to `GoroutineSpawn` before the effect is constructed (FR-018) —
+   * then the bare-identifier channel/stream globals (`postMessage`,
+   * the Worker/window global form; `pipeline`, the node:stream/promises
+   * form), then, for property-form callees, the receiver/method
+   * name-form families. Any other bare callee reports nothing at P1.
+   */
+  private visitP1Call(node: CallExpression): void {
+    if (isSpawnCall(node)) {
+      this.emit("AsyncTaskSpawn", "spawns an asynchronous task", node);
+      return;
+    }
+    const callee = node.expression;
+    if (isPropertyAccessExpression(callee)) {
+      this.visitMethodCall(node, callee);
+      return;
+    }
+    if (isIdentifier(callee)) {
+      if (callee.text === "postMessage") {
+        this.emit("ChannelSend", "sends a message to a channel", node);
+      } else if (callee.text === "pipeline") {
+        this.emit("StreamOutput", "pipes a stream", node);
+      }
+    }
+  }
+
+  /**
+   * One property-form call through the name-form rule families in
+   * research R6.4's precedence order — receiver-specific families
+   * (HTTP responses, channels, streams) before generic writers, then
+   * the FR-015 param-write split and the membership mutators. The
+   * first match wins; every family matches on closed method-name
+   * lists, so an unmatched call reports nothing at P1.
+   */
+  private visitMethodCall(
+    node: CallExpression,
+    callee: PropertyAccessExpression,
+  ): void {
+    const method = callee.name.text;
+    const receiver = callee.expression;
+    if (HTTP_RESPONSE_METHODS.has(method) && this.isHttpResponseReceiver(receiver)) {
+      this.emit("HTTPResponseWrite", "writes to an HTTP response", node);
+      return;
+    }
+    if (method === "postMessage") {
+      this.emit("ChannelSend", "sends a message to a channel", node);
+      return;
+    }
+    if (method === "close" && this.isChannelReceiver(receiver)) {
+      this.emit("ChannelClose", "closes a channel", node);
+      return;
+    }
+    if (method === "pipe") {
+      this.emit("StreamOutput", "pipes a stream", node);
+      return;
+    }
+    if (
+      WRITER_OUTPUT_METHODS.has(method) &&
+      !isProcessStdioReceiver(receiver) &&
+      !this.isHttpResponseReceiver(receiver)
+    ) {
+      this.emit("WriterOutput", "writes through a writer-like receiver", node);
+      return;
+    }
+    if (ARRAY_MUTATOR_METHODS.has(method) && this.isParamReceiver(receiver)) {
+      this.emit("SliceMutation", "calls a mutating array method on a parameter", node);
+      return;
+    }
+    this.visitMembershipCall(node, method, receiver);
+  }
+
+  /**
+   * The membership mutators (FR-015): `add`/`delete`/`clear` on any
+   * receiver and `set` on non-parameter receivers are
+   * `ContainerMutation`; `set` on a parameter follows the Map/WeakMap
+   * split — `ContainerMutation` when the checker proves a WeakMap,
+   * `MapMutation` otherwise, with parse-only taking the `MapMutation`
+   * default (the documented type-blind surface).
+   */
+  private visitMembershipCall(
+    node: CallExpression,
+    method: string,
+    receiver: Expression,
+  ): void {
+    if (method === "set") {
+      if (this.isParamReceiver(receiver)) {
+        if (typeSymbolName(this.typeAt(receiver)) === "WeakMap") {
+          this.emit(
+            "ContainerMutation",
+            "mutates membership of a WeakMap parameter",
+            node,
+          );
+        } else {
+          this.emit("MapMutation", "mutates a parameter through Map.set", node);
+        }
+        return;
+      }
+      this.emit("ContainerMutation", "mutates membership of a container", node);
+      return;
+    }
+    if (MEMBERSHIP_MUTATOR_METHODS.has(method)) {
+      this.emit("ContainerMutation", "mutates membership of a container", node);
+    }
+  }
+
+  /**
+   * FR-016's fifth spawn form: `new Promise(...)` emits through the
+   * `AsyncTaskSpawn` alias (resolved to `GoroutineSpawn` — the alias
+   * never appears on the wire). Every other construction is inert
+   * here; the executor argument's constructs descend normally.
+   */
+  private visitNew(node: NewExpression): void {
+    if (isPromiseConstruction(node)) {
+      this.emit("AsyncTaskSpawn", "spawns an asynchronous task", node);
+    }
+    this.walkChildren(node);
+  }
+
+  /**
+   * `GeneratorYield` (FR-016): `yield` and `yield*` whose innermost
+   * enclosing function-like — found by the parent climb, the record
+   * root or an anonymous function entered during the walk — is a
+   * synchronous generator. Async generators are `AsyncGeneratorYield`
+   * (P2, T017), never fabricated here. The yield's own expression may
+   * nest writes, so the descent continues.
+   */
+  private visitYield(node: YieldExpression): void {
+    if (isSyncGenerator(enclosingFunctionLike(node))) {
+      this.emit(
+        "GeneratorYield",
+        node.asteriskToken === undefined
+          ? "yields a value in a generator"
+          : "delegates to another iterable in a generator",
+        node,
+      );
+    }
+    this.walkChildren(node);
+  }
+
+  /**
+   * Whether a method receiver is a parameter binding (FR-015's splits
+   * are lexically scoped to parameters): a bare identifier the scope
+   * stack resolves to a parameter. Property chains (`this.items.push`)
+   * and non-identifier receivers never are.
+   */
+  private isParamReceiver(receiver: Expression): boolean {
+    let base = receiver;
+    while (isParenthesizedExpression(base)) {
+      base = base.expression;
+    }
+    return isIdentifier(base) && this.isParameter(base.text);
+  }
+
+  /**
+   * Whether a method receiver is HTTP-response-like: the name-form
+   * spellings `res`/`response` (both modes), or — with the checker — a
+   * type declared as `ServerResponse` or the fetch/express-style
+   * `Response`.
+   */
+  private isHttpResponseReceiver(receiver: Expression): boolean {
+    if (isIdentifier(receiver) && HTTP_RESPONSE_RECEIVER_NAMES.has(receiver.text)) {
+      return true;
+    }
+    const name = typeSymbolName(this.typeAt(receiver));
+    return name !== undefined && HTTP_RESPONSE_TYPE_NAMES.has(name);
+  }
+
+  /**
+   * Whether a method receiver is channel-like: the name-form spellings
+   * port/channel/worker (both modes), or — with the checker — a type
+   * declared as one of the MessagePort family.
+   */
+  private isChannelReceiver(receiver: Expression): boolean {
+    if (isIdentifier(receiver) && CHANNEL_CLOSE_RECEIVER_NAMES.has(receiver.text)) {
+      return true;
+    }
+    const name = typeSymbolName(this.typeAt(receiver));
+    return name !== undefined && CHANNEL_CLOSE_TYPE_NAMES.has(name);
+  }
+
+  /** The checker's type at a node, when program mode provides one. */
+  private typeAt(node: Node): Type | undefined {
+    return this.checker?.getTypeAtLocation(node);
   }
 
   /**
    * An anonymous (unassigned) function-like inside the record: its
    * constructs attribute to this record (FR-009), so the walk enters it
    * under a fresh scope seeded with its parameters — an arrow's
-   * expression body is itself an implicit return (FR-011).
+   * expression body is itself an implicit return (FR-011). A
+   * scheduling callback argument additionally opens a deferred-callback
+   * boundary (research R6.5): everything it lexically contains executes
+   * after the enclosing function returned, so writes it carries to
+   * outer function-scope bindings attribute as deferred while the walk
+   * is inside it.
    */
   private visitAnonymousFunctionLike(node: FunctionLikeNode): void {
     this.scopes.push(DetectionScope.entered(paramNames(node.parameters)));
+    const deferredBoundary = isSchedulingCallbackArgument(node);
+    if (deferredBoundary) {
+      this.boundaries.push(this.scopes.length - 1);
+    }
     if (isArrowFunction(node) && !isBlock(node.body)) {
       this.emit("ReturnValue", "arrow expression body returns a value", node.body);
     }
     this.walkChildren(node);
     this.scopes.pop();
+    if (deferredBoundary) {
+      this.boundaries.pop();
+    }
   }
 
   /**
-   * Classifies one write (FR-014/FR-015 dot-form) and emits when it
-   * targets `this` or a parameter. The location anchor is the write
-   * construct (assignment, increment/decrement, or `delete`
-   * expression); the classified target is the written expression, with
-   * parentheses unwrapped. Dot forms take the written path as written
-   * (`this.size`, `p.label` — R6.6); element forms take the base
-   * identifier (`this` for `this[k] = v`). Element writes on parameters
-   * are deliberately NOT PointerArgMutation — they follow the P1
-   * FR-015 split — and chained member writes (`a.b.c`) target neither
-   * `this` nor a parameter directly.
+   * Classifies one write (FR-014/FR-015) and emits when it targets
+   * `this`, a parameter, a module-scope binding, or an enclosing
+   * function-scope binding. The location anchor is the write construct
+   * (assignment, increment/decrement, or `delete` expression); the
+   * classified target is the written expression, with parentheses
+   * unwrapped. Dot forms take the written path as written (`this.size`,
+   * `p.label` — R6.6); element forms take the base identifier; bare
+   * identifiers take the binding name. Chained member writes (`a.b.c`)
+   * and element writes on non-parameter bases target nothing P1 pins —
+   * the documented method-form boundary.
    */
   private emitWrite(locationNode: Node, written: Node): void {
     let target = written;
@@ -941,18 +1508,129 @@ class RecordWalker {
         return;
       }
       if (isIdentifier(target.expression) && this.isParameter(target.expression.text)) {
-        this.emit(
-          "PointerArgMutation",
-          "mutates a property of a parameter",
-          locationNode,
-          target.getText(this.sourceFile),
-        );
+        this.visitParamDotWrite(locationNode, target);
       }
       return;
     }
-    if (isElementAccessExpression(target) && isThisExpression(target.expression)) {
-      this.emit("ReceiverMutation", "mutates an element of this", locationNode, "this");
+    if (isElementAccessExpression(target)) {
+      this.visitElementWrite(locationNode, target);
+      return;
     }
+    if (isIdentifier(target)) {
+      this.classifyIdentifierWrite(locationNode, target.text);
+    }
+  }
+
+  /**
+   * The parameter dot-write rules (FR-014/FR-015): `p.length = …` on a
+   * checker-proven array-typed parameter is the `SliceMutation`
+   * truncation carve-out (never `PointerArgMutation`); every other
+   * dot-property write on a parameter is `PointerArgMutation`. The
+   * carve-out is typed — in parse-only, or on a non-array checker
+   * type, the P0 dot-write rule stands.
+   */
+  private visitParamDotWrite(
+    locationNode: Node,
+    target: PropertyAccessExpression,
+  ): void {
+    if (
+      target.name.text === "length" &&
+      isArrayLikeType(this.typeAt(target.expression))
+    ) {
+      this.emit(
+        "SliceMutation",
+        "truncates an array-typed parameter",
+        locationNode,
+        target.getText(this.sourceFile),
+      );
+      return;
+    }
+    this.emit(
+      "PointerArgMutation",
+      "mutates a property of a parameter",
+      locationNode,
+      target.getText(this.sourceFile),
+    );
+  }
+
+  /**
+   * The element-write rules (FR-014/FR-015): `this[k] = v` is
+   * `ReceiverMutation`; `p[k] = v` on a parameter follows the split —
+   * `SliceMutation` for checker-proven array types, `MapMutation` for
+   * everything else (records, objects, `any`, unresolved, and the
+   * whole parse-only mode — the documented type-blind default). The
+   * target is the base identifier (R6.6). Element writes on other
+   * bases report nothing at P1.
+   */
+  private visitElementWrite(locationNode: Node, target: ElementAccessExpression): void {
+    if (isThisExpression(target.expression)) {
+      this.emit("ReceiverMutation", "mutates an element of this", locationNode, "this");
+      return;
+    }
+    if (isIdentifier(target.expression) && this.isParameter(target.expression.text)) {
+      if (isArrayLikeType(this.typeAt(target.expression))) {
+        this.emit(
+          "SliceMutation",
+          "mutates an element of an array-typed parameter",
+          locationNode,
+          target.expression.text,
+        );
+      } else {
+        this.emit(
+          "MapMutation",
+          "mutates a computed key of a parameter",
+          locationNode,
+          target.expression.text,
+        );
+      }
+    }
+  }
+
+  /**
+   * The identifier-write classification (FR-014; research R5): a write
+   * to a module-scope binding from inside a function is
+   * `GlobalMutation`; a write to an enclosing function-scope binding is
+   * a closure capture — `DeferredReturnMutation` exactly when a
+   * deferred-callback boundary separates the write from the declaring
+   * scope (the mutation executes after that function returned), and
+   * unreported at P1 otherwise (`ClosureCaptureMutation` is P4); a
+   * write to the innermost scope's own binding is local state; an
+   * unresolved name is the documented tracker boundary (enum,
+   * namespace, catch-clause bindings) and reports nothing.
+   */
+  private classifyIdentifierWrite(locationNode: Node, name: string): void {
+    const index = this.bindingScopeIndex(name);
+    if (index < 0 || index === this.scopes.length - 1) {
+      return;
+    }
+    if (index === 0) {
+      this.emit("GlobalMutation", "writes a module-scope binding", locationNode, name);
+      return;
+    }
+    if (this.boundaries.some((boundary) => index < boundary)) {
+      this.emit(
+        "DeferredReturnMutation",
+        "mutates an enclosing binding from a deferred callback",
+        locationNode,
+        name,
+      );
+    }
+  }
+
+  /**
+   * The innermost scope-stack index whose frame binds `name`, or `-1`
+   * when no frame does — the write classification's scope address
+   * (research R5): index 0 is the module frame, the last index is the
+   * innermost function scope, and the frames between are the enclosing
+   * closure scopes.
+   */
+  private bindingScopeIndex(name: string): number {
+    for (let index = this.scopes.length - 1; index >= 0; index -= 1) {
+      if (this.scopes[index]?.binds(name)) {
+        return index;
+      }
+    }
+    return -1;
   }
 
   /**
@@ -963,12 +1641,8 @@ class RecordWalker {
    * and catch-clause bindings).
    */
   private isParameter(name: string): boolean {
-    for (const scope of [...this.scopes].reverse()) {
-      if (scope.binds(name)) {
-        return scope.params.has(name);
-      }
-    }
-    return false;
+    const index = this.bindingScopeIndex(name);
+    return this.scopes[index]?.params.has(name) ?? false;
   }
 
   /**
@@ -1039,6 +1713,33 @@ function buildInitialScopes(record: ExtractionRecord): DetectionScope[] {
     ancestorIndex += 1;
   }
   return scopes;
+}
+
+/**
+ * The deferred-callback boundaries a record is born inside (research
+ * R6.5): for a `deferred` record — one whose declaration sits inside a
+ * scheduling callback — every ancestor function-like that is a
+ * scheduling-call argument contributes its scope-frame index, using the
+ * same chain/ancestor correspondence `buildInitialScopes` zips (the
+ * k-th function-like ancestor is the (k+1)-th scope frame). A
+ * non-deferred record starts with none: the walk itself grows the
+ * boundary set only when it enters a scheduling callback argument.
+ *
+ * @param record The record whose walk the boundaries seed.
+ * @returns The initial boundary scope indices, ascending.
+ */
+function initialDeferredBoundaries(record: ExtractionRecord): number[] {
+  if (!record.deferred) {
+    return [];
+  }
+  const boundaries: number[] = [];
+  const ancestors = ancestorFunctionLikes(record.node);
+  for (const [index, ancestor] of ancestors.entries()) {
+    if (isSchedulingCallbackArgument(ancestor)) {
+      boundaries.push(index + 1);
+    }
+  }
+  return boundaries;
 }
 
 /**
