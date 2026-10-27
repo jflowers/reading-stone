@@ -95,7 +95,7 @@ describe("package metadata", () => {
     expect(pkg.type).toBe("module");
     expect(pkg.bin).toEqual({ "reading-stone": "dist/main.js" });
     expect((pkg as { engines?: { node?: string } }).engines?.node).toBe(">=22");
-    expect(pkg.dependencies ?? {}).toEqual({});
+    expect(pkg.dependencies).toEqual({ typescript: "^7.0.2" });
   });
 
   it("contains the exact NOTICE attribution text", () => {
