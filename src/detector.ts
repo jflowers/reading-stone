@@ -3,6 +3,7 @@ import {
   type BindingName,
   type CallExpression,
   type ClassDeclaration,
+  type ClassExpression,
   type ConstructorDeclaration,
   type ElementAccessExpression,
   type Expression,
@@ -15,7 +16,9 @@ import {
   isBlock,
   isCallExpression,
   isClassDeclaration,
+  isClassExpression,
   isConstructorDeclaration,
+  isDecorator,
   isDeleteExpression,
   isElementAccessExpression,
   isExportAssignment,
@@ -23,7 +26,9 @@ import {
   isFunctionExpression,
   isGetAccessorDeclaration,
   isIdentifier,
+  isImportDeclaration,
   isMethodDeclaration,
+  isNamespaceImport,
   isNewExpression,
   isParenthesizedExpression,
   isPostfixUnaryExpression,
@@ -33,6 +38,7 @@ import {
   isPropertyDeclaration,
   isReturnStatement,
   isSetAccessorDeclaration,
+  isStringLiteral,
   isThisExpression,
   isThrowStatement,
   isVariableDeclaration,
@@ -43,12 +49,15 @@ import {
   type NewExpression,
   type Node,
   type NodeArray,
+  NodeFlags,
   type ParameterDeclaration,
   type PropertyAccessExpression,
+  type PropertyDeclaration,
   type SetAccessorDeclaration,
   type SourceFile,
   SyntaxKind,
   type ThrowStatement,
+  type VariableStatement,
   type YieldExpression,
 } from "typescript/unstable/ast";
 import type { Checker, Type } from "typescript/unstable/sync";
@@ -58,12 +67,13 @@ import type { ProgramContext } from "./program.js";
 import { resolveSideEffectType } from "./taxonomy.js";
 
 /**
- * The P0 and P1 side-effect detection rules (FR-011 through FR-017; the
- * six strict rows plus the eleven must rows of data-model.md's
- * disposition table; research R6; Constitution Principles I, II, and
- * III). `detectEffects` walks each extraction record's own body and
- * reports exactly the constructs the pinned tiers cover — zero false
- * negatives and zero false positives on the conformance fixtures:
+ * The side-effect detection rules (FR-011 through FR-017; every row of
+ * data-model.md's disposition table — the six strict rows, the eleven
+ * must rows, and the P2–P4 partial/best-effort rows; research R6;
+ * Constitution Principles I, II, and III). `detectEffects` walks each
+ * extraction record's own body and reports exactly the constructs the
+ * pinned tiers cover — zero false negatives and zero false positives on
+ * the conformance fixtures:
  *
  * - `ReturnValue` (FR-011) — a `return` statement carrying an
  *   expression, in any function form, plus arrow expression bodies
@@ -117,6 +127,41 @@ import { resolveSideEffectType } from "./taxonomy.js";
  *   `StreamOutput` on `pipe`, and `WriterOutput` on other writer-like
  *   receivers — closed method-name lists, receiver-specific families
  *   first.
+ * - The P2 families (the disposition table's partial rows; research
+ *   R6.4) — the fs write/delete/meta name lists (with `Sync`/promises
+ *   variants) on `fs`-spelled, `.promises`-chained, or import-tracked
+ *   fs receivers; the database write/transaction name lists on any
+ *   receiver; `CallbackInvocation` for invoked function-typed
+ *   parameters and parameter properties (the resolved half — FR-017's
+ *   ambiguity carrier is T018); `LogWrite` on log/logger-named or
+ *   Logger-typed receivers; `ContextCancellation` for `.abort()` and
+ *   `AbortSignal.throwIfAborted()`; `AsyncGeneratorYield` in async
+ *   generators; `MetaprogrammingMutation` for `Reflect.set`/
+ *   `Reflect.deleteProperty`/`Object.defineProperty`;
+ *   `DescriptorEffect` for decorators on classes and class members
+ *   inside walked bodies; `ResourceManagement` for `using`/`await
+ *   using` statements and the `.close()`/`.dispose()` name-form;
+ *   `ImportSideEffect` for dynamic `import(...)`/`require(...)` inside
+ *   function bodies; `MonkeyPatch` for `X.prototype.*` and
+ *   imported-namespace property writes.
+ * - The P3/P4 families (the best-effort rows) — `StdoutWrite`/
+ *   `StderrWrite` for the console method split and
+ *   `process.stdout`/`process.stderr` `.write`; `EnvVarMutation` for
+ *   `process.env.X` writes; `AtomicOp` for `Atomics.*`; the clock
+ *   reads as `TimeDependency`; `CgoCall` for the two WebAssembly
+ *   forms; `FinalizerRegistration` for registry construction and
+ *   typed `.register(...)`; `ClosureCaptureMutation` for synchronous
+ *   writes to enclosing function-scope bindings. The seven N/A types
+ *   (`Panic`, `MutexOp`, `WaitGroupOp`, `RecoverBehavior`,
+ *   `ReflectionMutation`, `UnsafeMutation`, `SyncPoolOp`) have no
+ *   JavaScript carrier, no rule, and are never fabricated.
+ * - Precedence (research R6.4): receiver-specific rules win over
+ *   generic ones — console/stdio before WriterOutput, the fs family
+ *   before WriterOutput, ChannelClose's receivers before
+ *   ResourceManagement's `.close()`, MonkeyPatch's prototype and
+ *   namespace forms before GlobalMutation, `Reflect.set`/`Atomics.add`
+ *   before the membership mutators — and every P1 name-form family
+ *   keeps its claim against all later tiers.
  *
  * Every effect is constructed through `resolveSideEffectType` (FR-018 —
  * canonical names only; the resolver passes canonical spellings through
@@ -147,11 +192,13 @@ import { resolveSideEffectType } from "./taxonomy.js";
  * computes, so deferral attribution consumes exactly the callbacks the
  * extractor flags.
  *
- * Extension surface (T017): the walk is a per-record visitor whose
- * `visit` dispatch enumerates construct families; the P2/P3/P4 tiers
- * add rules to the same dispatch. P0 is purely lexical (research R5);
- * P1's typed splits take the `ProgramContext` — the checker is live
- * only in program mode, and parse-only takes each split's documented
+ * Rule surface (T015–T017): the walk is a per-record visitor whose
+ * `visit` dispatch enumerates construct families — the P2/P3/P4 rules
+ * were added to the same dispatch, with `visitMethodCall` ordering every
+ * overlapping name-form family by research R6.4's precedence
+ * (receiver-specific first). P0 is purely lexical (research R5); the
+ * typed splits take the `ProgramContext` — the checker is live only in
+ * program mode, and parse-only takes each split's documented
  * type-blind default. The detector deliberately adds no second AST
  * depth budget: extraction's budget already excluded any file whose
  * AST could exhaust the native stack (records exist only for
@@ -300,6 +347,152 @@ const CHANNEL_CLOSE_TYPE_NAMES: ReadonlySet<string> = new Set([
   "BroadcastChannel",
   "Worker",
 ]);
+
+/**
+ * The fs module specifiers whose imported bindings count as fs receivers
+ * (the disposition table's FileSystemWrite/Delete/Meta rows: "on
+ * `fs`/`node:fs/promises` receivers or default-imported fs bindings").
+ * Both the default-import form (`import fsp from "node:fs"`) and the
+ * namespace form (`import * as fsp from "node:fs"`) bind the module's
+ * API surface, so both count — excluding the namespace form would be a
+ * false negative with no precision gain.
+ */
+const FS_MODULE_SPECIFIERS: ReadonlySet<string> = new Set([
+  "fs",
+  "node:fs",
+  "fs/promises",
+  "node:fs/promises",
+]);
+
+/**
+ * `FileSystemWrite`'s name-form methods (the disposition table): the
+ * write family — `writeFile`/`appendFile`/`rename`/`truncate`/
+ * `createWriteStream` — plus their `Sync` variants (the promises forms
+ * spell identically to the base names) and the low-level fd-based
+ * `write`, research R6.4's pinned precedence carve-out — `.write` on an
+ * fs receiver is FileSystemWrite, never WriterOutput.
+ */
+const FILE_SYSTEM_WRITE_METHODS: ReadonlySet<string> = new Set([
+  "write",
+  "writeFile",
+  "writeFileSync",
+  "appendFile",
+  "appendFileSync",
+  "rename",
+  "renameSync",
+  "truncate",
+  "truncateSync",
+  "createWriteStream",
+]);
+
+/**
+ * `FileSystemDelete`'s name-form methods (the disposition table):
+ * `unlink`/`rm`/`rmdir` plus their `Sync` variants.
+ */
+const FILE_SYSTEM_DELETE_METHODS: ReadonlySet<string> = new Set([
+  "unlink",
+  "unlinkSync",
+  "rm",
+  "rmSync",
+  "rmdir",
+  "rmdirSync",
+]);
+
+/**
+ * `FileSystemMeta`'s name-form methods (the disposition table):
+ * `chmod`/`chown`/`utimes`/`lutimes`/`mkdir` plus their `Sync` variants.
+ * `stat`/`lstat` are reads and are deliberately absent.
+ */
+const FILE_SYSTEM_META_METHODS: ReadonlySet<string> = new Set([
+  "chmod",
+  "chmodSync",
+  "chown",
+  "chownSync",
+  "utimes",
+  "utimesSync",
+  "lutimes",
+  "lutimesSync",
+  "mkdir",
+  "mkdirSync",
+]);
+
+/**
+ * `DatabaseWrite`'s name-form methods (the disposition table): the
+ * MongoDB-style write names on any receiver — the documented
+ * false-positive surface of the partial tier.
+ */
+const DATABASE_WRITE_METHODS: ReadonlySet<string> = new Set([
+  "insertOne",
+  "insertMany",
+  "updateOne",
+  "updateMany",
+  "deleteOne",
+  "deleteMany",
+  "findOneAndUpdate",
+  "bulkWrite",
+]);
+
+/** `DatabaseTransaction`'s name-form methods (the disposition table). */
+const DATABASE_TRANSACTION_METHODS: ReadonlySet<string> = new Set([
+  "beginTransaction",
+  "commit",
+  "rollback",
+  "transact",
+]);
+
+/**
+ * `LogWrite`'s name-form methods (the disposition table): the logger
+ * level names. `console.*` is excluded by the receiver — the stdio
+ * family owns it.
+ */
+const LOG_WRITE_METHODS: ReadonlySet<string> = new Set([
+  "info",
+  "warn",
+  "error",
+  "debug",
+  "log",
+  "trace",
+]);
+
+/** `LogWrite`'s name-form receiver spellings (the disposition table). */
+const LOG_RECEIVER_NAMES: ReadonlySet<string> = new Set(["log", "logger"]);
+
+/** `LogWrite`'s checker-mode receiver type names. */
+const LOG_TYPE_NAMES: ReadonlySet<string> = new Set(["Logger"]);
+
+/**
+ * `StdoutWrite`'s console methods (the disposition table):
+ * `console.log`/`info`/`debug`/`trace` — detected.
+ */
+const CONSOLE_STDOUT_METHODS: ReadonlySet<string> = new Set([
+  "log",
+  "info",
+  "debug",
+  "trace",
+]);
+
+/**
+ * `StderrWrite`'s console methods (the disposition table):
+ * `console.error`/`warn` — detected.
+ */
+const CONSOLE_STDERR_METHODS: ReadonlySet<string> = new Set(["error", "warn"]);
+
+/**
+ * `ResourceManagement`'s disposal name-forms (the disposition table):
+ * `.close()`/`.dispose()` on resource receivers (file handles,
+ * connections) — deliberately checked below `ChannelClose`'s receivers
+ * (research R6.4's pinned precedence: the MessagePort family's
+ * `.close()` is a channel close, never a resource release).
+ */
+const RESOURCE_DISPOSAL_METHODS: ReadonlySet<string> = new Set(["close", "dispose"]);
+
+/**
+ * `FinalizerRegistration`'s checker-mode receiver type names (the
+ * disposition table: `.register(...)` on FinalizationRegistry
+ * receivers, typed in program mode — the parse-only surface is the
+ * construction form alone, a documented best-effort boundary).
+ */
+const FINALIZER_TYPE_NAMES: ReadonlySet<string> = new Set(["FinalizationRegistry"]);
 
 /**
  * Detects the P0 and P1 side effects of every extraction record
@@ -637,6 +830,57 @@ function isErrorSubclassName(
 }
 
 /**
+ * The module-scope import bindings a detection walk resolves against
+ * (research R6.4's receiver rules): default-import names
+ * (`import d from "m"`) and namespace-import names
+ * (`import * as ns from "m"`), each mapped to its module specifier.
+ * Named imports bind individual members, not the module object, and are
+ * deliberately absent — no rule keys on them. The scan is purely
+ * lexical; a function-scope shadow of an imported name is resolved (and
+ * excluded) by the walk's scope stack, never here.
+ */
+type ImportBindings = {
+  readonly defaultSpecifiers: ReadonlyMap<string, string>;
+  readonly namespaceSpecifiers: ReadonlyMap<string, string>;
+};
+
+/**
+ * Collects one file's module-scope import bindings: every top-level
+ * import declaration with a string-literal module specifier contributes
+ * its default-binding name (if any) and its namespace-binding name (if
+ * any). A pure function of the file's top-level statements, so the
+ * per-record recomputation in `RecordWalker`'s constructor is
+ * deterministic; records of one file share the same bounded statement
+ * list, keeping the repeated scan trivial.
+ *
+ * @param sourceFile The file whose import declarations are scanned.
+ * @returns The default- and namespace-binding maps, name → specifier.
+ */
+function scanImportBindings(sourceFile: SourceFile): ImportBindings {
+  const defaultSpecifiers = new Map<string, string>();
+  const namespaceSpecifiers = new Map<string, string>();
+  for (const statement of sourceFile.statements) {
+    if (!isImportDeclaration(statement)) {
+      continue;
+    }
+    const specifier = isStringLiteral(statement.moduleSpecifier)
+      ? statement.moduleSpecifier.text
+      : null;
+    const clause = statement.importClause;
+    if (specifier === null || clause === undefined) {
+      continue;
+    }
+    if (clause.name !== undefined) {
+      defaultSpecifiers.set(clause.name.text, specifier);
+    }
+    if (clause.namedBindings !== undefined && isNamespaceImport(clause.namedBindings)) {
+      namespaceSpecifiers.set(clause.namedBindings.name.text, specifier);
+    }
+  }
+  return { defaultSpecifiers, namespaceSpecifiers };
+}
+
+/**
  * One scope frame of the detection walk: the parameter names declared
  * in it and the binding names visible through it. Two flavors:
  *
@@ -754,8 +998,8 @@ function enclosingFunctionLike(node: Node): FunctionLikeNode | undefined {
 /**
  * Whether a function-like is a synchronous generator (`function*`,
  * method-with-asterisk): carries the asterisk token and no `async`
- * modifier. Async generators yield `AsyncGeneratorYield` (P2, T017) —
- * never fabricated here — and plain functions carry no asterisk.
+ * modifier. Async generators yield `AsyncGeneratorYield` (the P2 arm
+ * below) and plain functions carry no asterisk.
  *
  * @param node The function-like, when one encloses the yield.
  * @returns Whether the function is a synchronous generator.
@@ -765,6 +1009,24 @@ function isSyncGenerator(node: FunctionLikeNode | undefined): boolean {
     node !== undefined &&
     node.asteriskToken !== undefined &&
     (node.modifierFlags & ModifierFlags.Async) === 0
+  );
+}
+
+/**
+ * Whether a function-like is an async generator (`async function*`,
+ * async-generator methods): carries the asterisk token and the `async`
+ * modifier — the `AsyncGeneratorYield` arm of the yield rule (the
+ * disposition table's P2 row; arrows can never qualify, they carry no
+ * asterisk).
+ *
+ * @param node The function-like, when one encloses the yield.
+ * @returns Whether the function is an async generator.
+ */
+function isAsyncGenerator(node: FunctionLikeNode | undefined): boolean {
+  return (
+    node !== undefined &&
+    node.asteriskToken !== undefined &&
+    (node.modifierFlags & ModifierFlags.Async) !== 0
   );
 }
 
@@ -1000,8 +1262,8 @@ function isPromiseConstruction(node: NewExpression): boolean {
 /**
  * Whether an expression is spelled `process.stdout` or
  * `process.stderr` — `WriterOutput`'s documented exclusion: the stdio
- * streams belong to StdoutWrite/StderrWrite (P2), never WriterOutput
- * (research R6.4).
+ * streams belong to StdoutWrite/StderrWrite (the stdio families below),
+ * never WriterOutput (research R6.4).
  *
  * @param receiver The expression to test.
  * @returns Whether the expression is a process stdio stream.
@@ -1012,6 +1274,85 @@ function isProcessStdioReceiver(receiver: Expression): boolean {
     (receiver.name.text === "stdout" || receiver.name.text === "stderr") &&
     isIdentifier(receiver.expression) &&
     receiver.expression.text === "process"
+  );
+}
+
+/**
+ * Whether a `new` expression is `new WebAssembly.Instance(...)` — one of
+ * `CgoCall`'s two WebAssembly forms (the disposition table: the closest
+ * foreign-function surface).
+ *
+ * @param node The new expression.
+ * @returns Whether the construction instantiates WebAssembly.
+ */
+function isWebAssemblyInstanceConstruction(node: NewExpression): boolean {
+  return (
+    isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === "Instance" &&
+    isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "WebAssembly"
+  );
+}
+
+/**
+ * Whether a property-form callee is spelled `WebAssembly.instantiate` —
+ * `CgoCall`'s call form (the disposition table).
+ *
+ * @param callee The property-access callee.
+ * @returns Whether the callee instantiates WebAssembly.
+ */
+function isWebAssemblyInstantiateCallee(callee: PropertyAccessExpression): boolean {
+  return (
+    callee.name.text === "instantiate" &&
+    isIdentifier(callee.expression) &&
+    callee.expression.text === "WebAssembly"
+  );
+}
+
+/**
+ * Whether a dot-property write target is spelled `process.env.X` — the
+ * `EnvVarMutation` form (the disposition table). Only the dot form is
+ * pinned; `process.env[k]` element writes are a documented boundary.
+ *
+ * @param target The written property-access target.
+ * @returns Whether the target path runs through `process.env`.
+ */
+function isProcessEnvTarget(target: PropertyAccessExpression): boolean {
+  const base = target.expression;
+  return (
+    isPropertyAccessExpression(base) &&
+    base.name.text === "env" &&
+    isIdentifier(base.expression) &&
+    base.expression.text === "process"
+  );
+}
+
+/**
+ * The class-member kinds that can carry decorators (the disposition
+ * table's "classes and class members" surface): methods, properties, and
+ * accessors. Constructors and static blocks cannot be decorated
+ * themselves, and parameter decorators are outside the pinned surface —
+ * a documented boundary.
+ */
+type DecoratableMember =
+  | MethodDeclaration
+  | PropertyDeclaration
+  | GetAccessorDeclaration
+  | SetAccessorDeclaration;
+
+/**
+ * Type guard for the decoratable member union.
+ *
+ * @param node The node to test.
+ * @returns Whether the node is a method, property, or accessor
+ * declaration.
+ */
+function isDecoratableMember(node: Node): node is DecoratableMember {
+  return (
+    isMethodDeclaration(node) ||
+    isPropertyDeclaration(node) ||
+    isGetAccessorDeclaration(node) ||
+    isSetAccessorDeclaration(node)
   );
 }
 
@@ -1107,6 +1448,12 @@ class RecordWalker {
   /** The live checker in program mode; `undefined` in parse-only. */
   private readonly checker: Checker | undefined;
   /**
+   * The declaring file's module-scope import bindings — the fs-receiver
+   * and MonkeyPatch namespace rules resolve receiver identifiers against
+   * them (research R6.4), with the scope stack settling shadows.
+   */
+  private readonly imports: ImportBindings;
+  /**
    * Scope-stack indices of the deferred-callback frames the walk is
    * inside (research R6.5): a write to a function-scope binding
    * declared outside one of these frames, from inside it, is a
@@ -1120,6 +1467,7 @@ class RecordWalker {
     this.record = record;
     this.sourceFile = record.node.getSourceFile();
     this.checker = checker;
+    this.imports = scanImportBindings(this.sourceFile);
     this.scopes = buildInitialScopes(record);
     this.boundaries = initialDeferredBoundaries(record);
   }
@@ -1227,6 +1575,14 @@ class RecordWalker {
       this.walkChildren(node);
       return;
     }
+    if (isVariableStatement(node)) {
+      this.visitVariableStatement(node);
+      return;
+    }
+    if (isClassDeclaration(node) || isClassExpression(node)) {
+      this.visitClassLike(node);
+      return;
+    }
     this.declareBinding(node);
     this.walkChildren(node);
   }
@@ -1242,6 +1598,59 @@ class RecordWalker {
     const thrown = thrownConstructorName(node.expression, this.sourceFile);
     this.emit("ErrorReturn", "throws an error to the caller", node, thrown);
     this.emit("ErrorSignal", "signals an error", node, thrown);
+    this.walkChildren(node);
+  }
+
+  /**
+   * `ResourceManagement`'s declaration arm (the disposition table): a
+   * `using`/`await using` statement — on the native compiler
+   * (typescript 7.0.2) both parse as a VariableStatement whose
+   * declaration list carries `NodeFlags.Using` (the `await using` form
+   * additionally carries `AwaitUsing`; one bit test covers both). The
+   * declared names bind normally through the declaration-list descent,
+   * exactly as a `const` statement's do.
+   */
+  private visitVariableStatement(node: VariableStatement): void {
+    if ((node.declarationList.flags & NodeFlags.Using) !== 0) {
+      this.emit("ResourceManagement", "declares a using-scoped resource", node);
+    }
+    this.walkChildren(node);
+  }
+
+  /**
+   * `DescriptorEffect` (the disposition table): every decorator on a
+   * class-like inside a walked body — the class's own and its
+   * decoratable members' — collected at the class level because the
+   * walk stops at extracted method bodies before reaching their
+   * decorator nodes, and a decorator executes at class-definition time
+   * (inside the enclosing record), never in the decorated method's own
+   * frame. A class declaration still binds its name into the enclosing
+   * scope (`declareBinding`'s half of this branch); class expressions
+   * bind their names only inside themselves. Decorator factory
+   * arguments on member decorators are not descended (the member's
+   * extracted-body boundary) — a documented boundary.
+   */
+  private visitClassLike(node: ClassDeclaration | ClassExpression): void {
+    for (const modifier of node.modifiers ?? []) {
+      if (isDecorator(modifier)) {
+        this.emit("DescriptorEffect", "applies a decorator to a class", modifier);
+      }
+    }
+    for (const member of node.members) {
+      if (!isDecoratableMember(member)) {
+        continue;
+      }
+      for (const modifier of member.modifiers ?? []) {
+        if (isDecorator(modifier)) {
+          this.emit(
+            "DescriptorEffect",
+            "applies a decorator to a class member",
+            modifier,
+          );
+        }
+      }
+    }
+    this.declareBinding(node);
     this.walkChildren(node);
   }
 
@@ -1267,17 +1676,26 @@ class RecordWalker {
   }
 
   /**
-   * The P1 call families (FR-015/FR-016): the spawn forms — emitted as
-   * the `AsyncTaskSpawn` alias, which the canonical-type resolver maps
-   * to `GoroutineSpawn` before the effect is constructed (FR-018) —
-   * then the bare-identifier channel/stream globals (`postMessage`,
-   * the Worker/window global form; `pipeline`, the node:stream/promises
-   * form), then, for property-form callees, the receiver/method
-   * name-form families. Any other bare callee reports nothing at P1.
+   * The bare-callee call families (FR-015/FR-016 plus the P2/P3 rows
+   * that key on the callee alone): the spawn forms — emitted as the
+   * `AsyncTaskSpawn` alias, which the canonical-type resolver maps to
+   * `GoroutineSpawn` before the effect is constructed (FR-018) — the
+   * dynamic `import(...)` and `require(...)` module side effects (the
+   * callee of the former is the `import` keyword token itself), then
+   * the bare-identifier channel/stream globals (`postMessage`, the
+   * Worker/window global form; `pipeline`, the node:stream/promises
+   * form), then `CallbackInvocation`'s bare-parameter arm — a parameter
+   * used as the callee, the callback idiom, type-blind in both modes
+   * (the invocation is the function-typed evidence, the array-mutator
+   * precedent). Any other bare callee reports nothing here.
    */
   private visitP1Call(node: CallExpression): void {
     if (isSpawnCall(node)) {
       this.emit("AsyncTaskSpawn", "spawns an asynchronous task", node);
+      return;
+    }
+    if (node.expression.kind === SyntaxKind.ImportKeyword) {
+      this.emit("ImportSideEffect", "dynamically imports a module", node);
       return;
     }
     const callee = node.expression;
@@ -1288,8 +1706,18 @@ class RecordWalker {
     if (isIdentifier(callee)) {
       if (callee.text === "postMessage") {
         this.emit("ChannelSend", "sends a message to a channel", node);
-      } else if (callee.text === "pipeline") {
+        return;
+      }
+      if (callee.text === "pipeline") {
         this.emit("StreamOutput", "pipes a stream", node);
+        return;
+      }
+      if (callee.text === "require") {
+        this.emit("ImportSideEffect", "requires a module", node);
+        return;
+      }
+      if (this.isParameter(callee.text)) {
+        this.emit("CallbackInvocation", "invokes a function-typed parameter", node);
       }
     }
   }
@@ -1297,10 +1725,18 @@ class RecordWalker {
   /**
    * One property-form call through the name-form rule families in
    * research R6.4's precedence order — receiver-specific families
-   * (HTTP responses, channels, streams) before generic writers, then
-   * the FR-015 param-write split and the membership mutators. The
-   * first match wins; every family matches on closed method-name
-   * lists, so an unmatched call reports nothing at P1.
+   * first: the stdio streams (console, process.std*), then the P1
+   * families (HTTP responses, channels, streams), then the fs family
+   * and the metaprogramming/Atomics receivers whose method names the
+   * generic rules below would otherwise steal (`Reflect.set` vs the
+   * membership `set`, `Atomics.add` vs the membership `add`), then the
+   * resource-disposal name-form (below ChannelClose, pinned), logging,
+   * generic writers, the FR-015 param-write split, and the membership
+   * mutators — then the P2/P4 database, cancellation, clock, and
+   * WebAssembly name-forms and the typed finalizer arm. The first match
+   * wins; every family matches on closed method-name lists or pinned
+   * receiver spellings, so an unmatched call reports nothing until
+   * `CallbackInvocation`'s parameter-property remainder.
    */
   private visitMethodCall(
     node: CallExpression,
@@ -1308,6 +1744,11 @@ class RecordWalker {
   ): void {
     const method = callee.name.text;
     const receiver = callee.expression;
+    // The P3 stdio families, pinned above every generic writer family
+    // (research R6.4): console.* and process.stdout/stderr.write.
+    if (this.visitStdioCall(node, method, callee)) {
+      return;
+    }
     if (HTTP_RESPONSE_METHODS.has(method) && this.isHttpResponseReceiver(receiver)) {
       this.emit("HTTPResponseWrite", "writes to an HTTP response", node);
       return;
@@ -1320,8 +1761,31 @@ class RecordWalker {
       this.emit("ChannelClose", "closes a channel", node);
       return;
     }
+    // The fs family, pinned above WriterOutput (research R6.4).
+    if (this.visitFileSystemCall(node, method, receiver)) {
+      return;
+    }
+    // The metaprogramming forms, pinned above the membership `set`.
+    if (this.visitMetaprogrammingCall(node, callee)) {
+      return;
+    }
+    // The Atomics family, pinned above the membership `add`.
+    if (this.isAtomicsReceiver(receiver)) {
+      this.emit("AtomicOp", "performs an atomic shared-memory operation", node);
+      return;
+    }
     if (method === "pipe") {
       this.emit("StreamOutput", "pipes a stream", node);
+      return;
+    }
+    // ResourceManagement's disposal name-form — below ChannelClose
+    // (research R6.4's pinned precedence).
+    if (RESOURCE_DISPOSAL_METHODS.has(method)) {
+      this.emit("ResourceManagement", "releases a resource", node);
+      return;
+    }
+    if (LOG_WRITE_METHODS.has(method) && this.isLogReceiver(receiver)) {
+      this.emit("LogWrite", "writes a log record", node);
       return;
     }
     if (
@@ -1336,7 +1800,287 @@ class RecordWalker {
       this.emit("SliceMutation", "calls a mutating array method on a parameter", node);
       return;
     }
-    this.visitMembershipCall(node, method, receiver);
+    if (this.visitMembershipCall(node, method, receiver)) {
+      return;
+    }
+    if (DATABASE_WRITE_METHODS.has(method)) {
+      this.emit("DatabaseWrite", "writes to a database", node);
+      return;
+    }
+    if (DATABASE_TRANSACTION_METHODS.has(method)) {
+      this.emit("DatabaseTransaction", "manages a database transaction", node);
+      return;
+    }
+    if (this.visitContextCancellationCall(node, method, callee)) {
+      return;
+    }
+    if (this.visitTimeDependencyCall(node, method, callee)) {
+      return;
+    }
+    if (isWebAssemblyInstantiateCallee(callee)) {
+      this.emit("CgoCall", "instantiates WebAssembly", node);
+      return;
+    }
+    if (method === "register" && this.isFinalizerRegistryReceiver(receiver)) {
+      this.emit("FinalizerRegistration", "registers a finalizer", node);
+      return;
+    }
+    // CallbackInvocation's property arm: a property of a parameter used
+    // as the callee (the options-callback idiom) — after every
+    // name-form family, so claimed method names keep their specific
+    // types.
+    if (this.isParamReceiver(receiver)) {
+      this.emit(
+        "CallbackInvocation",
+        "invokes a function-typed property of a parameter",
+        node,
+      );
+    }
+  }
+
+  /**
+   * The P3 stdio families (the disposition table): `console.log`/
+   * `info`/`debug`/`trace` → `StdoutWrite`, `console.error`/`warn` →
+   * `StderrWrite`, and `.write` on the process stdio streams. Matched
+   * before WriterOutput so the writer name-form never claims them
+   * (research R6.4's pinned precedence).
+   *
+   * @returns Whether a stdio family claimed the call.
+   */
+  private visitStdioCall(
+    node: CallExpression,
+    method: string,
+    callee: PropertyAccessExpression,
+  ): boolean {
+    const receiver = callee.expression;
+    if (isIdentifier(receiver) && receiver.text === "console") {
+      if (CONSOLE_STDOUT_METHODS.has(method)) {
+        this.emit("StdoutWrite", "writes to standard output", node);
+        return true;
+      }
+      if (CONSOLE_STDERR_METHODS.has(method)) {
+        this.emit("StderrWrite", "writes to standard error", node);
+        return true;
+      }
+      return false;
+    }
+    if (
+      method === "write" &&
+      isPropertyAccessExpression(receiver) &&
+      isProcessStdioReceiver(receiver)
+    ) {
+      const toStdout = receiver.name.text === "stdout";
+      this.emit(
+        toStdout ? "StdoutWrite" : "StderrWrite",
+        toStdout ? "writes to standard output" : "writes to standard error",
+        node,
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The fs families (the disposition table's FileSystemWrite/Delete/Meta
+   * rows): the write/delete/meta name lists on fs receivers — an
+   * identifier spelled `fs` (name-form, receiver-blind), an identifier
+   * whose default or namespace import resolves to an fs module
+   * specifier (shadow-checked through the scope stack), or a
+   * `.promises` chain over either. Reads (`readFile`, `stat`, …) claim
+   * nothing and fall through.
+   *
+   * @returns Whether an fs family claimed the call.
+   */
+  private visitFileSystemCall(
+    node: CallExpression,
+    method: string,
+    receiver: Expression,
+  ): boolean {
+    if (!this.isFileSystemReceiver(receiver)) {
+      return false;
+    }
+    if (FILE_SYSTEM_WRITE_METHODS.has(method)) {
+      this.emit("FileSystemWrite", "writes a file through the fs API", node);
+      return true;
+    }
+    if (FILE_SYSTEM_DELETE_METHODS.has(method)) {
+      this.emit("FileSystemDelete", "deletes a filesystem entry", node);
+      return true;
+    }
+    if (FILE_SYSTEM_META_METHODS.has(method)) {
+      this.emit("FileSystemMeta", "changes filesystem metadata", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Whether a method receiver is an fs binding: the `fs` spelling (any
+   * shape — the canonical name-form), an import-tracked fs binding
+   * (default or namespace import from an fs module specifier, excluded
+   * when a function-scope frame shadows the name), or a `.promises`
+   * property chain over either form.
+   */
+  private isFileSystemReceiver(receiver: Expression): boolean {
+    let base = receiver;
+    while (isParenthesizedExpression(base)) {
+      base = base.expression;
+    }
+    if (isIdentifier(base)) {
+      return base.text === "fs" || this.isImportedFsBinding(base.text);
+    }
+    if (isPropertyAccessExpression(base) && base.name.text === "promises") {
+      const root = base.expression;
+      return (
+        isIdentifier(root) &&
+        (root.text === "fs" || this.isImportedFsBinding(root.text))
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Whether a name is an import-tracked fs binding: bound at module
+   * scope by a default or namespace import from an fs module specifier,
+   * and not shadowed by any function-scope frame the scope stack sees.
+   */
+  private isImportedFsBinding(name: string): boolean {
+    const specifier =
+      this.imports.defaultSpecifiers.get(name) ??
+      this.imports.namespaceSpecifiers.get(name);
+    return (
+      specifier !== undefined &&
+      FS_MODULE_SPECIFIERS.has(specifier) &&
+      this.bindingScopeIndex(name) <= 0
+    );
+  }
+
+  /**
+   * The metaprogramming forms (the disposition table):
+   * `Reflect.set`/`Reflect.deleteProperty`/`Object.defineProperty`,
+   * matched before the membership mutators so `Reflect.set` is never a
+   * `ContainerMutation` (research R6.4's receiver-specific-first rule).
+   *
+   * @returns Whether a metaprogramming form claimed the call.
+   */
+  private visitMetaprogrammingCall(
+    node: CallExpression,
+    callee: PropertyAccessExpression,
+  ): boolean {
+    const receiver = callee.expression;
+    if (!isIdentifier(receiver)) {
+      return false;
+    }
+    const method = callee.name.text;
+    if (
+      (receiver.text === "Reflect" &&
+        (method === "set" || method === "deleteProperty")) ||
+      (receiver.text === "Object" && method === "defineProperty")
+    ) {
+      this.emit(
+        "MetaprogrammingMutation",
+        "mutates an object through metaprogramming",
+        node,
+      );
+      return true;
+    }
+    return false;
+  }
+
+  /** Whether a receiver is the `Atomics` global (the `AtomicOp` row). */
+  private isAtomicsReceiver(receiver: Expression): boolean {
+    return isIdentifier(receiver) && receiver.text === "Atomics";
+  }
+
+  /**
+   * Whether a receiver is logger-like (the `LogWrite` row): the
+   * name-form spellings `log`/`logger` (both modes), or — with the
+   * checker — a type declared as a `Logger`.
+   */
+  private isLogReceiver(receiver: Expression): boolean {
+    if (isIdentifier(receiver) && LOG_RECEIVER_NAMES.has(receiver.text)) {
+      return true;
+    }
+    const name = typeSymbolName(this.typeAt(receiver));
+    return name !== undefined && LOG_TYPE_NAMES.has(name);
+  }
+
+  /**
+   * The cancellation forms (the `ContextCancellation` row): `.abort()`
+   * — the name-form reading of "AbortController receivers" (the method
+   * name is cancellation-specific, and receiver-blind matching keeps
+   * parse-only symmetric with program mode) — and the static
+   * `AbortSignal.throwIfAborted()`.
+   *
+   * @returns Whether a cancellation form claimed the call.
+   */
+  private visitContextCancellationCall(
+    node: CallExpression,
+    method: string,
+    callee: PropertyAccessExpression,
+  ): boolean {
+    const receiver = callee.expression;
+    if (method === "abort") {
+      this.emit("ContextCancellation", "aborts an AbortController", node);
+      return true;
+    }
+    if (
+      method === "throwIfAborted" &&
+      isIdentifier(receiver) &&
+      receiver.text === "AbortSignal"
+    ) {
+      this.emit("ContextCancellation", "throws when the signal is aborted", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The clock forms (the `TimeDependency` row): `Date.now()`,
+   * `performance.now()`, `process.hrtime()`, and the
+   * `process.hrtime.bigint()` chain.
+   *
+   * @returns Whether a clock form claimed the call.
+   */
+  private visitTimeDependencyCall(
+    node: CallExpression,
+    method: string,
+    callee: PropertyAccessExpression,
+  ): boolean {
+    const receiver = callee.expression;
+    if (
+      method === "now" &&
+      isIdentifier(receiver) &&
+      (receiver.text === "Date" || receiver.text === "performance")
+    ) {
+      this.emit("TimeDependency", "reads the current time", node);
+      return true;
+    }
+    if (method === "hrtime" && isIdentifier(receiver) && receiver.text === "process") {
+      this.emit("TimeDependency", "reads the current time", node);
+      return true;
+    }
+    if (
+      method === "bigint" &&
+      isPropertyAccessExpression(receiver) &&
+      receiver.name.text === "hrtime" &&
+      isIdentifier(receiver.expression) &&
+      receiver.expression.text === "process"
+    ) {
+      this.emit("TimeDependency", "reads the current time", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Whether a receiver is checker-typed as a FinalizationRegistry (the
+   * `.register(...)` arm of the `FinalizerRegistration` row — program
+   * mode only; parse-only reports the construction form alone).
+   */
+  private isFinalizerRegistryReceiver(receiver: Expression): boolean {
+    const name = typeSymbolName(this.typeAt(receiver));
+    return name !== undefined && FINALIZER_TYPE_NAMES.has(name);
   }
 
   /**
@@ -1346,12 +2090,14 @@ class RecordWalker {
    * split — `ContainerMutation` when the checker proves a WeakMap,
    * `MapMutation` otherwise, with parse-only taking the `MapMutation`
    * default (the documented type-blind surface).
+   *
+   * @returns Whether a membership form claimed the call.
    */
   private visitMembershipCall(
     node: CallExpression,
     method: string,
     receiver: Expression,
-  ): void {
+  ): boolean {
     if (method === "set") {
       if (this.isParamReceiver(receiver)) {
         if (typeSymbolName(this.typeAt(receiver)) === "WeakMap") {
@@ -1363,44 +2109,69 @@ class RecordWalker {
         } else {
           this.emit("MapMutation", "mutates a parameter through Map.set", node);
         }
-        return;
+        return true;
       }
       this.emit("ContainerMutation", "mutates membership of a container", node);
-      return;
+      return true;
     }
     if (MEMBERSHIP_MUTATOR_METHODS.has(method)) {
       this.emit("ContainerMutation", "mutates membership of a container", node);
+      return true;
     }
+    return false;
   }
 
   /**
-   * FR-016's fifth spawn form: `new Promise(...)` emits through the
-   * `AsyncTaskSpawn` alias (resolved to `GoroutineSpawn` — the alias
-   * never appears on the wire). Every other construction is inert
-   * here; the executor argument's constructs descend normally.
+   * The construction families: FR-016's fifth spawn form — `new
+   * Promise(...)` emits through the `AsyncTaskSpawn` alias (resolved to
+   * `GoroutineSpawn`; the alias never appears on the wire) — plus the
+   * P3/P4 construction rows: `new Date()` (`TimeDependency`), `new
+   * FinalizationRegistry(...)` (`FinalizerRegistration`), and `new
+   * WebAssembly.Instance(...)` (`CgoCall`). Every other construction is
+   * inert here (unclaimed constructor calls are T018's ambiguity
+   * surface, never fabricated by these rules); each argument's
+   * constructs descend normally.
    */
   private visitNew(node: NewExpression): void {
     if (isPromiseConstruction(node)) {
       this.emit("AsyncTaskSpawn", "spawns an asynchronous task", node);
+    } else if (isIdentifier(node.expression) && node.expression.text === "Date") {
+      this.emit("TimeDependency", "reads the current time", node);
+    } else if (
+      isIdentifier(node.expression) &&
+      node.expression.text === "FinalizationRegistry"
+    ) {
+      this.emit("FinalizerRegistration", "creates a finalization registry", node);
+    } else if (isWebAssemblyInstanceConstruction(node)) {
+      this.emit("CgoCall", "constructs a WebAssembly instance", node);
     }
     this.walkChildren(node);
   }
 
   /**
-   * `GeneratorYield` (FR-016): `yield` and `yield*` whose innermost
-   * enclosing function-like — found by the parent climb, the record
-   * root or an anonymous function entered during the walk — is a
-   * synchronous generator. Async generators are `AsyncGeneratorYield`
-   * (P2, T017), never fabricated here. The yield's own expression may
-   * nest writes, so the descent continues.
+   * The yield rule (FR-016 plus the P2 sibling): `yield`/`yield*`
+   * whose innermost enclosing function-like — found by the parent
+   * climb, the record root or an anonymous function entered during the
+   * walk — is a synchronous generator emits `GeneratorYield`; an async
+   * generator emits `AsyncGeneratorYield`. The yield's own expression
+   * may nest writes, so the descent continues.
    */
   private visitYield(node: YieldExpression): void {
-    if (isSyncGenerator(enclosingFunctionLike(node))) {
+    const enclosing = enclosingFunctionLike(node);
+    if (isSyncGenerator(enclosing)) {
       this.emit(
         "GeneratorYield",
         node.asteriskToken === undefined
           ? "yields a value in a generator"
           : "delegates to another iterable in a generator",
+        node,
+      );
+    } else if (isAsyncGenerator(enclosing)) {
+      this.emit(
+        "AsyncGeneratorYield",
+        node.asteriskToken === undefined
+          ? "yields a value in an async generator"
+          : "delegates to another iterable in an async generator",
         node,
       );
     }
@@ -1481,16 +2252,18 @@ class RecordWalker {
   }
 
   /**
-   * Classifies one write (FR-014/FR-015) and emits when it targets
-   * `this`, a parameter, a module-scope binding, or an enclosing
+   * Classifies one write (FR-014/FR-015 plus the P2/P3 property rows)
+   * and emits when it targets `this`, a parameter, `process.env.X`, a
+   * MonkeyPatch form, a module-scope binding, or an enclosing
    * function-scope binding. The location anchor is the write construct
    * (assignment, increment/decrement, or `delete` expression); the
    * classified target is the written expression, with parentheses
    * unwrapped. Dot forms take the written path as written (`this.size`,
-   * `p.label` — R6.6); element forms take the base identifier; bare
-   * identifiers take the binding name. Chained member writes (`a.b.c`)
-   * and element writes on non-parameter bases target nothing P1 pins —
-   * the documented method-form boundary.
+   * `p.label`, `process.env.DEBUG`, `NS.prop` — R6.6); element forms
+   * take the base identifier; bare identifiers take the binding name.
+   * Chained member writes other than the MonkeyPatch forms and element
+   * writes on non-parameter bases target nothing the tiers pin — the
+   * documented method-form boundary.
    */
   private emitWrite(locationNode: Node, written: Node): void {
     let target = written;
@@ -1509,6 +2282,34 @@ class RecordWalker {
       }
       if (isIdentifier(target.expression) && this.isParameter(target.expression.text)) {
         this.visitParamDotWrite(locationNode, target);
+        return;
+      }
+      // `EnvVarMutation` (the P3 row): writes to `process.env.X`, in
+      // every write form — assignment, compound, increment/decrement,
+      // and `delete` all flow through here.
+      if (isProcessEnvTarget(target)) {
+        this.emit(
+          "EnvVarMutation",
+          "mutates a process environment variable",
+          locationNode,
+          target.getText(this.sourceFile),
+        );
+        return;
+      }
+      // `MonkeyPatch` (the P2 row; research R6.4 — precedence over
+      // GlobalMutation for these forms): `X.prototype.*` writes and
+      // property writes on imported namespace objects.
+      const patched = this.monkeyPatchTarget(target);
+      if (patched !== undefined) {
+        this.emit(
+          "MonkeyPatch",
+          patched.prototype
+            ? "patches a prototype property"
+            : "patches a property of an imported namespace",
+          locationNode,
+          patched.text,
+        );
+        return;
       }
       return;
     }
@@ -1519,6 +2320,36 @@ class RecordWalker {
     if (isIdentifier(target)) {
       this.classifyIdentifierWrite(locationNode, target.text);
     }
+  }
+
+  /**
+   * The MonkeyPatch form of a dot-property write, when it is one: an
+   * `X.prototype.*` target (any `X` — the write is a prototype patch
+   * regardless of what the constructor binding is), or a property
+   * write on an imported namespace object (`import * as NS`; the scope
+   * stack excludes function-scope shadows, so a local or parameter of
+   * the same name keeps its own classification). Research R6.4: both
+   * forms take precedence over GlobalMutation.
+   *
+   * @param target The written property-access target.
+   * @returns The written path and which MonkeyPatch arm matched, or
+   * `undefined` when the write is neither form.
+   */
+  private monkeyPatchTarget(
+    target: PropertyAccessExpression,
+  ): { readonly text: string; readonly prototype: boolean } | undefined {
+    const base = target.expression;
+    if (isPropertyAccessExpression(base) && base.name.text === "prototype") {
+      return { text: target.getText(this.sourceFile), prototype: true };
+    }
+    if (
+      isIdentifier(base) &&
+      this.imports.namespaceSpecifiers.has(base.text) &&
+      this.bindingScopeIndex(base.text) <= 0
+    ) {
+      return { text: target.getText(this.sourceFile), prototype: false };
+    }
+    return undefined;
   }
 
   /**
@@ -1592,11 +2423,11 @@ class RecordWalker {
    * `GlobalMutation`; a write to an enclosing function-scope binding is
    * a closure capture — `DeferredReturnMutation` exactly when a
    * deferred-callback boundary separates the write from the declaring
-   * scope (the mutation executes after that function returned), and
-   * unreported at P1 otherwise (`ClosureCaptureMutation` is P4); a
-   * write to the innermost scope's own binding is local state; an
-   * unresolved name is the documented tracker boundary (enum,
-   * namespace, catch-clause bindings) and reports nothing.
+   * scope (the mutation executes after that function returned), and a
+   * synchronous `ClosureCaptureMutation` otherwise (P4, never
+   * `GlobalMutation`); a write to the innermost scope's own binding is
+   * local state; an unresolved name is the documented tracker boundary
+   * (enum, namespace, catch-clause bindings) and reports nothing.
    */
   private classifyIdentifierWrite(locationNode: Node, name: string): void {
     const index = this.bindingScopeIndex(name);
@@ -1614,7 +2445,14 @@ class RecordWalker {
         locationNode,
         name,
       );
+      return;
     }
+    this.emit(
+      "ClosureCaptureMutation",
+      "mutates an enclosing function-scope binding from a closure",
+      locationNode,
+      name,
+    );
   }
 
   /**
