@@ -9,6 +9,12 @@
 // stdout (FR-017 reserves stdout for JSON-RPC responses). Reason strings
 // are asserted verbatim from src/safeio.ts, so changing a diagnostic is a
 // visible, deliberate contract change.
+//
+// The readBoundedSync suites (T004) assert the same skip contract through
+// the synchronous entry point that serves the TypeScript CompilerHost
+// `readFile` contract: `undefined` on skip (the absent-file signal, never
+// a throw), exactly one diagnostic naming the absolute path verbatim,
+// stdout untouched.
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -25,7 +31,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MAX_FILE_BYTES, readBounded } from "../src/safeio.js";
+import { MAX_FILE_BYTES, readBounded, readBoundedSync } from "../src/safeio.js";
 import { createFixtureTree } from "./helpers/fixtures.js";
 
 // Fixture trees and scratch directories register their cleanup here so every
@@ -113,6 +119,28 @@ async function expectRead(
   const sink = memorySink();
   const stdout = vi.spyOn(process.stdout, "write");
   await expect(readBounded(root, relPath, budget, sink.stream)).resolves.toBe(expected);
+  expect(sink.text()).toBe("");
+  expect(stdout).not.toHaveBeenCalled();
+}
+
+// The shared skip-contract assertion for readBoundedSync: undefined (the
+// CompilerHost.readFile absent-file signal — never a throw), exactly one
+// newline-terminated diagnostic naming the absolute path verbatim, and a
+// stdout that stayed untouched.
+function expectSkipSync(absPath: string, reason: string): void {
+  const sink = memorySink();
+  const stdout = vi.spyOn(process.stdout, "write");
+  expect(readBoundedSync(absPath, sink.stream)).toBe(undefined);
+  expect(sink.text()).toBe(`reading-stone: skipping ${absPath}: ${reason}\n`);
+  expect(stdout).not.toHaveBeenCalled();
+}
+
+// The shared non-skip contract for readBoundedSync: the exact decoded
+// content returns, no diagnostic is written, and stdout stays untouched.
+function expectReadSync(absPath: string, expected: string): void {
+  const sink = memorySink();
+  const stdout = vi.spyOn(process.stdout, "write");
+  expect(readBoundedSync(absPath, sink.stream)).toBe(expected);
   expect(sink.text()).toBe("");
   expect(stdout).not.toHaveBeenCalled();
 }
@@ -256,5 +284,79 @@ describe("readBounded: positive path (the non-skip contract)", () => {
     // at exactly the cap reads normally; a sparse file is zeros, so the
     // first bytes decode as NUL characters.
     await expectRead(root, "cap.ts", 4, "\x00\x00\x00\x00");
+  });
+});
+
+describe("readBoundedSync: safety fixtures (the CompilerHost.readFile contract)", () => {
+  // Opening a FIFO for reading blocks until a writer appears; the pre-open
+  // regular-file check is the FIFO DoS defense (research R4) — a broken
+  // guard here hangs this test rather than passing it.
+  it.skipIf(!mkfifoAvailable)(
+    "skips a FIFO with one diagnostic instead of blocking on open",
+    async () => {
+      const root = await makeTree({ "neighbor.ts": "neighbor" });
+      execFileSync("mkfifo", [join(root, "pipe.fifo")]);
+      expectSkipSync(join(root, "pipe.fifo"), "not a regular file");
+    },
+  );
+
+  it("skips a symlinked file pointing at a real file with one diagnostic", async () => {
+    const root = await makeTree({ "target.ts": "target-content" });
+    await symlink(join(root, "target.ts"), join(root, "link.ts"));
+    expectSkipSync(join(root, "link.ts"), "symlink");
+  });
+
+  it("skips a directory as not a regular file", async () => {
+    const root = await makeTree({ "realdir/inner.ts": "inner-content" });
+    expectSkipSync(join(root, "realdir"), "not a regular file");
+  });
+
+  it("skips a file over the 16 MiB cap before it is ever opened", async () => {
+    const root = await makeTree({ "big.ts": "" });
+    // truncate grows the empty file into a sparse 16 MiB + 1 file instantly.
+    await truncate(join(root, "big.ts"), MAX_FILE_BYTES + 1);
+    expectSkipSync(join(root, "big.ts"), "exceeds 16 MiB size limit");
+  });
+
+  // A candidate that disappeared before the read is a skip like any other.
+  it("skips a file that vanished before the read (ENOENT)", async () => {
+    const root = await makeTree({ "neighbor.ts": "neighbor" });
+    expectSkipSync(join(root, "vanished.ts"), "unreadable");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "skips a permission-denied file with one diagnostic",
+    async () => {
+      const root = await makeTree({ "locked.ts": "locked-content" });
+      const lockedPath = join(root, "locked.ts");
+      await chmod(lockedPath, 0o000);
+      try {
+        expectSkipSync(lockedPath, "unreadable");
+      } finally {
+        // Restore readability so tree teardown can never be blocked by the
+        // mode bits (the fixture helper's force rm also handles chmod 000).
+        await chmod(lockedPath, 0o644);
+      }
+    },
+  );
+
+  // 0xff is never valid UTF-8; the strict decoder signals the mojibake file
+  // instead of silently mangling it (Constitution Principle V).
+  it("skips a file with invalid UTF-8 bytes", async () => {
+    const root = await makeTree({ "neighbor.ts": "neighbor" });
+    await writeFile(join(root, "mojibake.ts"), Buffer.from([0x68, 0xff, 0x69]));
+    expectSkipSync(join(root, "mojibake.ts"), "decode error");
+  });
+});
+
+describe("readBoundedSync: positive path (the non-skip contract)", () => {
+  it("returns the exact content of a normal file with no diagnostics", async () => {
+    const root = await makeTree({ "plain.ts": "export const answer = 42;\n" });
+    expectReadSync(join(root, "plain.ts"), "export const answer = 42;\n");
+  });
+
+  it("reads an empty file as the empty string with no diagnostics", async () => {
+    const root = await makeTree({ "empty.ts": "" });
+    expectReadSync(join(root, "empty.ts"), "");
   });
 });
