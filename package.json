@@ -27,11 +27,13 @@
     "test": "vitest run --coverage",
     "prepublishOnly": "npm run build"
   },
+  "dependencies": {
+    "typescript": "^7.0.2"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.6.2",
     "@types/node": "^26.6.5",
     "@vitest/coverage-v8": "^5.0.5",
-    "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }
 }
