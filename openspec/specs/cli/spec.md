@@ -7,12 +7,12 @@ The command-line and packaging surface of reading-stone: the `reading-stone` npm
 
 ### Requirement: Package scaffold and entry point
 
-The system SHALL provide a `reading-stone` package installable via `npm ci`, with `package.json` declaring name `reading-stone`, version `0.1.0`, `type: module`, `engines.node >=22`, license `Apache-2.0`, a `bin` entry `reading-stone` pointing to `dist/main.js`, and no runtime dependencies. `src/index.ts` SHALL expose `export const VERSION = "0.1.0"`.
+The system SHALL provide a `reading-stone` package installable via `npm ci`, with `package.json` declaring name `reading-stone`, version `0.1.0`, `type: module`, `engines.node >=22`, license `Apache-2.0`, a `bin` entry `reading-stone` pointing to `dist/main.js`, and exactly one runtime dependency: `typescript` at `^7.0.2` (promoted from `devDependencies` per FR-029 in specs/002-analysis-engine — the TypeScript compiler API is required at runtime when Gaze spawns the analyzer). `src/index.ts` SHALL expose `export const VERSION = "0.1.0"`.
 
 #### Scenario: Package metadata is correct
 
 - **WHEN** `package.json` is inspected
-- **THEN** name is `reading-stone`, version is `0.1.0`, `type` is `module`, `engines.node` is `>=22`, license is `Apache-2.0`, the `bin` entry `reading-stone` points to `dist/main.js`, and `dependencies` is absent or empty
+- **THEN** name is `reading-stone`, version is `0.1.0`, `type` is `module`, `engines.node` is `>=22`, license is `Apache-2.0`, the `bin` entry `reading-stone` points to `dist/main.js`, and `dependencies` is exactly `{ "typescript": "^7.0.2" }`
 
 #### Scenario: Version constant is exposed
 
