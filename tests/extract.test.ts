@@ -37,7 +37,7 @@
 
 import { realpathSync } from "node:fs";
 import { extname } from "node:path";
-import type { Writable } from "node:stream";
+import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ExtractionRecord, extractFunctions } from "../src/extract.js";
 import { buildProgramContext } from "../src/program.js";
