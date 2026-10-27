@@ -22,8 +22,10 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * generated-marker exclusion (US4) joins the precedence chain in a later
  * task. `detectFramework` (US4, FR-006) reports the test framework from
  * configuration presence at the resolved root, reading `package.json`
- * through the shared safe reader; the US4 wiring task sequences it into
- * `discover`. All three surfaces are exported and composable; `discover`
+ * through the shared safe reader, and `hasGeneratedMarker` (US4, FR-007)
+ * scans a file's leading comment trivia for generated-code markers over
+ * a bounded prefix read; the US4 wiring task sequences both into
+ * `discover`. All four surfaces are exported and composable; `discover`
  * below runs them behind root-path validation (FR-010) and assembles the
  * wire-shaped result (FR-001).
  */
@@ -515,6 +517,228 @@ export async function detectFramework(
   }
   const hasJestKey = await packageJsonHasJestKey(resolvedRoot, stderr);
   return hasJestKey ? "jest" : "unknown";
+}
+
+/**
+ * The prefix-read budget for generated-marker scanning (FR-007; research
+ * R6): at most the first 64 KiB of a candidate file is ever read.
+ *
+ * A prefix budget, deliberately distinct from `PACKAGE_JSON_BUDGET`'s
+ * full 16 MiB cap: only the leading comment block can carry an exclusion
+ * marker, so 64 KiB — large enough for stacked license headers before a
+ * marker, small enough that per-file I/O stays trivial — is all the
+ * scanner needs. The plan's performance goals pin the value (spec
+ * Assumption 5 makes the budget a plan-level decision). Truncation at
+ * the budget is deterministic: the same bytes always produce the same
+ * verdict.
+ */
+const MARKER_PREFIX_BUDGET = 64 * 1024;
+
+/**
+ * The case-sensitive generated-code markers (FR-007): a leading comment
+ * block whose text contains either substring marks its file as
+ * generated. Case matters — `@Generated` and `code generated` are not
+ * markers.
+ */
+const GENERATED_MARKERS: readonly string[] = ["@generated", "Code generated"];
+
+/**
+ * Reports whether a UTF-16 code unit is whitespace the scanner skips
+ * between leading comments.
+ *
+ * The set mirrors the trivia the TypeScript scanner itself skips between
+ * tokens: ECMAScript's `WhiteSpace` and `LineTerminator` productions,
+ * plus next line (U+0085), which the compiler's scanner also treats as
+ * single-line whitespace. Spec-defined and engine-stable, never
+ * locale-dependent (research R8) — the skip set is a fixed function of
+ * the code unit.
+ *
+ * @param codeUnit A UTF-16 code unit from the decoded prefix.
+ * @returns `true` when the unit is skippable inter-comment whitespace.
+ */
+function isScannerWhitespace(codeUnit: number): boolean {
+  return (
+    codeUnit === 0x20 || // space
+    // Horizontal tab through carriage return: tab, line feed, vertical
+    // tab, form feed, carriage return.
+    (codeUnit >= 0x09 && codeUnit <= 0x0d) ||
+    codeUnit === 0x85 || // next line
+    codeUnit === 0xa0 || // no-break space
+    codeUnit === 0x1680 || // ogham space mark
+    // En quad through hair space: the Unicode Zs width range.
+    (codeUnit >= 0x2000 && codeUnit <= 0x200a) ||
+    codeUnit === 0x2028 || // line separator
+    codeUnit === 0x2029 || // paragraph separator
+    codeUnit === 0x202f || // narrow no-break space
+    codeUnit === 0x205f || // medium mathematical space
+    codeUnit === 0x3000 || // ideographic space
+    codeUnit === 0xfeff // zero-width no-break space (a mid-file BOM)
+  );
+}
+
+/**
+ * Reports whether a UTF-16 code unit terminates a line comment: exactly
+ * the ECMAScript `LineTerminator` production — line feed, carriage
+ * return, LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR (U+2029) — the
+ * same four the TypeScript scanner ends comments at. Recognizing all
+ * four matters for accuracy: a U+2028 inside a comment ends it in real
+ * JavaScript, so a scanner that kept consuming would swallow following
+ * code as comment text and could false-match a marker inside it.
+ *
+ * @param codeUnit A UTF-16 code unit from the decoded prefix.
+ * @returns `true` when the unit ends the current line.
+ */
+function isLineTerminator(codeUnit: number): boolean {
+  return (
+    codeUnit === 0x0a || // line feed
+    codeUnit === 0x0d || // carriage return
+    codeUnit === 0x2028 || // line separator
+    codeUnit === 0x2029 // paragraph separator
+  );
+}
+
+/**
+ * Reports whether one consumed comment's text contains a marker. The
+ * comment delimiters cannot themselves contain a marker, so the whole
+ * slice — delimiters included — is searched; case is significant
+ * (FR-007).
+ *
+ * @param text One consumed comment, delimiters included.
+ * @returns `true` when `@generated` or `Code generated` appears in it.
+ */
+function commentHasGeneratedMarker(text: string): boolean {
+  return GENERATED_MARKERS.some((marker) => text.includes(marker));
+}
+
+/**
+ * Reports whether the leading comment trivia of decoded file content
+ * carries a generated-code marker (FR-007; research R6).
+ *
+ * Bounded lexical-trivia scanning — not a reimplementation of
+ * TypeScript semantics (research R6; Principle III's target is the AST
+ * work of issue #3). The grammar walked is exactly what the spec pins:
+ * an optional single shebang line at position zero, then whitespace and
+ * consecutive line comments and block comments, stopping at the first
+ * non-comment content. Markers are matched only in consumed comment
+ * text, so the same words in a string literal or in a comment after
+ * code begins never exclude a file. A leading UTF-8 BOM never reaches
+ * this function — `readBounded`'s decoder strips one.
+ *
+ * Truncation determinism (research R8): every bound is the input string
+ * itself. A line comment that reaches the boundary without a terminator
+ * is consumed to the boundary, and a block comment left unterminated at
+ * the boundary is consumed to the boundary with its text scanned — the
+ * budget admits no further bytes, so the verdict is a pure function of
+ * the prefix.
+ *
+ * @param content The decoded file prefix (at most the 64 KiB budget).
+ * @returns `true` when any leading comment's text carries a marker.
+ */
+function leadingCommentBlockHasMarker(content: string): boolean {
+  let index = 0;
+  // A shebang is recognized only at position zero and only once: a `#!`
+  // appearing after any other content is code, where the scan has
+  // already stopped.
+  if (content.startsWith("#!")) {
+    while (index < content.length && !isLineTerminator(content.charCodeAt(index))) {
+      index++;
+    }
+    // The line break ending the shebang is skipped as whitespace below.
+  }
+  while (index < content.length) {
+    while (index < content.length && isScannerWhitespace(content.charCodeAt(index))) {
+      index++;
+    }
+    if (index >= content.length) {
+      break;
+    }
+    if (content.startsWith("//", index)) {
+      // Line comment: its text runs to the next line terminator or the
+      // boundary. The terminator itself is absorbed by the whitespace
+      // skip on the next pass.
+      const start = index;
+      index += 2;
+      while (index < content.length && !isLineTerminator(content.charCodeAt(index))) {
+        index++;
+      }
+      if (commentHasGeneratedMarker(content.slice(start, index))) {
+        return true;
+      }
+      continue;
+    }
+    if (content.startsWith("/*", index)) {
+      // Block comment: closed by the first closing delimiter after the
+      // opener (block comments do not nest). When the closing delimiter
+      // lies beyond the truncation boundary, the comment is consumed to
+      // the boundary — the text present is scanned and the scan stops
+      // (a documented deterministic choice; see the function comment).
+      const start = index;
+      const closeIndex = content.indexOf("*/", index + 2);
+      index = closeIndex === -1 ? content.length : closeIndex + 2;
+      if (commentHasGeneratedMarker(content.slice(start, index))) {
+        return true;
+      }
+      continue;
+    }
+    // First non-comment, non-whitespace content: the leading comment
+    // block is over. Markers beyond this point — trailing comments,
+    // string literals, later code — must not match; research R6 rejects
+    // a regex over the raw prefix for exactly this failure mode.
+    break;
+  }
+  return false;
+}
+
+/**
+ * Reports whether a walked file's leading comment block carries a
+ * generated-code marker (FR-007; research R6) — the signal that
+ * excludes the file from both discover lists.
+ *
+ * The read runs `readBounded`'s full guarded sequence (FR-017, FR-018)
+ * over the bounded 64 KiB prefix, so containment, the regular-file
+ * check, the 16 MiB size cap, and strict UTF-8 decoding all apply. A
+ * skipped file resolves `null` after `readBounded` itself has written
+ * the one `reading-stone: skipping <relPath>: <reason>` line; this
+ * function writes nothing on that path (FR-017's one-diagnostic
+ * contract) and reads the file as not marked — the safety skip already
+ * excludes it from both lists higher in the precedence chain (safety
+ * skip → `.d.ts` → generated marker → test → source), so a `false`
+ * here can never re-include it.
+ *
+ * A file that is merely marked — the exclusion this function reports —
+ * is a silent documented policy like `.d.ts` (FR-004, FR-007): no
+ * diagnostic, because nothing is wrong with the file; it is generated
+ * code, out of scope by policy.
+ *
+ * Not yet sequenced into `discover()`: the wiring task (T024) applies
+ * marker exclusion in the classification precedence chain. Exported
+ * now, like `detectFramework`, so the wiring — and the scanner's own
+ * surface — is directly testable.
+ *
+ * @param resolvedRoot Realpath-resolved absolute analysis root; the read
+ * is contained within it (FR-018).
+ * @param relPath Walk-built root-relative POSIX path, echoed verbatim in
+ * `readBounded`'s diagnostics.
+ * @param stderr Injected diagnostic sink (Testability principle — the
+ * server passes its own `stderr`); stdout is never touched.
+ * @returns `true` when the leading comment block's text contains the
+ * case-sensitive `@generated` or `Code generated` marker; `false` when
+ * it does not, when the prefix carries no comment trivia, or when the
+ * safe reader skipped the file.
+ */
+export async function hasGeneratedMarker(
+  resolvedRoot: string,
+  relPath: string,
+  stderr: Writable,
+): Promise<boolean> {
+  const prefix = await readBounded(resolvedRoot, relPath, MARKER_PREFIX_BUDGET, stderr);
+  if (prefix === null) {
+    // readBounded's skip path has already written the one diagnostic
+    // line, and the skip itself excludes the file from the lists, so
+    // "not marked" keeps the precedence chain intact.
+    return false;
+  }
+  return leadingCommentBlockHasMarker(prefix);
 }
 
 /**
