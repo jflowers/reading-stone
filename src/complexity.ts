@@ -4,6 +4,7 @@ import { isBinaryExpression, type Node, SyntaxKind } from "typescript/unstable/a
 
 import { prepareAnalysis } from "./analysis.js";
 import { type ExtractionRecord, isExtractedFunctionLike } from "./extract.js";
+import { compareFileLineName } from "./internal.js";
 import { derivePackage } from "./models.js";
 
 /**
@@ -102,7 +103,7 @@ export async function computeComplexity(
         complexity: 1 + countDecisionPoints(record),
       }),
     );
-    entries.sort(compareEntries);
+    entries.sort(compareFileLineName);
     return entries.map(serializeComplexityEntry);
   } finally {
     if (prepared.context.mode === "program") {
@@ -231,28 +232,4 @@ function isDecisionPoint(node: Node): boolean {
   return (
     isBinaryExpression(node) && LOGICAL_OPERATOR_KINDS.has(node.operatorToken.kind)
   );
-}
-
-/**
- * The FR-008/FR-020 entry order: `(file, line, name)`, codepoint
- * comparison for the string keys, numeric line ordering between them, and
- * `0` on full-key ties — the same total order `assembleFunctionRecords`
- * applies, applied here rather than inherited from extraction's own sort
- * so the wire guarantee holds whatever order the records arrive in.
- *
- * @param a Left entry.
- * @param b Right entry.
- * @returns The three-key comparison result.
- */
-function compareEntries(a: ComplexityEntry, b: ComplexityEntry): number {
-  if (a.file !== b.file) {
-    return a.file < b.file ? -1 : 1;
-  }
-  if (a.line !== b.line) {
-    return a.line - b.line;
-  }
-  if (a.name !== b.name) {
-    return a.name < b.name ? -1 : 1;
-  }
-  return 0;
 }

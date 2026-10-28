@@ -98,6 +98,7 @@ reading-stone/
 │   ├── protocol.ts          # Request/response types
 │   ├── taxonomy.ts          # Side-effect taxonomy (48 types, tiers, aliases)
 │   ├── models.ts            # Effect/FunctionRecord/classification records, serializers, derivePackage
+│   ├── internal.ts          # Shared internal primitives: (file, line, name) order, lexical path containment
 │   ├── safeio.ts            # Bounded safe file reader with skip diagnostics
 │   ├── discovery.ts         # Project walking, file classification, framework detection, discover()
 │   ├── analysis.ts          # Pattern rules + shared prepareAnalysis pipeline; analyze() response assembly
