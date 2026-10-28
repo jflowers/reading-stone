@@ -1,6 +1,5 @@
 import {
   type ArrowFunction,
-  type BindingName,
   type CallExpression,
   type ClassDeclaration,
   type ClassExpression,
@@ -12,7 +11,6 @@ import {
   type GetAccessorDeclaration,
   isArrowFunction,
   isBinaryExpression,
-  isBindingElement,
   isBlock,
   isCallExpression,
   isClassDeclaration,
@@ -21,7 +19,6 @@ import {
   isDecorator,
   isDeleteExpression,
   isElementAccessExpression,
-  isExportAssignment,
   isFunctionDeclaration,
   isFunctionExpression,
   isGetAccessorDeclaration,
@@ -34,7 +31,6 @@ import {
   isPostfixUnaryExpression,
   isPrefixUnaryExpression,
   isPropertyAccessExpression,
-  isPropertyAssignment,
   isPropertyDeclaration,
   isReturnStatement,
   isSetAccessorDeclaration,
@@ -61,7 +57,13 @@ import {
   type YieldExpression,
 } from "typescript/unstable/ast";
 import { type Checker, type Type, TypeFlags } from "typescript/unstable/sync";
-import type { ExtractionRecord } from "./extract.js";
+import {
+  collectBindingNames,
+  type ExtractionRecord,
+  isExtractedFunctionLike,
+  isSchedulingCall,
+  TIMER_GLOBAL_NAMES,
+} from "./extract.js";
 import { derivePackage, type Effect, type FunctionRecord } from "./models.js";
 import type { ProgramContext } from "./program.js";
 import { resolveSideEffectType } from "./taxonomy.js";
@@ -182,7 +184,7 @@ import { resolveSideEffectType } from "./taxonomy.js";
  * Attribution walk (FR-009; research R4): the per-record walk starts at
  * the record's own function-like node, STOPS descending at nested
  * extracted function-likes (they own their bodies — the same R4 form
- * conditions `extract.ts` encodes, mirrored here through
+ * conditions `extract.ts` encodes, imported here as
  * `isExtractedFunctionLike`), and traverses anonymous function-expression
  * bodies as part of the enclosing record. Write classification resolves
  * the written base identifier against a scope stack built from the
@@ -247,32 +249,6 @@ const BUILTIN_ERROR_CONSTRUCTORS: ReadonlySet<string> = new Set([
   "EvalError",
   "URIError",
   "AggregateError",
-]);
-
-/**
- * The bare timer globals shared by FR-016's spawn forms and research
- * R6.5's deferred-callback set: matched as whole callee identifiers,
- * receiver-blind. Together with the property-form scheduling methods
- * and `process.nextTick`, these are the closed scheduling set — the
- * exact set `extract.ts` mirrors for its `deferred` flag.
- */
-const TIMER_GLOBAL_NAMES: ReadonlySet<string> = new Set([
-  "setTimeout",
-  "setInterval",
-  "queueMicrotask",
-]);
-
-/**
- * The property-form scheduling methods (research R6.5): promise
- * continuations and DOM-style event registration, matched on the method
- * name alone. These set the deferred-callback boundary but are NOT
- * spawn forms — FR-016's closed spawn list has five members only.
- */
-const DEFERRED_CALLBACK_METHODS: ReadonlySet<string> = new Set([
-  "then",
-  "catch",
-  "finally",
-  "addEventListener",
 ]);
 
 /**
@@ -1099,55 +1075,6 @@ function isAsyncGenerator(node: FunctionLikeNode | undefined): boolean {
 }
 
 /**
- * Whether a function-like node is one of the R4 forms that owns its own
- * extraction record — the mirrored half of the attribution contract
- * (FR-009): the detection walk stops at exactly these, while
- * `extract.ts` emits a record for exactly these. Conditions mirror
- * `extract.ts`: body-bearing declarations, methods, accessors, and
- * constructors; expression forms only in a name-giving parent position.
- *
- * @param node The node to test.
- * @returns Whether the node's constructs belong to its own record.
- */
-function isExtractedFunctionLike(node: Node): boolean {
-  if (isFunctionDeclaration(node)) {
-    return node.body !== undefined;
-  }
-  if (
-    isMethodDeclaration(node) ||
-    isConstructorDeclaration(node) ||
-    isGetAccessorDeclaration(node) ||
-    isSetAccessorDeclaration(node)
-  ) {
-    return node.body !== undefined;
-  }
-  if (isArrowFunction(node) || isFunctionExpression(node)) {
-    return isNamedExpressionPosition(node);
-  }
-  return false;
-}
-
-/**
- * Whether an expression form sits in a parent position that names it —
- * the R4 record condition for arrows and function expressions, mirrored
- * from `extract.ts` (a destructuring pattern cannot initialize from a
- * function, so only an identifier variable name names one).
- *
- * @param node The arrow or function expression.
- * @returns Whether the parent shape gives the function a record name.
- */
-function isNamedExpressionPosition(node: ArrowFunction | FunctionExpression): boolean {
-  const parent = node.parent;
-  if (isVariableDeclaration(parent)) {
-    return parent.initializer === node && isIdentifier(parent.name);
-  }
-  if (isPropertyAssignment(parent) || isPropertyDeclaration(parent)) {
-    return parent.initializer === node;
-  }
-  return isExportAssignment(parent) && parent.expression === node;
-}
-
-/**
  * The function-likes lexically enclosing (and including) a node,
  * outermost-first. Each corresponds 1:1 to a function frame of the
  * record's scope chain — the correspondence `buildInitialScopes` zips
@@ -1173,9 +1100,10 @@ function ancestorFunctionLikes(node: Node): FunctionLikeNode[] {
 
 /**
  * Collects the parameter binding names of a function-like's parameter
- * list, recursing through destructuring patterns so every bound
- * spelling resolves — the same collection `extract.ts` performs for its
- * scope frames, mirrored here for the detection scopes.
+ * list, recursing through destructuring patterns so every bound spelling
+ * resolves — through the same `collectBindingNames` `extract.ts` uses
+ * for its scope frames, so the two walks never disagree on what a
+ * parameter binds.
  *
  * @param parameters The parameter list.
  * @returns The bound parameter names.
@@ -1186,25 +1114,6 @@ function paramNames(parameters: NodeArray<ParameterDeclaration>): Set<string> {
     collectBindingNames(parameter.name, names);
   }
   return names;
-}
-
-/**
- * Collects a binding name into a set, recursing through destructuring
- * patterns; pattern holes bind nothing.
- *
- * @param name The binding-name node.
- * @param names The accumulating name set.
- */
-function collectBindingNames(name: BindingName, names: Set<string>): void {
-  if (isIdentifier(name)) {
-    names.add(name.text);
-    return;
-  }
-  for (const element of name.elements) {
-    if (isBindingElement(element) && element.name !== undefined) {
-      collectBindingNames(element.name, names);
-    }
-  }
 }
 
 /**
@@ -1244,40 +1153,10 @@ function isProcessExitCall(node: CallExpression): boolean {
 }
 
 /**
- * Whether a call is one of the closed scheduling constructs (research
- * R6.5): bare timer globals, promise continuations, DOM-style event
- * registration, and Node's `process.nextTick`. This mirrors
- * `extract.ts`'s scheduling set exactly, so the detector's deferral
- * attribution consumes precisely the callbacks the extractor's
- * `deferred` flag names — never a wider or narrower set (Constitution
- * Principle I: the two walks must agree on what "deferred" means).
- *
- * @param node The call expression.
- * @returns Whether the call schedules a callback.
- */
-function isSchedulingCall(node: CallExpression): boolean {
-  const callee = node.expression;
-  if (isIdentifier(callee)) {
-    return TIMER_GLOBAL_NAMES.has(callee.text);
-  }
-  if (!isPropertyAccessExpression(callee)) {
-    return false;
-  }
-  if (DEFERRED_CALLBACK_METHODS.has(callee.name.text)) {
-    return true;
-  }
-  return (
-    callee.name.text === "nextTick" &&
-    isIdentifier(callee.expression) &&
-    callee.expression.text === "process"
-  );
-}
-
-/**
  * Whether a function-like node is a scheduling callback (research
- * R6.5): an argument of a closed-set scheduling call. Everything it
- * lexically contains executes after the enclosing function returns —
- * the deferral boundary `DeferredReturnMutation` attributes.
+ * R6.5): an argument of the imported `extract.ts` scheduling predicate.
+ * Everything it lexically contains executes after the enclosing function
+ * returns — the deferral boundary `DeferredReturnMutation` attributes.
  *
  * @param node The function-like node.
  * @returns Whether the node is an argument of a scheduling call.
@@ -1293,7 +1172,8 @@ function isSchedulingCallbackArgument(node: Node): boolean {
 
 /**
  * Whether a call is one of FR-016's five spawn forms: the three bare
- * timer globals and Node's `process.nextTick` (with `new Promise(...)`
+ * timer globals (`extract.ts`'s exported `TIMER_GLOBAL_NAMES` — the one
+ * shared set) and Node's `process.nextTick` (with `new Promise(...)`
  * matched at the `NewExpression` dispatch). Promise continuations and
  * event registration schedule callbacks but spawn nothing — they are
  * deliberately absent from the spawn set.
