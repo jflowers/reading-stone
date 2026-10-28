@@ -302,9 +302,11 @@ export function readBoundedSync(absPath: string, stderr: Writable): string | und
 function readPrefixSync(candidate: string, readLength: number): Buffer {
   // TOCTOU residual (research R4): the sync sequence has no await points,
   // so only an external process can swap or shrink the target between the
-  // lstat and this open. The "r"-mode open plus the guarded read below
-  // keep a swap on the error path (the same skip) rather than hanging the
-  // request; the pre-open lstat remains the actual FIFO DoS defense.
+  // lstat and this open. A regular-file-to-FIFO swap in that window would
+  // BLOCK this open — Node's synchronous fs provides no non-blocking mode —
+  // so the pre-open lstat regular-file check is the sole FIFO defense; the
+  // "r"-mode open and the guarded read below keep every other swap
+  // (removed, unreadable, truncated) on the error path, the same skip.
   const descriptor = openSync(candidate, "r");
   try {
     const buffer = Buffer.alloc(readLength);
