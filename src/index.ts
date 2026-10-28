@@ -1,7 +1,10 @@
 /**
  * Package entry point (T018; research R9) — the public Reading Stone
- * surface: `VERSION` plus the canonical side-effect taxonomy and the shared
- * record models, re-exported from their modules.
+ * surface: `VERSION`, the canonical side-effect taxonomy, the shared
+ * record models, and the analysis engine's public surface — the analyze,
+ * complexity, and coverage method entries, the detector's effect
+ * computations, the pattern helpers, and the pipeline's context and
+ * record types — re-exported from their modules.
  *
  * An explicit, exhaustive barrel (convention pack AP-001) makes the
  * vocabulary consumable package API instead of orphaned code (Zero-Waste
@@ -14,6 +17,22 @@
 export const VERSION = "0.1.0";
 
 export type {
+  PatternSet,
+  PreparedAnalysis,
+} from "./analysis.js";
+export {
+  analyze,
+  normalizePatterns,
+  pathInScope,
+} from "./analysis.js";
+export { computeComplexity } from "./complexity.js";
+export { parseCoverage } from "./coverage.js";
+export {
+  assembleFunctionRecords,
+  detectEffects,
+} from "./detector.js";
+export type { ExtractionRecord } from "./extract.js";
+export type {
   Classification,
   Effect,
   FunctionRecord,
@@ -24,6 +43,7 @@ export {
   serializeEffect,
   serializeFunctionRecord,
 } from "./models.js";
+export type { ProgramContext } from "./program.js";
 export type {
   SideEffectAlias,
   SideEffectType,
