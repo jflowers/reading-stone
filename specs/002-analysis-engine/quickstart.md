@@ -179,7 +179,7 @@ cat > "$TREE/coverage/coverage-final.json" <<EOF
   "statementMap": {
     "0": {"start": {"line": 1, "column": 0}, "end": {"line": 5, "column": 1}},
     "1": {"start": {"line": 2, "column": 2}, "end": {"line": 4, "column": 3}},
-    "2": {"start": {"line": 5, "column": 2}, "end": {"line": 5, "column": 12}}
+    "2": {"start": {"line": 4, "column": 2}, "end": {"line": 5, "column": 12}}
   },
   "fnMap": {
     "0": {"name": "grade",
