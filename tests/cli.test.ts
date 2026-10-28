@@ -95,7 +95,10 @@ describe("package metadata", () => {
     expect(pkg.type).toBe("module");
     expect(pkg.bin).toEqual({ "reading-stone": "dist/main.js" });
     expect((pkg as { engines?: { node?: string } }).engines?.node).toBe(">=22");
-    expect(pkg.dependencies).toEqual({ typescript: "^7.0.2" });
+    // Exact pin (review dispatch 44e85014): the runtime consumes the
+    // typescript/unstable/* surface, which carries no semver stability
+    // guarantee, so a caret range could resolve a breaking 7.x.
+    expect(pkg.dependencies).toEqual({ typescript: "7.0.2" });
   });
 
   it("contains the exact NOTICE attribution text", () => {
