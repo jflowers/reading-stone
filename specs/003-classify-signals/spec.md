@@ -1,0 +1,166 @@
+# Feature Specification: Classification Signal Pipeline (classify_signals)
+
+**Feature Branch**: `003-classify-signals`
+
+**Created**: 2026-10-28
+
+**Status**: Draft
+
+**Input**: User description: "Implement the classification signal pipeline (`classify_signals`) per the behavioral contract CC-001..006, and wire classification into `analyze` responses."
+
+**Originating issue**: [zero-dot-force/reading-stone#4](https://github.com/zero-dot-force/reading-stone/issues/4) — Classification signal pipeline (classify_signals method). Depends on #3 (analysis engine — `analyze`, `complexity`, `coverage` — closed and merged; this change builds on the current main-branch code shape); unblocks #5 (test-to-assertion mapping). The issue's proposed module layout (`src/signals/` package, import-graph inference module) is implementation structure realized at plan time; this spec pins capabilities, not file paths.
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Classified effects on every `analyze` response (Priority: P1)
+
+As Gaze (the consuming platform), when I send an `analyze` request, every reported side effect carries a classification — `{label, confidence}` with label `contractual`, `incidental`, or `ambiguous` and an integer confidence 0–100 — computed by a deterministic signal pipeline (five signal categories, per-tier boost, contradiction penalty), so that contract coverage is computed from real classifications instead of the platform's conservative every-unclassified-effect-is-contractual fallback that today inflates gap counts and deflates coverage scores (the platform observed ~28% contract coverage where 60–70% was expected before wiring classification in).
+
+**Why this priority**: The classification is the value. Without it, the platform's contract-coverage computation treats every detected effect as contractual, so incidental effects (logging, debug output, internal bookkeeping) pollute the contract denominator. This is also the constitution-sensitive core — Principle II demands ambiguity over omission (every effect must be classified, never silently dropped), and Principle I demands deterministic, formula-pinned output. The other two stories are independently shippable around it.
+
+**Independent Test**: Can be fully tested by analyzing controlled-signal-profile fixtures — one per signal category, with every contributing signal pinned — and asserting the exact returned `{label, confidence}` per effect (exact arithmetic: base 50 + tier boost + signal weights − contradiction penalty, clamped). No protocol-method addition is required.
+
+**Acceptance Scenarios**:
+
+1. **Given** a controlled fixture whose only signal is a routing-agreed contractual name prefix (+10) on a P0 effect, **When** `analyze` runs, **Then** the effect's classification is exactly `{label: "contractual", confidence: 85}` (50 + 25 + 10).
+2. **Given** a controlled fixture whose only signals are an agreed incidental name prefix (−10) and an agreed incidental documentation keyword (−15) on a P2 effect, **When** `analyze` runs, **Then** the classification is exactly `{label: "incidental", confidence: 25}` (50 + 0 − 10 − 15).
+3. **Given** an effect with no matching signals at all, **When** analyzed, **Then** its classification is `{label: "ambiguous", confidence: 50 + tier boost}` — 75 for P0, 60 for P1, 50 for P2–P4 — never an omitted field (Constitution Principle II).
+4. **Given** an effect carrying both a positive-weight and a negative-weight signal (contradiction), **When** analyzed, **Then** the confidence is reduced by exactly 20 (a +10 and a −15 signal on a P1 effect yield 35, `incidental`) and the contradiction is recorded with source `contradiction` (FR-011).
+5. **Given** signal profiles whose raw score exceeds 100 or falls below 0, **When** classified, **Then** the confidence is clamped to exactly 100 or 0.
+6. **Given** confidences at the label boundaries, **When** labels are derived, **Then** 80 → `contractual`, 79 → `ambiguous`, 50 → `ambiguous`, 49 → `incidental` (FR-010).
+7. **Given** the same tree analyzed twice, **When** the serialized responses are compared byte-for-byte, **Then** they are identical (Constitution Principle I).
+8. **Given** any `analyze` response after this change, **When** an effect is inspected, **Then** it carries `classification: {label, confidence}` — spec 002's FR-019 omission rule is superseded.
+
+---
+
+### User Story 2 - Raw signals over `classify_signals` (Priority: P2)
+
+As Gaze, when I send a `classify_signals` request carrying a project root and optional path patterns, I receive the raw evidence behind those classifications — one signal per (function, effect-type, source) triple a rule matched — so that I can audit why an effect was labeled, merge analyzer signals into my own scoring, and explain classifications in reports.
+
+**Why this priority**: The method is the protocol's transparency surface and the platform's merge input (the platform calls `classify_signals` when — and only when — the capability flag is true), but the labels themselves already flow through `analyze` (US1), so the platform functions without the raw feed.
+
+**Independent Test**: Can be fully tested by sending `classify_signals` requests over fixture trees and asserting the exact signals array (function, package, side_effect_type, source, weight), plus golden byte-identical response tests and the capability-flag / reserved-method conformance checks.
+
+**Acceptance Scenarios**:
+
+1. **Given** a function-effect pair that matches both the naming and documentation extractors, **When** `classify_signals` runs, **Then** two signals are returned for that pair — one per source — both carrying that effect's canonical `side_effect_type`.
+2. **Given** a function with zero side effects, **When** `classify_signals` runs, **Then** no signals are attributed to it.
+3. **Given** the fan-out over a tree, **When** the response is inspected, **Then** each signal carries exactly `function` (unqualified name), `package` (dotted module path), `side_effect_type`, `source`, integer `weight`, and optionally a short non-empty `reasoning` — and no signal carries a classification label.
+4. **Given** a `classify_signals` request with invalid params (non-object params, missing or non-string `root_path`, `patterns` present but not a string array, unknown keys, or an unusable root path), **When** handled, **Then** it is rejected with `-32602` per the shared analysis-params error table (spec 002 FR-027); analyzer-internal failures remain `-32603`.
+5. **Given** `initialize`, **When** called after this change, **Then** `capabilities.classify_signals` is `true` with the other five flags unchanged, and the reserved `-32601` set is exactly `test_mapping`, `analyze/stream`, `doc_coverage`, `cognitive_complexity`.
+6. **Given** the same tree analyzed twice, **When** responses are compared byte-for-byte, **Then** they are identical, with signals ordered by the stable key `(package, function, side_effect_type, source)`.
+
+---
+
+### User Story 3 - Caller dependency inference over the import graph (Priority: P2)
+
+As the signal pipeline, I derive each analyzed function's inbound caller count from the analyzed project's own import graph — counting the distinct modules whose call sites resolve to the function — so that the caller signal reflects real usage structure without executing analyzed code and without heuristic name matching.
+
+**Why this priority**: The caller signal is one of the five evidence categories and the only one requiring cross-module inference, but it has no standalone protocol surface — its value is realized through US1's classifications and US2's signals (mirroring the bootstrap story's position in spec 002).
+
+**Independent Test**: Can be fully tested by unit-testing the caller index against multi-module fixture trees — functions called from 0, 1, 2, 3, and 4+ distinct modules, multiple call sites within one module, and self-recursion — asserting exact distinct-module counts and bucket weights.
+
+**Acceptance Scenarios**:
+
+1. **Given** a function called from exactly 1 distinct module, **When** the caller signal is derived, **Then** it carries weight +5 with source `caller_count`.
+2. **Given** functions called from 2 and from 3 distinct modules, **When** derived, **Then** both carry +10.
+3. **Given** a function called from 4 or more distinct modules, **When** derived, **Then** it carries +15.
+4. **Given** a function with zero inbound callers, **When** the pipeline runs, **Then** no `caller_count` signal is emitted (neutral evidence, not negative — FR-004).
+5. **Given** multiple call sites to a function within one module, **When** counted, **Then** the module counts once.
+6. **Given** a function that calls itself (recursion), **When** counted, **Then** the self-call is not an inbound caller.
+7. **Given** the caller index construction, **When** compared with the `analyze` file set over the same request, **Then** both enumerate the identical discovered, pattern-filtered, exclusion-filtered file set (test-classified and generated files excluded).
+
+---
+
+### Edge Cases
+
+- What happens when no type checker is available (parse-only mode — no usable tsconfig)? The interface signal is undeterminable and simply absent; the remaining signals and the formula still classify every effect; the request completes normally (degradation reduces precision, never availability).
+- What happens when a function named with an `Err` prefix is evaluated for a non-`SentinelError` effect? The sentinel special case does not fire; the ordinary prefix rules apply (and `Err` is in neither prefix list, so typically no naming signal).
+- What happens with `SentinelError` attribution? The effect attaches to the file's first function record (spec 002 FR-013), so the +30 sentinel signal fires only when that carrying function's name begins with `Err` — deterministic, occasionally surprising, fixture-pinned.
+- What happens when a name's leading characters match a longer and a shorter prefix? The longest applicable prefix wins; stem-boundary imprecision (a name like `readyCheckout` matching the `Read` stem) is a documented, fixture-pinned false-positive surface acceptable for a heuristic signal.
+- What happens with exported-ness in CommonJS `.cjs` sources (`module.exports`) versus ESM `export`? Both export forms count as exported — JavaScript-family sources are first-class analysis targets (Constitution Principle III).
+- What happens with effects already carrying the detection-ambiguity marker (spec 002 FR-017, `detail.confidence: "ambiguous"`)? They are classified by the same uniform formula; the marker remains untouched — detection confidence and classification label are distinct notions.
+- What happens when a `patterns` set matches no files? `classify_signals` returns `{"signals": []}`, never an error (spec 002 FR-001 prefix semantics).
+- What happens at the numeric boundaries? Raw scores beyond the clamp bounds yield exactly 0 or 100; confidences of exactly 80, 79, 50, and 49 land on the pinned label boundaries (US1-6).
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+**Signal model**
+
+- **FR-001**: The pipeline MUST attribute raw signals per (function, effect) pair. Each signal carries `function` (unqualified name), `package` (dotted module path), `side_effect_type` (a canonical taxonomy name — aliases never emitted), `source` (one of the closed source set below), integer `weight`, and optional `reasoning` (a short, non-empty string when present). Raw signals MUST NOT carry a classification label. The closed source set is `interface`, `visibility`, `caller_count`, `naming_convention`, the documentation source pinned by FR-006, and the contradiction source pinned by FR-011; no other source value may appear.
+
+**Signal extractors** (the originating issue's CC-001..005 behaviors)
+
+- **FR-002** (interface satisfaction): For a method that is part of an interface contract — it satisfies a member of an interface type, determined through the compiler's type checker — the pipeline MUST emit an `interface` signal with weight +30. When no type checker is available (parse-only mode) or the method satisfies no interface member, no interface signal is emitted; undeterminable is absence of evidence, never an error (Constitution Principle II).
+- **FR-003** (API visibility): The `visibility` signal weight MUST be the sum of its applicable components — exported function +8, exported return type +6 (the declared return type references an exported type), exported receiver type +6 (a method's enclosing class or interface is exported) — clamped to a maximum of +20. A function with no applicable component (module-private, no exported references) produces no visibility signal.
+- **FR-004** (caller dependency): The `caller_count` signal weight MUST follow the inbound distinct-module caller buckets: exactly 1 distinct calling module → +5; 2–3 → +10; 4 or more → +15; 0 → no signal (weight 0 is neutral evidence and is not emitted).
+- **FR-005** (naming conventions): The `naming_convention` signal MUST apply the contractual prefixes +10 — `Get`, `Fetch`, `Load`, `Read`, `Save`, `Write`, `Update`, `Set`, `Delete`, `Remove`, `Handle`, `Process`, `Compute`, `Analyze`, `Classify`, `Parse`, `Build`, `New` — and the incidental prefixes −10 — `log`, `debug`, `trace`, `print` — when the matched prefix agrees with the effect type via the routing table (FR-007). Prefix matching is case-insensitive on the name's leading characters; the longest applicable prefix wins. The sentinel special case takes precedence: a function whose name begins with `Err` evaluated for a `SentinelError` effect MUST emit +30 in place of the prefix rules for that effect.
+- **FR-006** (documentation): The documentation signal MUST apply: +15 for a direct keyword match [NEEDS CLARIFICATION: the issue pins the indirect and incidental keyword lists but not the direct set — candidates: (a) documentation tags such as `@returns`/`@throws` as direct with prose keywords indirect, (b) routing-table-defined strong keywords per effect type, (c) port the reference analyzer's direct keyword list (Open Question Q3)]; +5 for an indirect keyword — `returns`, `writes`, `modifies`, `updates`, `sets`, `persists`, `stores`, `deletes`, `removes` — and −15 for an incidental keyword — `logs`, `prints`, `traces`, `debugs` — found in the function's documentation comment, each gated by routing agreement with the effect type (FR-007). A function with no documentation comment, or none whose keywords agree, produces no documentation signal. The signal's source string MUST be [NEEDS CLARIFICATION: `docstring` — the protocol's established documentation-source string, emitted by the reference analyzer — or `jsdoc`, the TypeScript-native name; the issue names the module `jsdoc` but pins no wire string (Open Question Q2)].
+- **FR-007** (effect-type routing): The system MUST maintain a routing table mapping every canonical effect type to the naming prefixes and documentation keywords that agree with it. Naming (FR-005) and documentation (FR-006) signals MUST be emitted only when the matched prefix or keyword agrees with the effect's type through this table; a match without agreement produces no signal. An effect type with no agreeing prefix or keyword MUST produce no naming/documentation signal — never an exception. The complete table over all 48 canonical types MUST be pinned as normative data in this feature's data model, with every type routed to a branch or explicitly to none.
+
+**Adapter: fan-out and confidence** (the originating issue's CC-006 behavior)
+
+- **FR-008** (fan-out): For each function record in the analysis result and each effect on that record, the pipeline MUST run every extractor and emit one signal per rule that applies. A function with zero effects yields zero signals. Extractor results MUST NOT be deduplicated across sources — multiple signals for the same (function, effect) pair are expected and retained.
+- **FR-009** (confidence formula): The classification confidence MUST be computed as `50 + tier_boost + Σ(signal weights) − 20` when a contradiction is present (FR-011), where `tier_boost` is +25 for P0 effects, +10 for P1, and +0 for P2–P4, taken from the effect's taxonomy tier. The result MUST be an integer clamped to [0, 100].
+- **FR-010** (labels): The label MUST be derived from the clamped confidence: `contractual` for ≥ 80, `ambiguous` for [50, 80), `incidental` for < 50.
+- **FR-011** (contradiction): When the signals for one (function, effect) pair include both at least one positive-weight and at least one negative-weight signal, the pipeline MUST apply exactly one −20 penalty to the confidence and MUST record the contradiction with source `contradiction` [NEEDS CLARIFICATION: where the contradiction record is surfaced — candidates: (a) a synthesized signal entry (source `contradiction`, weight −20) in the `classify_signals` result, (b) evidence within the `analyze` classification, (c) analyzer-internal only; the issue requires it "recorded with source contradiction" without naming the surface (Open Question Q1)].
+
+**`analyze` wiring**
+
+- **FR-012**: Every effect reported by `analyze` MUST carry `classification: {label, confidence}` computed by the shared pipeline (FR-002–FR-011), superseding spec 002 FR-019's omission rule. The existing classification serializer validation (closed label set, integer confidence 0–100, fail-loud on violation) remains in force (Constitution Principle I).
+- **FR-013**: `analyze` and `classify_signals` MUST derive their outputs from one shared signal-extraction pipeline over the identical discovered, pattern-filtered, exclusion-filtered file set — the labels reported by `analyze` MUST be consistent with the raw signals reported by `classify_signals` for the same tree and request.
+
+**`classify_signals` method**
+
+- **FR-014**: The dispatch layer MUST register a `classify_signals` handler accepting the shared analysis params (`root_path` required string, `patterns` optional string array) with the same validation and `-32602` error table as `analyze` (spec 002 FR-027); analyzer-internal failures remain `-32603`. The result MUST be `{"signals": [...]}` with each signal shaped per FR-001, deterministically ordered by the stable key `(package, function, side_effect_type, source)`, and byte-identical across repeated requests over the same tree (Constitution Principle I).
+- **FR-015**: The `initialize` capability response MUST advertise `classify_signals: true` with the other five flags unchanged (`discover` stays `true`; `test_mapping`, `streaming`, `doc_coverage`, and `cognitive_complexity` stay `false`); the reserved `-32601` set MUST shrink to exactly `test_mapping`, `analyze/stream`, `doc_coverage`, `cognitive_complexity`.
+
+**Caller inference**
+
+- **FR-016**: The caller index MUST count inbound callers through the analyzed project's import graph: for each analyzed function, the number of distinct modules whose call sites resolve to that function. The index MUST be built over the same file set as the analysis (test-classified and generated files excluded), MUST NOT execute or import analyzed code (Constitution Principle V), and MUST NOT count a function's self-recursive calls as inbound callers.
+
+**Bookkeeping and quality gates**
+
+- **FR-017**: The materialized OpenSpec specifications that currently assert `classify_signals` answers `-32601` and advertises `classify_signals: false` MUST be updated in the same change (cross-pipeline bookkeeping, mirroring spec 002 FR-031).
+- **FR-018**: All protected project quality gates MUST pass — `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage` at the protected 85% thresholds (lines, statements, functions, branches). The implementation plan MUST specify the coverage strategy for the new modules (Constitution Principle IV).
+
+### Key Entities
+
+- **Signal**: One raw evidence record — `function`, `package`, `side_effect_type`, `source`, `weight`, optional `reasoning` — attributed to a (function, effect) pair; carries no label. First produced by this feature.
+- **Classification** (existing, spec 001): `{label, confidence}` — the contractual/incidental/ambiguous verdict. This feature is its first producer on the wire.
+- **Contradiction record**: The −20 penalty evidence, recorded with source `contradiction`; its wire surface is pinned by Open Question Q1 (FR-011).
+- **CallerIndex** (internal, not protocol-visible): the import-graph-derived index answering "how many distinct modules call this function".
+- **RoutingTable** (internal, not protocol-visible): effect type → agreeing naming prefixes and documentation keywords; normative data pinned in this feature's data model.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: The controlled-signal-profile fixture suite — one fixture per signal category (interface, visibility, caller, naming, documentation) — passes with 100% exact-match on scores and labels: every fixture pins all contributing signals so the expected confidence is exact arithmetic.
+- **SC-002**: The contradiction fixture passes — mixed-polarity signals produce the −20 penalty, recorded with source `contradiction`.
+- **SC-003**: Tier-boost fixtures pass — identical signal profiles on P0, P1, and P2+ effects produce exactly the +25/+10/+0 offsets.
+- **SC-004**: 100% of effects in `analyze` fixture responses carry a serializer-valid `classification: {label, confidence}`; no effect omits the field.
+- **SC-005**: `classify_signals` fixture tests pass — exact signals arrays, the shared `-32602` error table, and golden byte-identical repeat responses.
+- **SC-006**: The `initialize` conformance test passes — `classify_signals: true`, the other five flags unchanged, and the reserved `-32601` set exactly the four remaining names.
+- **SC-007**: All protected project quality gates pass — `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage` at the protected 85% thresholds (lines, statements, functions, branches).
+
+## Assumptions
+
+1. **CC-001..006 substance**: The originating issue references a "behavioral contract CC-001..006" that exists nowhere else in this repository; the issue body itself carries the six behaviors' substance (five extractor categories plus the adapter formula), which FR-002–FR-011 pin. This spec does not assert a specific CC-number mapping.
+2. **Every effect classified**: The formula is total — an effect with no signals yields 50 + tier boost (the ambiguous floor) — so `analyze` classifications are always present after this change. The issue's "replace `classification: null`" is realized as: the field, omitted since spec 002 FR-019, is now always present with a computed value (per the ratified omit-unset-optionals rule, absence was wire-equivalent to null; presence with a computed value supersedes it).
+3. **Zero-caller neutrality**: 0 inbound callers emits no `caller_count` signal — weight 0 carries no evidence, mirroring the reference analyzer's extractor (which returns nothing for zero-caller counts).
+4. **No negative visibility**: The visibility signal has no negative component — a module-private function emits no visibility signal rather than a negative one (the issue defines only positive components, and the clamp reinforces a positive-only design).
+5. **Prefix matching**: case-insensitive on the name's leading characters, longest applicable prefix wins; stem-boundary imprecision (`readyCheckout` matching the `Read` stem) is a documented false-positive surface acceptable for a heuristic signal.
+6. **Sentinel special case**: fires only for `Err`-prefixed names evaluated on `SentinelError` effects, taking precedence over the prefix lists; because sentinel effects attach to the file's first function record (spec 002 FR-013), the carrying function's name governs.
+7. **Per-pair fan-out**: Signals are attributed per (function, effect) pair following the reference adapter — one signal per applying rule per effect; no cross-effect aggregation, no dedup across sources.
+8. **`reasoning` optionality**: The issue's types deliverable makes `reasoning` optional; when present it is a short non-empty string. Extractors may always include it (reference-analyzer precedent); the wire contract only bounds its shape.
+9. **`classify_signals` result shape**: `{"signals": [...]}` with per-signal fields `function`/`package`/`side_effect_type`/`source`/`weight` (plus optional `reasoning`) — the protocol's established shape; the identity fields are `function` + `package`, never `name`.
+10. **Parse-only degradation**: Without a type checker the interface signal is unavailable and absent; remaining signals still classify every effect — degradation reduces precision, never availability (mirroring spec 002 FR-004's philosophy).
+11. **Caller index scope**: Same discovered/excluded file set as `analyze` (test and generated files excluded); distinct modules counted once regardless of call-site count; self-recursion excluded.
+12. **Deterministic ordering**: Signals ordered by `(package, function, side_effect_type, source)` — the reference adapter's stable key; classifications inherit the detector's existing deterministic record and effect orders.
+13. **Cross-pipeline bookkeeping**: The materialized OpenSpec server/protocol specs assert the current dispatch/capability state and must be updated in the same change (FR-017); this specification records the impact but does not modify those files.
+14. **Detection-ambiguity effects**: Effects carrying the spec 002 FR-017 ambiguity marker (`detail.confidence: "ambiguous"`) are classified by the same uniform formula; the marker is untouched — detection confidence and classification label remain distinct notions.
+15. **Scope boundary — mechanical signals only**: This change implements the five mechanical source-code signal categories. Platform-side doc-signal derivation (READMEs, architecture docs, sidecar contract overrides) and the platform's own scoring/merging remain in Gaze; reading-stone reads no project documentation beyond source comments.
+16. **Module layout at plan time**: The issue's proposed `src/signals/` package and inference module are realized (and may be adjusted) at plan time; this spec pins capabilities and wire contracts, not file paths.
