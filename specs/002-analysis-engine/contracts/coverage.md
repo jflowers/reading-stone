@@ -69,16 +69,42 @@ usable artifact exists, the result is empty, not an error:
 | no `coverage/coverage-final.json` at the root | `{"functions": []}` |
 | unreadable, unparseable, or structurally invalid document | `{"functions": []}` |
 | empty document (`{}`) | `{"functions": []}` |
+| parseable document whose every file entry is non-conforming | `{"functions": []}` + one stderr diagnostic line |
 
 None of these is a JSON-RPC error. The artifact is read through the
 bounded safe reader at the full 16 MiB cap (one stderr diagnostic line
-on a read skip).
+on a read skip). The last row's diagnostic — `reading-stone: skipping
+coverage document: no conforming file entries` — fires only when the
+document had keys and none held the referenced shape (an emitter-mismatch
+signature, review fix: the silent form was a false negative). Empty
+results caused by `patterns` filtering or root containment stay silent,
+as does the keyless `{}` document.
 
 **Per-entry tolerance** (FR-026): within a parseable document, an
 individual file entry that is non-conforming (missing or malformed
 `statementMap`, `fnMap`, or `s`) is skipped deterministically while
 conforming entries are reported — the document is never rejected
 wholesale.
+
+**Null end columns** (review fix; the vitest v8 emitter's real shape):
+Istanbul's v8 coverage pipeline writes `"column": null` on END positions
+when the sourcemap carries no column information. Conformance therefore
+requires a numeric `line` on both positions and a numeric START column,
+accepts a null or absent END column, and normalizes it to an end-of-line
+sentinel: the range deterministically contains every position on its end
+line. See [data-model.md](../data-model.md) for the parsed model.
+
+**Resource bounds** (review fix; Constitution Principle V): attribution
+is O(statements × functions) per file entry, which the 16 MiB read cap
+alone does not bound. A file entry whose `statementMap` exceeds 50,000
+records or whose `fnMap` exceeds 5,000 records is skipped with one stderr
+diagnostic line (`reading-stone: skipping <file>: coverage record budget
+exceeded`), and a document-level attribution work budget (the cumulative
+sum of statements × functions, capped at 25,000,000) skips any entry that
+would exceed the remainder (`reading-stone: skipping <file>: attribution
+work budget exceeded`). Skips are deterministic (JSON key enumeration
+order) and never errors; later entries that fit the remainder still
+report.
 
 **Containment** (spec edge case): file keys that do not resolve under
 the analysis root are skipped. `patterns` filters returned entries by

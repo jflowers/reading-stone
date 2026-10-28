@@ -123,6 +123,19 @@ are skipped deterministically. The document is read through the bounded
 safe reader at the full 16 MiB budget (JSON cannot parse from a
 truncated prefix).
 
+**Null END columns** (review fix; the vitest v8 emitter's real shape):
+Istanbul's v8 coverage pipeline writes `"column": null` on END positions
+whenever the sourcemap carries no column information (the motivating
+real artifact had null end columns on 1542 of 1558 statementMap records).
+Conformance therefore requires a numeric `line` on both positions and a
+numeric START `column`, accepts a null or absent END `column`, and
+normalizes it to an end-of-line sentinel — the parsed `Pos` is always
+numeric, and a null-ended range deterministically contains every
+position on its end line. A document that parses yet has no conforming
+file entry writes one stderr diagnostic line (the not-silent rung of
+FR-025's ladder); budget-skipped entries (contracts/coverage.md) are
+conforming and never trigger it.
+
 ## ProgramContext (internal — not protocol-visible)
 
 The bootstrapped analysis context (spec Key Entities; research R1/R2),
