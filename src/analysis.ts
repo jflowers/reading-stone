@@ -127,9 +127,10 @@ export function pathInScope(relPath: string, patternSet: PatternSet): boolean {
 
 /**
  * The `prepareAnalysis` result (data-model.md's internal pipeline order:
- * `ProgramContext` → `ExtractionRecord`) — the two surfaces the analyze
- * and complexity computations run over (FR-022: the identical extraction
- * set, scope, and ordering both methods report).
+ * `ProgramContext` → `ExtractionRecord`) — the surfaces the analyze and
+ * complexity computations run over (FR-022: the identical extraction
+ * set, scope, and ordering both methods report), plus the in-scope file
+ * set spec 003's signal pipeline filters by.
  */
 export interface PreparedAnalysis {
   /**
@@ -147,6 +148,19 @@ export interface PreparedAnalysis {
    * complexity engine (FR-021) both consume.
    */
   readonly records: readonly ExtractionRecord[];
+
+  /**
+   * The in-scope file set (spec 003 FR-016's file-set parity; research
+   * R7): the pattern-filtered, test-excluded source list in
+   * classifyFiles' sorted order — the exact set `records` were extracted
+   * from. The caller index (spec 003 T009) filters call sites by this
+   * set, so the index is built over the identical discovered,
+   * pattern-filtered, exclusion-filtered file set as the analysis by
+   * construction — no second scope computation to drift. A purely
+   * additive widening: the analyze and complexity handlers ignore it,
+   * and their behavior is unchanged.
+   */
+  readonly inScopePaths: readonly string[];
 }
 
 /**
@@ -198,7 +212,8 @@ export interface PreparedAnalysis {
  * normalizes.
  * @param stderr Injected diagnostic sink (Testability principle); defaults
  * to `process.stderr`.
- * @returns The bootstrapped `ProgramContext` and the extraction records.
+ * @returns The bootstrapped `ProgramContext`, the extraction records,
+ * and the in-scope file set (spec 003 FR-016's file-set parity).
  * @throws InvalidRootPathError when the root does not exist, is not a
  * directory, or cannot be accessed; the server handler maps it to the
  * contract's `-32602` response.
@@ -238,7 +253,7 @@ export async function prepareAnalysis(
     }
     throw error;
   }
-  return { context, records };
+  return { context, records, inScopePaths: inScope };
 }
 
 /**
