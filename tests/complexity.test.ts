@@ -51,12 +51,11 @@
 // parity tree's grade/bump/reset/add values cross-check quickstart.md
 // section 4's documented complexity projection.
 
-import { Writable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { analyze } from "../src/analysis.js";
 import { computeComplexity } from "../src/complexity.js";
 import { derivePackage } from "../src/models.js";
-import { createFixtureTree } from "./helpers/fixtures.js";
+import { createFixtureTree, memorySink } from "./helpers/fixtures.js";
 
 /** One serialized complexity entry (name, package, file, line, complexity). */
 interface WireEntry {
@@ -65,27 +64,6 @@ interface WireEntry {
   readonly file: string;
   readonly line: number;
   readonly complexity: number;
-}
-
-// In-memory stand-in for the Server's stderr (the established sink pattern,
-// copied per-file — tasks.md pins the existing fixture/sink helpers rather
-// than new shared test infrastructure).
-function memorySink(): { stream: Writable; text: () => string } {
-  const chunks: string[] = [];
-  const stream = new Writable({
-    decodeStrings: false,
-    write(
-      chunk: string | Uint8Array,
-      _encoding: string,
-      callback: (error?: Error | null) => void,
-    ): void {
-      const decoded =
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      chunks.push(decoded);
-      callback();
-    },
-  });
-  return { stream, text: () => chunks.join("") };
 }
 
 // Narrows the entry's result through the two documented shapes (see the

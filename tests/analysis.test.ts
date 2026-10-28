@@ -59,63 +59,40 @@
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizePatterns, pathInScope, prepareAnalysis } from "../src/analysis.js";
 import { InvalidRootPathError } from "../src/discovery.js";
-import { createFixtureTree } from "./helpers/fixtures.js";
+import {
+  createFixtureTree,
+  drainCleanups,
+  memorySink,
+  registerCleanup,
+} from "./helpers/fixtures.js";
 
-// Fixture trees and scratch directories register their cleanup here so every
-// test body stays linear; afterEach drains the queue in creation order (same
-// pattern as tests/discovery.test.ts).
-const pendingCleanups: Array<() => Promise<void>> = [];
-
+// Fixture trees and scratch directories register their cleanup with the
+// shared helpers so every test body stays linear; afterEach drains the
+// queue in creation order.
 afterEach(async () => {
   // The stdout-spy cases restore here so every case stays independent.
   vi.restoreAllMocks();
-  const cleanups = pendingCleanups.splice(0, pendingCleanups.length);
-  for (const cleanup of cleanups) {
-    await cleanup();
-  }
+  await drainCleanups();
 });
 
 async function makeTree(files: Readonly<Record<string, string>>): Promise<string> {
   const tree = await createFixtureTree(files);
-  pendingCleanups.push(tree.cleanup);
+  registerCleanup(tree.cleanup);
   return tree.root;
 }
 
 async function makeScratchDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "reading-stone-scratch-"));
-  pendingCleanups.push(() => rm(dir, { recursive: true, force: true }));
+  registerCleanup(() => rm(dir, { recursive: true, force: true }));
   return dir;
 }
 
 // chmod-based inaccessibility is meaningless for root, where mode bits do
 // not restrict the owner.
 const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
-
-// In-memory stand-in for the Server's stderr (the established sink pattern
-// from tests/safeio.test.ts, copied per-file): collects exactly what the
-// pipeline writes so the scope cases can assert the silent-exclusion
-// contract precisely.
-function memorySink(): { stream: Writable; text: () => string } {
-  const chunks: string[] = [];
-  const stream = new Writable({
-    decodeStrings: false,
-    write(
-      chunk: string | Uint8Array,
-      _encoding: string,
-      callback: (error?: Error | null) => void,
-    ): void {
-      const decoded =
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      chunks.push(decoded);
-      callback();
-    },
-  });
-  return { stream, text: () => chunks.join("") };
-}
 
 // Shared fixture texts (module-scope constants prevent drift between the
 // on-disk tree and the expected records). Every excluded-file fixture

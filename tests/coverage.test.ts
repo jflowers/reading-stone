@@ -76,10 +76,14 @@
 import { realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { Writable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseCoverage } from "../src/coverage.js";
-import { createFixtureTree } from "./helpers/fixtures.js";
+import {
+  createFixtureTree,
+  drainCleanups,
+  memorySink,
+  registerCleanup,
+} from "./helpers/fixtures.js";
 
 /** One serialized coverage entry (the seven FR-024 wire fields). */
 interface WireEntry {
@@ -90,27 +94,6 @@ interface WireEntry {
   readonly covered_stmts: number;
   readonly total_stmts: number;
   readonly percentage: number;
-}
-
-// In-memory stand-in for the Server's stderr (the established sink pattern,
-// copied per-file — tasks.md pins the existing fixture/sink helpers rather
-// than new shared test infrastructure).
-function memorySink(): { stream: Writable; text: () => string } {
-  const chunks: string[] = [];
-  const stream = new Writable({
-    decodeStrings: false,
-    write(
-      chunk: string | Uint8Array,
-      _encoding: string,
-      callback: (error?: Error | null) => void,
-    ): void {
-      const decoded =
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      chunks.push(decoded);
-      callback();
-    },
-  });
-  return { stream, text: () => chunks.join("") };
 }
 
 // Narrows the result through the two documented shapes (see the header's
@@ -150,21 +133,13 @@ async function coverageTree(
   return { entries: extractEntries(result), stderr: sink.text };
 }
 
-// Fixture trees register their cleanup here so every test body stays linear;
-// afterEach drains the queue in creation order (same pattern as
-// tests/analysis.test.ts).
-const pendingCleanups: Array<() => Promise<void>> = [];
-
-afterEach(async () => {
-  const cleanups = pendingCleanups.splice(0, pendingCleanups.length);
-  for (const cleanup of cleanups) {
-    await cleanup();
-  }
-});
+// Fixture trees register their cleanup with the shared helpers so every
+// test body stays linear; afterEach drains the queue in creation order.
+afterEach(drainCleanups);
 
 async function makeTree(files: Readonly<Record<string, string>>): Promise<string> {
   const tree = await createFixtureTree(files);
-  pendingCleanups.push(tree.cleanup);
+  registerCleanup(tree.cleanup);
   // The production caller passes a root that discovery's resolveRoot already
   // realpath-resolved; the fixture's mkdtemp path sits behind macOS's /var
   // symlink, so resolve it the same way before joining absolute file keys.

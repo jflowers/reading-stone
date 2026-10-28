@@ -32,12 +32,11 @@
 // mutations, yields, spawns, non-`new` throw expressions, sentinel
 // declarations) assert type and location only.
 
-import { Writable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { analyze } from "../src/analysis.js";
 import { derivePackage } from "../src/models.js";
 import { SIDE_EFFECT_TYPES } from "../src/taxonomy.js";
-import { createFixtureTree } from "./helpers/fixtures.js";
+import { createFixtureTree, memorySink } from "./helpers/fixtures.js";
 
 /** One serialized effect as the analyze entry returns it (spec 001 shape). */
 interface WireEffect {
@@ -55,26 +54,6 @@ interface WireRecord {
   readonly file: string;
   readonly line: number;
   readonly side_effects: readonly WireEffect[];
-}
-
-// In-memory stand-in for the Server's stderr (copied per-file — tasks.md pins
-// the existing fixture/sink helpers rather than new shared infrastructure).
-function memorySink(): { stream: Writable; text: () => string } {
-  const chunks: string[] = [];
-  const stream = new Writable({
-    decodeStrings: false,
-    write(
-      chunk: string | Uint8Array,
-      _encoding: string,
-      callback: (error?: Error | null) => void,
-    ): void {
-      const decoded =
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      chunks.push(decoded);
-      callback();
-    },
-  });
-  return { stream, text: () => chunks.join("") };
 }
 
 // Narrows the entry's result through the two documented shapes (see the

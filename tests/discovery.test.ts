@@ -3,36 +3,36 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
-import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { discover, InvalidRootPathError } from "../src/discovery.js";
 import { serialize } from "../src/protocol.js";
-import { createFixtureTree } from "./helpers/fixtures.js";
+import {
+  createFixtureTree,
+  drainCleanups,
+  memorySink,
+  registerCleanup,
+} from "./helpers/fixtures.js";
 
-// Fixture trees and scratch directories register their cleanup here so every
-// test body can stay linear; afterEach drains the queue in creation order.
-const pendingCleanups: Array<() => Promise<void>> = [];
-
+// Fixture trees and scratch directories register their cleanup with the
+// shared helpers so every test body can stay linear; afterEach drains the
+// queue in creation order.
 afterEach(async () => {
   // The US4 diagnostic cases spy on process.stdout (the sink + stdout-spy
   // pattern from tests/safeio.test.ts); restoring here keeps every case
   // independent and is a no-op for the spy-free cases.
   vi.restoreAllMocks();
-  const cleanups = pendingCleanups.splice(0, pendingCleanups.length);
-  for (const cleanup of cleanups) {
-    await cleanup();
-  }
+  await drainCleanups();
 });
 
 async function makeTree(files: Readonly<Record<string, string>>): Promise<string> {
   const tree = await createFixtureTree(files);
-  pendingCleanups.push(tree.cleanup);
+  registerCleanup(tree.cleanup);
   return tree.root;
 }
 
 async function makeScratchDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "reading-stone-scratch-"));
-  pendingCleanups.push(() => rm(dir, { recursive: true, force: true }));
+  registerCleanup(() => rm(dir, { recursive: true, force: true }));
   return dir;
 }
 
@@ -45,28 +45,6 @@ const runningAsRoot = typeof process.getuid === "function" && process.getuid() =
 const mkfifoAvailable = (process.env.PATH ?? "")
   .split(delimiter)
   .some((directory) => existsSync(join(directory, "mkfifo")));
-
-// In-memory stand-in for the Server's stderr (the established sink pattern
-// from tests/safeio.test.ts): collects exactly what discover writes so the
-// US4 cases can assert the one-line diagnostic contract precisely. A fresh
-// sink per call makes the write observable as soon as discover resolves.
-function memorySink(): { stream: Writable; text: () => string } {
-  const chunks: string[] = [];
-  const stream = new Writable({
-    decodeStrings: false,
-    write(
-      chunk: string | Uint8Array,
-      _encoding: string,
-      callback: (error?: Error | null) => void,
-    ): void {
-      const decoded =
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      chunks.push(decoded);
-      callback();
-    },
-  });
-  return { stream, text: () => chunks.join("") };
-}
 
 // The discover-level skip contract (FR-017 through T024's stderr wiring):
 // the whole sink text is exactly one newline-terminated
