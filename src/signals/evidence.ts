@@ -1,4 +1,6 @@
 import {
+  type ClassLikeDeclaration,
+  escapeLeadingUnderscores,
   getJSDocTags,
   getTextOfJSDocComment,
   isBinaryExpression,
@@ -7,6 +9,7 @@ import {
   isExportAssignment,
   isExpressionStatement,
   isFunctionDeclaration,
+  isFunctionLikeDeclaration,
   isIdentifier,
   isJSDoc,
   isObjectLiteralExpression,
@@ -15,17 +18,28 @@ import {
   isPropertyDeclaration,
   isReturnStatement,
   isSatisfiesExpression,
+  isTypeReferenceNode,
   isVariableDeclaration,
   isVariableDeclarationList,
   isVariableStatement,
   type JSDoc,
   ModifierFlags,
+  type ModifiersBase,
   type Node,
   type SourceFile,
   SyntaxKind,
+  type TypeNode,
+  type TypeReferenceNode,
 } from "typescript/unstable/ast";
+import {
+  type Checker,
+  type Symbol as CompilerSymbol,
+  type NodeHandle,
+  SymbolFlags,
+} from "typescript/unstable/sync";
 import type { ExtractionRecord } from "../extract.js";
 import type { ProgramContext } from "../program.js";
+import { buildCallerIndex } from "./caller-index.js";
 
 /**
  * The per-record evidence snapshot (FR-002 through FR-006 inputs; research
@@ -35,23 +49,37 @@ import type { ProgramContext } from "../program.js";
  * effect-type-independent by construction, so one snapshot serves every
  * signal a record's effects produce (plan.md's performance goal).
  *
- * This module implements the MODE-INDEPENDENT half — `exportedFunction`,
- * `exportedReceiver`, `docText`, `docTags` — from the parsed AST alone,
- * identical in program and parse-only modes (the degradation contract:
- * syntactic fields survive the fallback). The checker-resolved half
- * (`exportedReturnType`, `interfaceMember`, `callerModuleCount`) is declared
- * on the snapshot and carries its degradation values (false/0) until T019
- * wires it through the program-mode context; the underscore-marked
- * parameters of `buildRecordEvidence` are that task's seam.
+ * This module computes BOTH halves. The mode-independent half —
+ * `exportedFunction`, `exportedReceiver`, `docText`, `docTags` — reads the
+ * parsed AST alone, identical in program and parse-only modes. The
+ * checker-resolved half — `exportedReturnType`, `interfaceMember`,
+ * `callerModuleCount` — rides the program-mode checker while the context is
+ * live (`buildRecordEvidence` runs all its checker traffic before
+ * returning), and carries the documented degradation values in parse-only
+ * mode (research R7's boundary: degradation reduces precision, never
+ * availability). The caller index is `buildCallerIndex` (T009) run once
+ * per snapshot over the same records and in-scope set.
  *
  * Constitution Principle III throughout: every value comes from the
  * compiler's own surfaces — `getJSDocTags`/`getTextOfJSDocComment` for
  * documentation (never a custom regex doc parser), `modifierFlags` for
- * export modifiers, the AST parent chain for the CJS assignment shapes.
- * Principle II where syntax cannot decide: the CJS binding match is
- * name-based within the file (scope-precise resolution needs the checker),
- * and ambiguity is preferred over omission. Principle V: nothing here
- * executes or imports analyzed code — every read is off the parsed AST.
+ * export modifiers, the AST parent chain for the CJS assignment shapes,
+ * `getSymbolAtLocation`/`getAliasedSymbol`/`getMembers` for heritage and
+ * return-type resolution, and the compiler's own `escapeLeadingUnderscores`
+ * for the member-table key spelling. Principle II where the checker cannot
+ * decide: the CJS binding match is name-based within the file, and every
+ * unresolved reference — an invalid `extends`-an-interface clause, an
+ * unresolvable type name, an unknown alias target — is absence of evidence,
+ * never an error. Principle V: nothing here executes or imports analyzed
+ * code — every read is off the parsed AST or a checker query.
+ *
+ * API-safety record (typescript 7.0.2, verified by probe):
+ * `checker.getAliasedSymbol` PANICS the native compiler server when handed
+ * a non-alias symbol ("Should only get alias here"), and the heritage
+ * clause-type node itself resolves nothing — only its `.expression` does.
+ * Both facts are load-bearing below: the alias gate in
+ * `resolveThroughAliases` is a hard precondition, never a stylistic
+ * choice, and the heritage walk queries the clause type's expression.
  *
  * Exportedness contract (research R5; data-model.md Section 5.1):
  *
@@ -92,6 +120,35 @@ import type { ProgramContext } from "../program.js";
  * bodies exactly as the compiler does — a documented statement does not
  * document its object-literal members, and a documented class does not
  * document its methods.
+ *
+ * Interface-heritage contract (research R6; program mode only): a
+ * class-member record's `interfaceMember` is true exactly when a heritage
+ * base of the enclosing class-like resolves through the checker to an
+ * interface whose DECLARED member table carries the record's escaped name.
+ * The route: `checker.getSymbolAtLocation` on each clause type's
+ * EXPRESSION (verified — the clause-type node itself resolves nothing),
+ * aliases followed to the base symbol, the base counted only when one of
+ * its declarations is an `InterfaceDeclaration` — the declaration-kind
+ * gate that keeps a resolvable CLASS base from firing, through either
+ * heritage token — and membership read from `getMembers()`, the declared
+ * table, never apparent-member lookup (which would find `Object`-prototype
+ * members and manufacture +30 signals on every `toString`-alike; research
+ * R6's pinned hazard). An invalid `extends`-an-interface clause resolves
+ * through no checker route and contributes nothing. Structural
+ * satisfaction (an object literal contextually typed as an interface) is
+ * out: no enclosing class, no declared contract.
+ *
+ * Return-type contract (research R5; program mode only): `exportedReturnType`
+ * is true exactly when the record node's own explicit return-type annotation
+ * contains at least one type reference resolving through the checker
+ * (aliases followed) to a symbol with at least one exported or ambient
+ * declaration — exported is the export modifier on the declaration (the
+ * same ESM signal as `exportedFunction`'s modifier route), ambient is a
+ * `.d.ts` declaration (the platform libraries, whose members carry no
+ * export modifier — verified). Primitives, literal types, and
+ * object-literal types are not identifier-based type references; an
+ * unresolved name resolves to no symbol or the checker's error symbols,
+ * which carry no declarations — none of them fire.
  */
 
 /**
@@ -128,8 +185,8 @@ export interface RecordEvidence {
   readonly exportedFunction: boolean;
   /**
    * The annotated return type contains a type reference resolving to an
-   * exported or ambient symbol (research R5). Checker-resolved: false until
-   * T019, and always false in parse-only mode.
+   * exported or ambient symbol (research R5). Checker-resolved: false
+   * whenever no checker is live — always in parse-only mode.
    */
   readonly exportedReturnType: boolean;
   /**
@@ -148,14 +205,15 @@ export interface RecordEvidence {
   readonly docTags: readonly DocTag[];
   /**
    * A declared member of an interface in the enclosing class's heritage
-   * carries the record's name (research R6). Checker-resolved: false until
-   * T019, and always false in parse-only mode.
+   * carries the record's name (research R6). Checker-resolved: false
+   * whenever no checker is live — always in parse-only mode.
    */
   readonly interfaceMember: boolean;
   /**
    * The number of distinct in-scope modules with at least one qualifying
-   * call site (research R7) — wired from `buildCallerIndex` in T019; 0
-   * until then.
+   * call site (research R7) — `buildCallerIndex`'s count for the record,
+   * wired here and never recomputed; 0 in parse-only mode (the empty
+   * index).
    */
   readonly callerModuleCount: number;
 }
@@ -164,34 +222,47 @@ export interface RecordEvidence {
  * Builds the per-record evidence snapshot over one prepared analysis
  * (research R12's seam).
  *
- * T018 computes the mode-independent components — both exportedness
- * components and both documentation fields — from the parsed AST alone, so
- * the snapshot is identical in program and parse-only modes. The
- * checker-resolved components are declared on the snapshot and carry their
- * degradation values until T019; the underscore-marked parameters are that
- * task's seam — the context its checker queries round-trip through (and
- * therefore must stay live for), and the in-scope path list its
- * caller-index wiring reuses.
+ * Both halves compute here, each once per record: the mode-independent
+ * components (both exportedness components and both documentation fields)
+ * from the parsed AST, and the checker-resolved components
+ * (`exportedReturnType`, `interfaceMember`) through the live program-mode
+ * checker. The caller index is `buildCallerIndex` (T009) run once per
+ * build, over the same records and in-scope set — its count lands on the
+ * snapshot verbatim, never recomputed per record. In parse-only mode there
+ * is no checker: the checker-resolved components carry their degradation
+ * values (false/0) and the caller index is empty, so degradation reduces
+ * precision, never availability.
  *
  * Every value is computed once per record, and the result is a pure
- * function of the parsed ASTs: repeated calls over the same live inputs
- * produce equal snapshots. An empty record list yields the empty map.
+ * function of the live inputs: repeated calls over the same context,
+ * records, and in-scope set produce equal snapshots. An empty record list
+ * yields the empty map.
  *
- * @param _context The bootstrapped analysis context — reserved for T019's
- * checker-resolved components; unread in T018.
+ * @param context The bootstrapped analysis context — the program-mode arm
+ * must still be live (every checker query and the caller index's
+ * `getSignatureUsage` traffic round-trip to the native compiler server);
+ * the parse-only arm owns nothing to keep alive.
  * @param records The extracted function-likes, as `prepareAnalysis`
  * returned them — the same instances the caller will look up by.
- * @param _inScopePaths The pattern-filtered, test-excluded source list from
- * `PreparedAnalysis.inScopePaths` — reserved for T019's caller-index
- * wiring; unread in T018.
+ * @param inScopePaths The pattern-filtered, test-excluded source list from
+ * `PreparedAnalysis.inScopePaths` — the identical file set the caller index
+ * filters call sites by (US3-7's parity).
  * @returns Every record mapped to its evidence snapshot, keyed by the
  * record reference.
  */
 export function buildRecordEvidence(
-  _context: ProgramContext,
+  context: ProgramContext,
   records: readonly ExtractionRecord[],
-  _inScopePaths: readonly string[],
+  inScopePaths: readonly string[],
 ): ReadonlyMap<ExtractionRecord, RecordEvidence> {
+  // The caller index is built once per snapshot while the context is live
+  // (research R7's lifetime rule) — before any record loop that might
+  // hand its results to a consumer that disposes. Parse-only yields the
+  // empty index inside.
+  const callerIndex = buildCallerIndex(context, records, inScopePaths);
+  // The checker-resolved components' gate: null in parse-only mode, where
+  // each carries its degradation value (false/0) below.
+  const checker = context.mode === "program" ? context.checker : null;
   // Per-build memo of each file's CJS exported names — scanned at most once
   // per file, only when the fallback route is actually consulted.
   const cjsNamesByFile = new Map<SourceFile, ReadonlySet<string>>();
@@ -206,16 +277,19 @@ export function buildRecordEvidence(
       record,
       exportedFunction:
         enclosingClass === null && isExportedValue(record.node, cjsNamesByFile),
-      // T019: the checker-resolved components compute here; until then the
-      // declared fields carry their degradation values (false/0), which is
-      // also their permanent parse-only answer.
-      exportedReturnType: false,
+      exportedReturnType:
+        checker !== null && hasExportedReturnType(checker, record.node),
       exportedReceiver:
         enclosingClass !== null && isExportedValue(enclosingClass, cjsNamesByFile),
       docText: docTextOf(record.node),
       docTags: docTagsOf(record.node),
-      interfaceMember: false,
-      callerModuleCount: 0,
+      interfaceMember:
+        checker !== null &&
+        enclosingClass !== null &&
+        isDeclaredInterfaceMember(checker, enclosingClass, record.name),
+      // Total in program mode (one entry per record, 0 for the uncalled);
+      // the empty parse-only index leaves every record at the degraded 0.
+      callerModuleCount: callerIndex.get(record) ?? 0,
     });
   }
   return evidence;
@@ -370,13 +444,15 @@ function declaredName(node: Node): string | null {
  * accessors — extraction's member forms), or the initializer of a class
  * property under a class-like (the arrow/function-expression member form).
  * Object-literal members and every module-scope form return null — the
- * receiver/function component split turns on exactly this shape.
+ * receiver/function component split turns on exactly this shape, and the
+ * interface-heritage component reads the returned class's heritage
+ * clauses.
  *
  * @param node The record's node.
  * @returns The enclosing class-like, or null when the record is not a
  * direct class member.
  */
-function enclosingClassOf(node: Node): Node | null {
+function enclosingClassOf(node: Node): ClassLikeDeclaration | null {
   const parent = node.parent;
   if (isClassLikeDeclaration(parent)) {
     return parent;
@@ -389,6 +465,205 @@ function enclosingClassOf(node: Node): Node | null {
     return parent.parent;
   }
   return null;
+}
+
+/**
+ * Resolves a checker-returned symbol to the symbol its references name:
+ * an import alias is followed to its target, every other symbol passes
+ * through unchanged. Constitution Principle III's price on the unstable
+ * surface — `getAliasedSymbol` is the checker's own alias machinery —
+ * comes with a hard precondition the module header records: the native
+ * server PANICS on a non-alias argument ("Should only get alias here",
+ * verified against 7.0.2), so the Alias-flag gate below is a safety
+ * requirement, not a stylistic choice.
+ *
+ * Principle II at the unresolved boundary: an alias whose target cannot
+ * be resolved (a name imported from a missing module) yields the
+ * checker's unknown symbol, which identifies nothing — absence of
+ * evidence, returned as null, never an error and never a phantom target.
+ *
+ * @param checker The live program-mode type checker.
+ * @param symbol The symbol a reference resolved to, or undefined when the
+ * reference resolved nowhere.
+ * @returns The referenced symbol with aliases followed, or null when
+ * nothing resolvable backs the reference.
+ */
+function resolveThroughAliases(
+  checker: Checker,
+  symbol: CompilerSymbol | undefined,
+): CompilerSymbol | null {
+  if (symbol === undefined) {
+    return null;
+  }
+  if ((symbol.flags & SymbolFlags.Alias) === 0) {
+    return symbol;
+  }
+  const target = checker.getAliasedSymbol(symbol);
+  return checker.isUnknownSymbol(target) ? null : target;
+}
+
+/**
+ * The interface-heritage component (research R6; data-model.md Section
+ * 5.1): whether an interface in the enclosing class's heritage DECLARES a
+ * member carrying the record's name.
+ *
+ * The route, each step verified against 7.0.2: `checker.getSymbolAtLocation`
+ * on each heritage clause type's EXPRESSION (the clause-type node itself
+ * resolves nothing), aliases followed to the base symbol, the base counted
+ * only when one of its declarations is an `InterfaceDeclaration` — the
+ * declaration-kind gate that keeps a resolvable CLASS base from firing
+ * through either heritage token, `extends Base` and `implements Base`
+ * alike — and membership read from the base symbol's `getMembers()`
+ * DECLARED-member table, keyed by the record's escaped name.
+ *
+ * The declared table is load-bearing (research R6's pinned hazard): an
+ * apparent-member lookup would find `Object`-prototype members on every
+ * interface and manufacture +30 signals on every `toString`-alike method.
+ * The escaped-name key is the compiler's own `escapeLeadingUnderscores`
+ * spelling — names beginning with `__` carry one extra underscore in the
+ * table (Principle III: the compiler's util, never a reimplementation).
+ * An invalid `extends`-an-interface clause resolves through no checker
+ * route (the symbol is undefined) and contributes nothing — Principle II,
+ * undeterminable is absence of evidence, never an error.
+ *
+ * @param checker The live program-mode type checker.
+ * @param enclosingClass The class-like the record is a direct member of.
+ * @param name The record's member name.
+ * @returns Whether a heritage interface declares a member with that name.
+ */
+function isDeclaredInterfaceMember(
+  checker: Checker,
+  enclosingClass: ClassLikeDeclaration,
+  name: string,
+): boolean {
+  const escapedName = escapeLeadingUnderscores(name);
+  for (const clause of enclosingClass.heritageClauses ?? []) {
+    for (const base of clause.types) {
+      const baseSymbol = resolveThroughAliases(
+        checker,
+        checker.getSymbolAtLocation(base.expression),
+      );
+      if (baseSymbol === null) {
+        continue;
+      }
+      // The declaration-kind gate: only an interface base counts. A class
+      // base resolves to the same member-bearing symbol shape — the kind
+      // is the only discriminator (research R6's cheap-check-first shape).
+      if (
+        !baseSymbol.declarations.some(
+          (declaration) => declaration.kind === SyntaxKind.InterfaceDeclaration,
+        )
+      ) {
+        continue;
+      }
+      if (baseSymbol.getMembers().has(escapedName)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The exported-return-type component (research R5; data-model.md Section
+ * 5.1): whether the record's own explicit return-type annotation contains
+ * at least one type reference resolving through the checker to an exported
+ * or ambient symbol. See the module header's return-type contract for the
+ * full rule.
+ *
+ * @param checker The live program-mode type checker.
+ * @param node The record's function-like node.
+ * @returns Whether an exported or ambient type reference appears in the
+ * annotation.
+ */
+function hasExportedReturnType(checker: Checker, node: Node): boolean {
+  const annotation = returnTypeAnnotationOf(node);
+  if (annotation === null) {
+    return false;
+  }
+  for (const reference of typeReferencesIn(annotation)) {
+    const symbol = resolveThroughAliases(
+      checker,
+      checker.getSymbolAtLocation(reference.typeName),
+    );
+    if (symbol === null) {
+      continue;
+    }
+    if (symbol.declarations.some(isExportedOrAmbientDeclaration)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The record node's explicit return-type annotation — the `type` field of
+ * the function-like itself, present for every record form that annotates a
+ * return (the declaration forms and the assigned expression forms alike
+ * carry it on the function-like node the record wraps). Constructors and
+ * setters cannot annotate a return; unannotated functions do not.
+ *
+ * @param node The record's node.
+ * @returns The annotation's type-node subtree, or null when absent.
+ */
+function returnTypeAnnotationOf(node: Node): TypeNode | null {
+  return isFunctionLikeDeclaration(node) && node.type !== undefined ? node.type : null;
+}
+
+/**
+ * Collects every identifier-based type reference in an annotation subtree,
+ * outer references and nested type arguments alike (`Result | null`,
+ * `Array<Result>`): a keyword (`string`), a literal type (`"ok"`), and an
+ * object-literal type (`{ n: number }`) are not type references and never
+ * appear. The walk revisits only nodes of a file extraction already
+ * admitted under its depth budget — the detector's per-record walk
+ * discipline, no second budget.
+ *
+ * @param annotation The annotation's root type node.
+ * @returns The type-reference nodes within, in source order.
+ */
+function typeReferencesIn(annotation: TypeNode): readonly TypeReferenceNode[] {
+  const references: TypeReferenceNode[] = [];
+  const collect = (node: Node): void => {
+    if (isTypeReferenceNode(node)) {
+      references.push(node);
+    }
+    node.forEachChild((child) => {
+      collect(child);
+      return undefined;
+    });
+  };
+  collect(annotation);
+  return references;
+}
+
+/**
+ * Whether one declaration of a resolved type symbol is exported or ambient
+ * (research R5): exported is the export modifier on the declaration itself
+ * — the same ESM signal as the exported-value rule's modifier route — and
+ * ambient is a `.d.ts` source file (the platform libraries; their members
+ * carry no export modifier, verified). A handle the producing project
+ * cannot resolve identifies nothing.
+ *
+ * The cast is scoped to the modifier read: every declaration shape a
+ * resolved type reference reaches (interface, class, alias, enum, module)
+ * is modifier-bearing, and the `?? None` fallback covers the shapes the
+ * cast cannot promise (a type parameter declaration), where no export
+ * modifier exists — the bit test reads as no-export, never crashes.
+ *
+ * @param declaration The declaration handle to judge.
+ * @returns Whether the declaration is exported or ambient.
+ */
+function isExportedOrAmbientDeclaration(declaration: NodeHandle): boolean {
+  const node = declaration.resolve();
+  if (node === undefined) {
+    return false;
+  }
+  const modifierFlags = (node as ModifiersBase).modifierFlags ?? ModifierFlags.None;
+  if ((modifierFlags & ModifierFlags.Export) !== 0) {
+    return true;
+  }
+  return node.getSourceFile().fileName.endsWith(".d.ts");
 }
 
 /**
