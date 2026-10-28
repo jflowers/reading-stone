@@ -9,6 +9,8 @@ import {
   type ProgramContext,
 } from "./program.js";
 import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
+import { classifyPairs } from "./signals/adapter.js";
+import { buildRecordEvidence } from "./signals/evidence.js";
 
 /**
  * Pattern rules and the shared analysis pipeline (FR-001, FR-002; research
@@ -26,7 +28,12 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * detection, FR-020's response assembly, and serialization, with the
  * program-mode context's lifetime owned by the handler (disposed in a
  * `finally`) — and released by `prepareAnalysis` itself when extraction
- * throws — so no native compiler server outlives one analysis.
+ * throws — so no native compiler server outlives one analysis. Spec 003
+ * (T025) inserts the classification core between detection and assembly
+ * (FR-012): the evidence snapshots are taken while that context is live,
+ * then the pair-keyed fan-out rebuilds every effect as a classified
+ * immutable value, so each one reaches the wire already carrying
+ * `classification: {label, confidence}`.
  */
 
 /**
@@ -278,16 +285,34 @@ export async function prepareAnalysis(
  * is already wire-shaped (fixed key order, validated fields — the
  * protocol layer's sorted-key serializer then only re-orders keys).
  *
+ * Spec 003 inserts the classification core between detection and
+ * assembly (FR-012; research R10; the adapter's composition contract):
+ * the evidence snapshots are taken while the program-mode context is
+ * still live — every checker query and the caller index's
+ * `getSignatureUsage` traffic round-trips to the native compiler server —
+ * then `classifyPairs` runs the pair-keyed fan-out and rebuilds each
+ * record's effects as new immutable values carrying
+ * `classification: {label, confidence}`. Every same-type effect on a
+ * record shares the identical pair classification (FR-008/FR-011), every
+ * effect in every response carries one (FR-012, superseding spec 002
+ * FR-019's omission rule here at the wiring layer — the detector itself
+ * is untouched and still produces unclassified effects), and the
+ * classified instances are what assembly consumes, so
+ * `serializeEffect` → `serializeClassification`'s fail-loud validation
+ * (closed label set, integer 0–100) now exercises on every `analyze`
+ * response.
+ *
  * The returned array — not a `{functions: [...]}` wrapper — is the
  * documented result shape the server wraps into its JSON-RPC success
  * response (T019); both this entry and the payload are deterministic
  * pure functions of the analyzed tree (Constitution Principle I:
- * byte-identical repeat responses).
+ * byte-identical repeat responses, classification fields included).
  *
- * The program-mode context's lifetime is this handler's: the native
- * compiler server behind it is closed in the `finally` whatever the
- * detection outcome, so no subprocess outlives one analysis. A
- * parse-only context owns nothing to dispose.
+ * The program-mode context's lifetime is this handler's — unchanged by
+ * the classification insertion: the native compiler server behind it is
+ * closed in the `finally` whatever the detection and classification
+ * outcome, so no subprocess outlives one analysis. A parse-only context
+ * owns nothing to dispose.
  *
  * @param rootPath Absolute or relative project root; validated and
  * realpath-resolved by `prepareAnalysis` (an invalid root throws
@@ -306,7 +331,18 @@ export async function analyze(
   const prepared = await prepareAnalysis(rootPath, patterns, stderr);
   try {
     const effects = detectEffects(prepared.records, prepared.context);
-    const assembled = assembleFunctionRecords(prepared.records, effects);
+    // Spec 003's insertion point (FR-012; research R10): evidence while
+    // the program-mode context is live (the caller index's
+    // `getSignatureUsage` traffic rides it), then the pair-keyed fan-out
+    // rebuilding effects as classified immutable values — between
+    // detection and assembly, exactly where FR-012 places the change.
+    const evidence = buildRecordEvidence(
+      prepared.context,
+      prepared.records,
+      prepared.inScopePaths,
+    );
+    const classified = classifyPairs(prepared.records, effects, evidence);
+    const assembled = assembleFunctionRecords(prepared.records, classified.effects);
     return assembled.map(serializeFunctionRecord);
   } finally {
     if (prepared.context.mode === "program") {
