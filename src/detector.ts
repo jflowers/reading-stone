@@ -253,10 +253,10 @@ const BUILTIN_ERROR_CONSTRUCTORS: ReadonlySet<string> = new Set([
 
 /**
  * The nine mutating array methods of the param-write split (FR-015):
- * calls of these names on parameter receivers are `SliceMutation`,
- * type-blind in BOTH modes — the disposition table's documented
- * name-form surface (a `push` on a declared array parameter is a
- * caller-visible slice mutation regardless of what the checker says).
+ * calls of these names on parameter receivers are `SliceMutation` —
+ * checker-proven array types decide in program mode (the element-write
+ * split's test), the receiver name and shape decide in parse-only (the
+ * disposition table's documented type-blind name-form surface).
  */
 const ARRAY_MUTATOR_METHODS: ReadonlySet<string> = new Set([
   "push",
@@ -1801,7 +1801,11 @@ class RecordWalker {
       this.emit("WriterOutput", "writes through a writer-like receiver", node);
       return;
     }
-    if (ARRAY_MUTATOR_METHODS.has(method) && this.isParamReceiver(receiver)) {
+    if (
+      ARRAY_MUTATOR_METHODS.has(method) &&
+      this.isParamReceiver(receiver) &&
+      this.isArrayTypedParamReceiver(receiver)
+    ) {
       this.emit("SliceMutation", "calls a mutating array method on a parameter", node);
       return;
     }
@@ -2243,6 +2247,26 @@ class RecordWalker {
       base = base.expression;
     }
     return isIdentifier(base) && this.isParameter(base.text);
+  }
+
+  /**
+   * Whether a parameter method receiver counts as array-typed for the
+   * `SliceMutation` method arm (FR-015): parse-only keeps the documented
+   * type-blind default — the receiver name and shape decide — while
+   * program mode asks the checker through the same `isArrayLikeType`
+   * test the element-write split applies, so one row's two arms cannot
+   * disagree. A non-array parameter's mutator call falls through to the
+   * later tiers exactly as its element writes do.
+   */
+  private isArrayTypedParamReceiver(receiver: Expression): boolean {
+    if (this.checker === undefined) {
+      return true;
+    }
+    let base = receiver;
+    while (isParenthesizedExpression(base)) {
+      base = base.expression;
+    }
+    return isArrayLikeType(this.typeAt(base));
   }
 
   /**
