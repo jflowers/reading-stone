@@ -347,7 +347,12 @@ describe("ESM exportedness forms (research R5)", () => {
 //   loadUser        exports.loadUser = loadUser               → fires
 //   neverExported   targeted by no assignment                 → no
 //   runJob          object-literal member rooted at `api`,
-//                   and module.exports = api targets `api`      → fires
+//                   and module.exports = api targets `api`     → fires
+//   hidden (local)  function-local namesake inside `outer` —
+//                   the module-scope gate's negative            → no
+//   hidden (scope)  the module-scope binding the assignment
+//                   actually targets                            → fires
+//   outer           targeted by no assignment                  → no
 const CJS_SOURCES: Readonly<Record<string, string>> = {
   "src/props.cjs": [
     "function saveConfig(data) {",
@@ -389,6 +394,21 @@ const CJS_SOURCES: Readonly<Record<string, string>> = {
     "};",
     "",
     "module.exports = api;",
+    "",
+  ].join("\n"),
+  "src/nested.cjs": [
+    "function outer() {",
+    "  function hidden() {",
+    "    return 14;",
+    "  }",
+    "  return hidden;",
+    "}",
+    "",
+    "function hidden() {",
+    "  return 15;",
+    "}",
+    "",
+    "module.exports.hidden = hidden;",
     "",
   ].join("\n"),
 };
@@ -433,6 +453,22 @@ describe("CJS exportedness forms (spec edge case 5)", () => {
     expect(project(evOf(run, "src/rooted.cjs", "runJob"))).toEqual(
       expected({ exportedFunction: true }),
     );
+  });
+
+  it("does not fire for a function-local namesake of a targeted binding", async () => {
+    const run = await runEvidence(withTsconfig(CJS_SOURCES));
+    // Two same-named `hidden` records in source order: the function-local
+    // declaration inside outer, then the module-scope declaration the
+    // assignment's right-hand side actually names. The CJS match is
+    // name-based (Principle II — scope-precise resolution needs the
+    // checker), so its boundary is where the walk ended: only a record
+    // rooted at module scope consults the targeted names, because the
+    // assignment's right-hand side resolves in the module frame. The
+    // nested namesake is a different binding that shares the spelling.
+    const [localHidden, moduleHidden] = evAll(run, "src/nested.cjs", "hidden");
+    expect(project(localHidden)).toEqual(expected());
+    expect(project(moduleHidden)).toEqual(expected({ exportedFunction: true }));
+    expect(project(evOf(run, "src/nested.cjs", "outer"))).toEqual(expected());
   });
 });
 
