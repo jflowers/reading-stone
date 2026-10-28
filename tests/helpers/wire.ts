@@ -5,15 +5,19 @@
 // helpers under tests/helpers/. This module is that consolidation for the
 // detector-rules suites: the analyze-entry driver, the record lookup, the
 // contract-pinned effect projections, and the FR-018 through FR-020 wire
-// invariants. The stderr sink itself lives in tests/helpers/fixtures.ts (the
-// suite-wide shared helper every test file imports) and is re-exported here
-// so the detector-rules suites keep a single import surface.
+// invariants, plus spec 003's classification amendment: every analyze
+// effect classified (FR-012). The stderr sink itself lives in
+// tests/helpers/fixtures.ts (the suite-wide shared helper every test file
+// imports) and is re-exported here so the detector-rules suites keep a
+// single import surface.
 //
 // ASSERTION DISCIPLINE (same as tests/detector.test.ts): effect
 // `description` wording is implementation-defined, so effects are projected
 // to the contract-pinned fields {type, location, target, detail} and compared
 // with toEqual — exact canonical type, exact root-relative file:line:col
 // (1-based), exact target where research R6.6 pins it, zero extra effects.
+// Classification (003 FR-012) is validated structurally by
+// expectWireInvariants, not by these detection-field projections.
 import { expect } from "vitest";
 import { analyze } from "../../src/analysis.js";
 import { derivePackage } from "../../src/models.js";
@@ -22,6 +26,16 @@ import { memorySink } from "./fixtures.js";
 
 export { memorySink };
 
+/**
+ * The classification on one serialized effect — the wire shape
+ * `serializeClassification` (src/models.ts) emits for src/models.ts's
+ * `Classification`: both fields always present.
+ */
+export interface WireClassification {
+  readonly label: "contractual" | "incidental" | "ambiguous";
+  readonly confidence: number;
+}
+
 /** One serialized effect as the analyze entry returns it. */
 export interface WireEffect {
   readonly type: string;
@@ -29,6 +43,7 @@ export interface WireEffect {
   readonly location?: string;
   readonly target?: string;
   readonly detail?: Record<string, unknown>;
+  readonly classification?: WireClassification;
 }
 
 /** One serialized function record (name, package, file, line, side_effects). */
@@ -133,14 +148,16 @@ export function locatedEffects(
   }));
 }
 
-// The closed effect key set (FR-019 forbids classification; anything else
-// beyond these five keys is a wire-shape violation).
+// The closed effect key set (003 FR-012 requires a classification on every
+// analyze effect, superseding 002's FR-019; anything beyond these six keys
+// is a wire-shape violation).
 const EFFECT_KEYS: readonly string[] = [
   "type",
   "description",
   "location",
   "target",
   "detail",
+  "classification",
 ];
 
 // (line, column, type) — the documented within-record effect order (FR-020).
@@ -187,13 +204,45 @@ function compareEffectKeys(
   return compareStrings(a[2], b[2]);
 }
 
+// The three protocol labels — the membership set serializeClassification
+// (src/models.ts) enforces, mirrored here so the wire helper validates the
+// same closed set the serializer does.
+const CLASSIFICATION_LABELS: ReadonlySet<string> = new Set([
+  "contractual",
+  "incidental",
+  "ambiguous",
+]);
+
 /**
- * FR-018/FR-019/FR-020 invariants over a whole result: canonical types only
- * (so no alias ever reaches the wire), no classification field, exact
- * record/effect key sets, package derivation, locations rooted in the
- * record's file, detail only on ambiguity effects, and both documented
- * total orders (records by (file, line, name); effects by (line, column,
- * type)).
+ * 003 FR-012 requires every analyze effect to carry a classification, and
+ * `serializeClassification` pins its validity: exactly the two fields
+ * {label, confidence}, one of the three protocol labels, an integer
+ * confidence in 0-100. A missing or malformed value is an analyze-wiring bug
+ * (T025), never a soft skip — fail loud, naming the effect.
+ */
+function expectValidClassification(effect: WireEffect): void {
+  if (effect.classification === undefined) {
+    throw new Error(
+      `effect of type "${effect.type}" at ${
+        effect.location ?? "<unknown location>"
+      } carries no classification (003 FR-012)`,
+    );
+  }
+  expect(Object.keys(effect.classification).sort()).toEqual(["confidence", "label"]);
+  expect(CLASSIFICATION_LABELS).toContain(effect.classification.label);
+  expect(Number.isInteger(effect.classification.confidence)).toBe(true);
+  expect(effect.classification.confidence).toBeGreaterThanOrEqual(0);
+  expect(effect.classification.confidence).toBeLessThanOrEqual(100);
+}
+
+/**
+ * FR-018/FR-020 invariants plus 003's classification amendment (FR-012,
+ * superseding 002's FR-019) over a whole result: canonical types only (so
+ * no alias ever reaches the wire), every effect classified with a
+ * serializer-valid {label, confidence}, exact record/effect key sets,
+ * package derivation, locations rooted in the record's file, detail only on
+ * ambiguity effects, and both documented total orders (records by (file,
+ * line, name); effects by (line, column, type)).
  */
 export function expectWireInvariants(functions: readonly WireRecord[]): void {
   const recordKeys = functions.map((record): readonly [string, number, string] => [
@@ -215,7 +264,7 @@ export function expectWireInvariants(functions: readonly WireRecord[]): void {
     expect(effectKeys).toEqual([...effectKeys].sort(compareEffectKeys));
     for (const effect of record.side_effects) {
       expect(SIDE_EFFECT_TYPES).toContain(effect.type);
-      expect("classification" in effect).toBe(false);
+      expectValidClassification(effect);
       for (const key of Object.keys(effect)) {
         expect(EFFECT_KEYS).toContain(key);
       }

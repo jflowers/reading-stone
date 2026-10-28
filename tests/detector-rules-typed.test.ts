@@ -163,7 +163,7 @@ describe("program-mode receiver-typing arms and name-form persistence (FR-003 ch
     ]);
   });
 
-  it("wire shape over the typed tree: canonical types, no classification, key sets, and both documented orders (FR-018, FR-019, FR-020)", () => {
+  it("wire shape over the typed tree: canonical types, every effect classified, key sets, and both documented orders (FR-018, 003 FR-012, FR-020)", () => {
     expectWireInvariants(result);
   });
 

@@ -873,7 +873,7 @@ describe("wire shape and determinism over the rules tree (FR-018, FR-019, FR-020
     await cleanup?.();
   });
 
-  it("canonical types, no classification, key sets, and both documented orders hold over every record", () => {
+  it("canonical types, every effect classified, key sets, and both documented orders hold over every record", () => {
     expectWireInvariants(result);
   });
 
