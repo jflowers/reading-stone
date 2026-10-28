@@ -106,6 +106,11 @@ fixed transport bounds (not configurable in v1):
   `<root>/coverage/coverage-final.json`. When that artifact is absent,
   unreadable, or invalid, `coverage` returns `{"functions": []}` and never
   errors (FR-025). It never runs the project's tests.
+- **Per-request pipeline cost** — each `analyze` or `complexity` request
+  boots a fresh TypeScript compiler context (tree walk, pre-read,
+  bootstrap, extraction) and disposes it before responding; no pipeline
+  state is reused across requests. `coverage` reads a pre-existing
+  artifact and is cheap.
 
 Empty `coverage` results usually mean no artifact exists yet: run the
 project's own test command with an Istanbul reporter writing
