@@ -28,7 +28,7 @@ Single project: `src/` and `tests/` at the repository root (per plan.md Project 
 
 **Purpose**: Confirm the baseline is green before any signal-pipeline code exists.
 
-- [ ] T001 Verify the baseline before any change: from the repository root run `npm ci`, `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage`, and confirm all four protected gates pass (CI parity gate, AGENTS.md / .github/workflows/ci.yml — never lower a gate to make it pass)
+- [x] T001 Verify the baseline before any change: from the repository root run `npm ci`, `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage`, and confirm all four protected gates pass (CI parity gate, AGENTS.md / .github/workflows/ci.yml — never lower a gate to make it pass)
 
 **Checkpoint**: Clean baseline confirmed — no new dependency is needed (plan.md: every compiler query rides the already-bootstrapped no-emit program; Constitution V dependency-necessity satisfied with zero additions).
 
