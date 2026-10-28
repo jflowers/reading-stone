@@ -28,6 +28,9 @@
  *
  * - FR-002's positive rule: a satisfying class member emits exactly one
  *   +30 `interface` signal with the record's identity fields.
+ * - The composite heritage: `extends Base implements Shape` — both
+ *   tokens on one class; the interface clause's declared member fires
+ *   alongside the silent class extends clause.
  * - The no-signal rows: a member no heritage interface declares, a class
  *   base through either heritage token, an invalid extends-an-interface
  *   clause (Principle II — undeterminable is absence of evidence, never
@@ -350,6 +353,9 @@ function evOf(run: EvidenceRun, relPath: string, name: string): RecordEvidence {
 //   Ring.area         extends class Base                     → no
 //   Structural.area   implements class Base                  → no
 //   Invalid.area      extends Shape — invalid TypeScript     → no
+//   Mixed.area        extends Base implements Shape — the
+//                     interface clause fires alongside the
+//                     class extends clause                  → fires
 //   Hazard.toString   implements Shape (no toString)         → no
 //   Declared.toString implements Labelled (declares it)      → fires
 //   StringRepo.save   implements Repository<string>          → fires
@@ -406,6 +412,18 @@ const SATISFACTION_SOURCES: Readonly<Record<string, string>> = {
     "  }",
     "}",
     "",
+    // The composite heritage: both tokens on one class — an extends
+    // clause naming a class (silent through the declaration-kind gate)
+    // alongside an implements clause naming Shape. The heritage walk
+    // must continue past the class base and fire on the interface
+    // clause's declared member; a walk that stopped at the first
+    // clause, or at a class base, would drop the signal.
+    "export class Mixed extends Base implements Shape {",
+    "  area(): number {",
+    "    return 6;",
+    "  }",
+    "}",
+    "",
     // The apparent-member hazard: Shape does NOT declare toString, so an
     // apparent-member lookup would find Object.prototype's toString on
     // every interface and manufacture a +30 here. Declared tables do
@@ -447,11 +465,11 @@ const SATISFACTION_SOURCES: Readonly<Record<string, string>> = {
 describe("satisfaction through the evidence seam (research R6, program mode)", () => {
   it("fires for a member an implements-clause interface declares", async () => {
     const run = await runEvidence(withTsconfig(SATISFACTION_SOURCES));
-    // Circle's area — the second of the six area records — carries the
-    // full signal over the seam-produced snapshot: identity fields from
-    // the real record, +30, the closed source.
+    // Circle's area — the second of the seven area records — carries
+    // the full signal over the seam-produced snapshot: identity fields
+    // from the real record, +30, the closed source.
     const areaRecords = recordsOf(run, "src/shape.ts", "area");
-    expect(areaRecords).toHaveLength(6);
+    expect(areaRecords).toHaveLength(7);
     expect(interfaceSignal(evidenceOf(run, areaRecords[1]), EFFECT_TYPE)).toEqual({
       function: "area",
       package: "src.shape",
@@ -470,16 +488,38 @@ describe("satisfaction through the evidence seam (research R6, program mode)", (
 
   it("does not fire for class bases, through either heritage token", async () => {
     const run = await runEvidence(withTsconfig(SATISFACTION_SOURCES));
-    // The six `area` records in source-line order — Base, Circle, Ring,
-    // Structural, Invalid, structural — each judged through the seam.
-    // Ring.area (extends class Base) and Structural.area (implements
-    // class Base) stay silent: both base symbols resolve and both
-    // declare `area`, but neither base is an InterfaceDeclaration — the
-    // declaration-kind gate, through either heritage token.
+    // The seven `area` records in source-line order — Base, Circle,
+    // Ring, Structural, Invalid, Mixed, structural — each judged through
+    // the seam. Ring.area (extends class Base) and Structural.area
+    // (implements class Base) stay silent: both base symbols resolve and
+    // both declare `area`, but neither base is an InterfaceDeclaration —
+    // the declaration-kind gate, through either heritage token. Mixed
+    // (extends Base implements Shape) carries both tokens on one class
+    // and still fires through its interface clause — the composite row
+    // the dedicated test below pins in full.
     const firing = recordsOf(run, "src/shape.ts", "area").map(
       (record) => interfaceSignal(evidenceOf(run, record), EFFECT_TYPE) !== undefined,
     );
-    expect(firing).toEqual([false, true, false, false, false, false]);
+    expect(firing).toEqual([false, true, false, false, false, true, false]);
+  });
+
+  it("fires through the composite heritage — extends a class, implements the interface", async () => {
+    const run = await runEvidence(withTsconfig(SATISFACTION_SOURCES));
+    // Mixed.area — the sixth of the seven area records — carries both
+    // heritage tokens on one class: the extends clause names class Base
+    // (silent through the declaration-kind gate) and the implements
+    // clause names Shape, whose declared `area` fires with the full
+    // signal shape over the seam-produced snapshot.
+    const areaRecords = recordsOf(run, "src/shape.ts", "area");
+    expect(interfaceSignal(evidenceOf(run, areaRecords[5]), EFFECT_TYPE)).toEqual({
+      function: "area",
+      package: "src.shape",
+      side_effect_type: EFFECT_TYPE,
+      source: "interface",
+      weight: 30,
+      reasoning:
+        "member 'area' is declared in an interface of the enclosing class's heritage",
+    });
   });
 
   it("resolves invalid extends-an-interface to no signal, never an error", async () => {
