@@ -194,7 +194,9 @@ export interface PreparedAnalysis {
  *    over exactly those files (FR-003/FR-004; a `null` read excludes its
  *    file after `readBounded`'s own one-diagnostic skip), and
  *    `extractFunctions` walks the context's sources into the sorted
- *    record list (FR-007/FR-008).
+ *    record list (FR-007/FR-008), and the records are narrowed to the
+ *    in-scope set — the program arm's transitive imports are excluded
+ *    (FR-001/FR-022; the parse-only arm is structurally in scope).
  *
  * Diagnostics flow to the injected stderr; stdout is never touched (it is
  * reserved for JSON-RPC responses). The returned context's lifetime is
@@ -253,6 +255,18 @@ export async function prepareAnalysis(
     }
     throw error;
   }
+  // FR-001/FR-022's scope guarantee over the configured program: the program
+  // arm can contain pattern-excluded in-root files — transitive imports the
+  // hermetic host serves on demand (src/program.ts) — and extraction's walk
+  // is root-containment scoped (src/extract.ts), so the record set is
+  // narrowed here to the identical in-scope list the pattern filter
+  // produced. The parse-only arm needs no narrowing: its hermetic view
+  // exposes in-scope sources only, so extraction cannot see beyond scope
+  // there. Both modes' record sets ARE the in-scope set — what FR-022's
+  // same-extraction-set guarantee and spec 003 US3-7's identical-file-set
+  // guarantee both rest on.
+  const inScopeSet = new Set(inScope);
+  records = records.filter((record) => inScopeSet.has(record.relPath));
   return { context, records, inScopePaths: inScope };
 }
 
