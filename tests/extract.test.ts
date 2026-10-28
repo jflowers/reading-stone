@@ -37,54 +37,30 @@
 
 import { realpathSync } from "node:fs";
 import { extname } from "node:path";
-import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ExtractionRecord, extractFunctions } from "../src/extract.js";
 import { buildProgramContext } from "../src/program.js";
-import { createFixtureTree } from "./helpers/fixtures.js";
+import {
+  createFixtureTree,
+  drainCleanups,
+  memorySink,
+  registerCleanup,
+} from "./helpers/fixtures.js";
 
-// Fixture trees register their cleanup here so every test body stays linear;
-// afterEach drains the queue in creation order (same pattern as
-// tests/program.test.ts).
-const pendingCleanups: Array<() => Promise<void>> = [];
-
+// Fixture trees register their cleanup with the shared helpers so every
+// test body stays linear; afterEach drains the queue in creation order.
 afterEach(async () => {
   vi.restoreAllMocks();
-  const cleanups = pendingCleanups.splice(0, pendingCleanups.length);
-  for (const cleanup of cleanups) {
-    await cleanup();
-  }
+  await drainCleanups();
 });
 
 async function makeTree(files: Readonly<Record<string, string>>): Promise<string> {
   const tree = await createFixtureTree(files);
-  pendingCleanups.push(tree.cleanup);
+  registerCleanup(tree.cleanup);
   // The production caller passes a root that discovery's resolveRoot already
   // realpath-resolved; the fixture's mkdtemp path sits behind macOS's /var
   // symlink, so resolve it the same way before joining paths.
   return realpathSync(tree.root);
-}
-
-// In-memory stand-in for the Server's stderr: collects exactly what the
-// extractor writes so tests can assert the diagnostics channel stayed empty
-// on clean fixtures (the helper is copied per-file — tasks.md pins the
-// existing fixture/sink helpers rather than new shared test infrastructure).
-function memorySink(): { stream: Writable; text: () => string } {
-  const chunks: string[] = [];
-  const stream = new Writable({
-    decodeStrings: false,
-    write(
-      chunk: string | Uint8Array,
-      _encoding: string,
-      callback: (error?: Error | null) => void,
-    ): void {
-      const decoded =
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      chunks.push(decoded);
-      callback();
-    },
-  });
-  return { stream, text: () => chunks.join("") };
 }
 
 // Both bootstrap modes extract identically (research R5: the form table and

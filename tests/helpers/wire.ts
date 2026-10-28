@@ -3,22 +3,24 @@
 // The review council's test-conventions finding (dispatch 44e85014) called out
 // memorySink being copied into every new suite and recommended shared test
 // helpers under tests/helpers/. This module is that consolidation for the
-// detector-rules suites: the stderr sink, the analyze-entry driver, the
-// record lookup, the contract-pinned effect projections, and the FR-018
-// through FR-020 wire invariants — the same code tests/detector.test.ts
-// carries per-file (its copies stay untouched; merging them is a separate
-// cross-file change).
+// detector-rules suites: the analyze-entry driver, the record lookup, the
+// contract-pinned effect projections, and the FR-018 through FR-020 wire
+// invariants. The stderr sink itself lives in tests/helpers/fixtures.ts (the
+// suite-wide shared helper every test file imports) and is re-exported here
+// so the detector-rules suites keep a single import surface.
 //
 // ASSERTION DISCIPLINE (same as tests/detector.test.ts): effect
 // `description` wording is implementation-defined, so effects are projected
 // to the contract-pinned fields {type, location, target, detail} and compared
 // with toEqual — exact canonical type, exact root-relative file:line:col
 // (1-based), exact target where research R6.6 pins it, zero extra effects.
-import { Writable } from "node:stream";
 import { expect } from "vitest";
 import { analyze } from "../../src/analysis.js";
 import { derivePackage } from "../../src/models.js";
 import { SIDE_EFFECT_TYPES } from "../../src/taxonomy.js";
+import { memorySink } from "./fixtures.js";
+
+export { memorySink };
 
 /** One serialized effect as the analyze entry returns it. */
 export interface WireEffect {
@@ -36,25 +38,6 @@ export interface WireRecord {
   readonly file: string;
   readonly line: number;
   readonly side_effects: readonly WireEffect[];
-}
-
-/** In-memory stand-in for the Server's stderr diagnostics channel. */
-export function memorySink(): { stream: Writable; text: () => string } {
-  const chunks: string[] = [];
-  const stream = new Writable({
-    decodeStrings: false,
-    write(
-      chunk: string | Uint8Array,
-      _encoding: string,
-      callback: (error?: Error | null) => void,
-    ): void {
-      const decoded =
-        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      chunks.push(decoded);
-      callback();
-    },
-  });
-  return { stream, text: () => chunks.join("") };
 }
 
 /**
