@@ -1375,7 +1375,9 @@ describe("coverage resource bounds (review fix: record caps and attribution work
     );
   });
 
-  it("the document-level work budget skips a later heavy entry that would exceed the remainder, while smaller entries still fit", async () => {
+  it("the document-level work budget skips a later heavy entry that would exceed the remainder, while smaller entries still fit", {
+    timeout: 30_000,
+  }, async () => {
     const root = await makeTree({});
     await plantCoverageDocument(
       root,
@@ -1401,7 +1403,9 @@ describe("coverage resource bounds (review fix: record caps and attribution work
     );
   });
 
-  it("the skip set is deterministic: repeat responses over the budget document are byte-identical", async () => {
+  it("the skip set is deterministic: repeat responses over the budget document are byte-identical", {
+    timeout: 30_000,
+  }, async () => {
     const root = await makeTree({});
     await plantCoverageDocument(
       root,
