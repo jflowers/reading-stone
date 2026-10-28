@@ -249,6 +249,8 @@ const ESM_SOURCES: Readonly<Record<string, string>> = {
     "  method(): number {",
     "    return 3;",
     "  }",
+    "",
+    "  handler = (): number => 9;",
     "}",
     "",
     "class PlainClass {",
@@ -333,7 +335,17 @@ describe("ESM exportedness forms (research R5)", () => {
     // form, and the closed rule routes class members to the receiver
     // component only.
     expect(methods[0].exportedFunction).toBe(false);
-    expect(methods[1].exportedFunction).toBe(false);
+  });
+
+  it("fires the receiver component for the property-initializer member form", async () => {
+    const run = await runEvidence(withTsconfig(ESM_SOURCES));
+    // `handler = (): number => 9` — the arrow's parent is the property
+    // declaration, not the class, so the enclosing-class walk takes its
+    // second arm (initializer under a class-like property): same receiver
+    // component as the method form, and every other component neutral.
+    expect(project(evOf(run, "src/exports.ts", "handler"))).toEqual(
+      expected({ exportedReceiver: true }),
+    );
   });
 });
 
@@ -490,11 +502,13 @@ describe("CJS exportedness forms (spec edge case 5)", () => {
 //   withLiteral     (): "ok"          — literal type                  → no
 //   withObject      (): { n: number } — object-literal type           → no
 //   withMissing     (): Missing       — unresolved, error annotation  → no
+//   withBrokenImport(): NoSuch        — alias to a missing module     → no
 //   implicit        (): (none)        — no annotation at all          → no
 const RETURNS_SOURCES: Readonly<Record<string, string>> = {
   "src/types.ts": ["export interface Result {", "  ok: boolean;", "}", ""].join("\n"),
   "src/returns.ts": [
     'import { Result } from "./types";',
+    'import { NoSuch } from "./no-such-module";',
     "",
     "export interface Exported {",
     "  tag: string;",
@@ -540,6 +554,14 @@ const RETURNS_SOURCES: Readonly<Record<string, string>> = {
     '  throw new Error("x");',
     "}",
     "",
+    // An import alias whose module does not exist: the reference resolves
+    // to an alias symbol whose followed target is the checker's unknown
+    // symbol — the second unresolved route, distinct from withMissing's
+    // error symbol, and the one the alias-following code must survive.
+    "export function withBrokenImport(): NoSuch {",
+    '  throw new Error("x");',
+    "}",
+    "",
     "export function withAmbient(): Date {",
     "  return new Date();",
     "}",
@@ -576,6 +598,7 @@ const RETURN_TYPE_MATRIX: readonly (readonly [string, boolean])[] = [
   ["withLiteral", false],
   ["withObject", false],
   ["withMissing", false],
+  ["withBrokenImport", false],
   ["implicit", false],
 ];
 
@@ -593,9 +616,17 @@ describe("exported return type matrix (research R5, program mode)", () => {
     const run = await runEvidence(withTsconfig(RETURNS_SOURCES));
     // The full projection for the sharpest firing form: usesImported
     // resolves through the import alias to types.ts's exported Result.
-    // Every other field stays neutral — the component fires alone.
+    // Every other component stays neutral — the return-type component
+    // fires alone — except callerModuleCount, which the wiring pin below
+    // fixes at 1 for exactly this record (main.ts's mainRun calls it; the
+    // expectation carried the neutral default only while T018 hardcoded
+    // the count to 0).
     expect(project(evOf(run, "src/returns.ts", "usesImported"))).toEqual(
-      expected({ exportedFunction: true, exportedReturnType: true }),
+      expected({
+        exportedFunction: true,
+        exportedReturnType: true,
+        callerModuleCount: 1,
+      }),
     );
   });
 
