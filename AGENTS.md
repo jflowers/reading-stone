@@ -77,8 +77,10 @@ The division of responsibility:
 - **Parsing**: TypeScript compiler API (`typescript` package) for
   structural AST analysis -- both `.ts` and `.js` sources are in
   scope
-- **Runtime**: Node.js stdlib only (no runtime dependencies at
-  v0.1.0)
+- **Runtime**: Node.js stdlib plus one runtime dependency:
+  `typescript` (the compiler package, consumed at runtime via
+  `typescript/unstable/sync`; moved from devDependencies to
+  dependencies — v0.1.0 shipped with zero runtime deps)
 - **Project management**: npm
 - **Testing**: [vitest](https://vitest.dev/) with
   `@vitest/coverage-v8`
@@ -97,8 +99,16 @@ reading-stone/
 │   ├── taxonomy.ts          # Side-effect taxonomy (48 types, tiers, aliases)
 │   ├── models.ts            # Effect/FunctionRecord/classification records, serializers, derivePackage
 │   ├── safeio.ts            # Bounded safe file reader with skip diagnostics
-│   └── discovery.ts         # Project walking, file classification, framework detection, discover()
+│   ├── discovery.ts         # Project walking, file classification, framework detection, discover()
+│   ├── analysis.ts          # Pattern rules + shared prepareAnalysis pipeline; analyze() response assembly
+│   ├── program.ts           # TypeScript analysis context (program mode with type checker; parse-only fallback)
+│   ├── extract.ts           # Table-driven function extraction (ExtractionRecord set)
+│   ├── detector.ts          # Side-effect detection rules + FunctionRecord assembly
+│   ├── complexity.ts        # Cyclomatic complexity engine (ComplexityEntry)
+│   └── coverage.ts          # Istanbul coverage-final.json artifact parser (CoverageEntry)
 ├── tests/
+├── docs/
+│   └── effect-disposition.md  # 48-type disposition table (tier, disposition, TypeScript mapping, rationale)
 ├── .github/workflows/       # CI: biome, tsc, vitest gates
 ├── openspec/                # OpenSpec changes and specs
 ├── package.json
