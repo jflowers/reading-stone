@@ -2,6 +2,7 @@ import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { analyze } from "./analysis.js";
 import { computeComplexity } from "./complexity.js";
+import { parseCoverage } from "./coverage.js";
 import { discover, InvalidRootPathError } from "./discovery.js";
 import {
   errorResponse,
@@ -321,6 +322,27 @@ export class Server {
         // diagnostics flow to the server's stderr, never stdout, which is
         // reserved for JSON-RPC responses (FR-017).
         return { functions: await computeComplexity(rootPath, patterns, this.stderr) };
+      } catch (error) {
+        throw mapRootPathError(error) ?? error;
+      }
+    });
+    // `coverage` (FR-027, FR-023–FR-026; research R12; contracts/coverage.md
+    // error table): the SAME shared analysis-params validation as
+    // analyze/complexity, then the T028 Istanbul artifact parser wrapped
+    // as `{"functions": [...]}`. The capability response is unchanged —
+    // coverage is a core method, not gated behind a capability flag
+    // (FR-028).
+    dispatch.set("coverage", async (params) => {
+      const { rootPath, patterns } = validateAnalysisParams(params);
+      try {
+        // parseCoverage (T028) returns the serialized, wire-shaped entry
+        // array (empty on every degradation-ladder rung, never a
+        // JSON-RPC error), so the sorted-key envelope serializer only
+        // re-orders keys — repeated requests stay byte-identical
+        // (SC-003/SC-006). Skip diagnostics flow to the server's stderr,
+        // never stdout, which is reserved for JSON-RPC responses
+        // (FR-017).
+        return { functions: await parseCoverage(rootPath, patterns, this.stderr) };
       } catch (error) {
         throw mapRootPathError(error) ?? error;
       }
