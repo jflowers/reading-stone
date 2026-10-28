@@ -1,9 +1,10 @@
 ---
 description: >
   Execute a prioritized work plan through the full Unbound
-  Force pipeline (/opsx-propose -> /uf.unleash -> /uf.finale)
-  with fresh subagent isolation per phase, human gate relay,
-  and per-item progress tracking.
+  Force pipeline. Each work item is executed through two
+  uf_delegate_command delegations (/uf.unleash, then
+  /uf.finale) with paused-exit handling and per-item
+  todowrite tracking.
 ---
 <!-- scaffolded by uf vdev -->
 
@@ -18,12 +19,28 @@ $ARGUMENTS
 ## Description
 
 Orchestrate a prioritized work plan through the full
-Unbound Force pipeline. For each work item, spawns three
-fresh `general` subagents in sequence: `/opsx-propose`
-(spec artifacts), `/uf.unleash` (implementation + review),
-`/uf.finale` (commit + PR). Human confirmation gates are
-relayed through the orchestrator's `question` tool.
-Progress is tracked via `todowrite`.
+Unbound Force pipeline. Each work item is executed
+through two sequential `uf_delegate_command`
+delegations:
+
+1. **Delegation 1** (`/uf.unleash`): delegated with
+   `command_path: ".opencode/commands/uf.unleash.md"`
+   and a prompt carrying the work item's description
+   and issue reference(s). The child session resolves
+   the issue, routes the workflow tier, runs the
+   tier's entry command, and executes the pipeline
+   through the demo step.
+2. **Delegation 2** (`/uf.finale`): delegated with
+   `command_path: ".opencode/commands/uf.finale.md"` and
+   a prompt carrying the work item's context, only after
+   the demo completes. The child session drives staging
+   and commit preparation, then hands off at its
+   commit-approval gate; the human completes the finale
+   interactively.
+
+`/uf.unleash` paused exits are recognized, relayed
+verbatim, and block the work item.
+Progress is tracked per item via `todowrite`.
 
 Supports two input modes: a plan file path or space-
 separated GitHub issue references (`#NNN` or URLs).
@@ -124,38 +141,67 @@ carries:
 
 ### Per-Item Pipeline Protocol
 
-For each confirmed work item, execute three pipeline
-phases sequentially. Each phase runs in a fresh `general`
-subagent:
+For each confirmed work item, execute two sequential
+delegations. Both run through `uf_delegate_command` in
+parented child sessions:
 
-1. **Subagent 1** (`/opsx-propose`): DELEGATE with the
-   change name and description as input. Expected
-   artifacts: proposal.md, design.md, specs/, tasks.md
-   on an `opsx/<change-name>` branch.
+1. **Delegation 1** (`/uf.unleash`): DELEGATE with
+   `command_path: ".opencode/commands/uf.unleash.md"`
+   and a prompt carrying the work item's description
+   and issue reference(s). The child resolves the issue
+   metadata, routes the workflow tier, runs the tier's
+   entry command, and executes the pipeline through the
+   demo step. Omit `task_classification` (command-path
+   delegation), `checkpoint_step`, and
+   `expected_artifact` — the delegated command owns its
+   durable progress state. Set `timeout: 1800000` (the
+   `uf_delegate_command` maximum); whole-pipeline runs
+   have hit this cap (learning
+   `uf-workflow-20261026T182050`), so a timeout routes
+   through gate-timeout recovery below rather than a
+   hard failure.
 
-2. **Subagent 2** (`/uf.unleash`, OpenSpec mode):
-   DELEGATE. Expected outcome: the `/uf.unleash`
-   pipeline completes — implement, spec review, code
-   review, retrospective, demo. The Code Review step of
-   `/uf.unleash` MUST NOT be skipped.
+2. **Delegation 2** (`/uf.finale`): DELEGATE with
+   `command_path: ".opencode/commands/uf.finale.md"` and a
+   prompt carrying the work item's context (title,
+   description, issue reference(s), and that the PR
+   targets the parent `unbound-force/unbound-force` repo),
+   only after the `/uf.unleash` run presents the demo
+   block. `/uf.finale` runs nine steps: branch safety
+   gate, check for changes and stage, commit message,
+   sync with the base branch, push, create or find the
+   PR, watch CI checks, return to `main`, and summary.
+   Expected outcome: a designed handoff at the
+   commit-approval gate — the child drives staging and
+   commit preparation, then wedges at its
+   commit-approval question gate (question prompts do
+   not surface from a parented child; see Direct Human
+   Gate Surfacing). The human completes `/uf.finale`
+   interactively on the feature branch from the child's
+   checkpoints. The orchestrator then verifies the
+   outcome on disk: a PR URL; the PR stays open for
+   human review; `Closes #N` threads via
+   `originating_issue` in `.openspec.yaml`; the tree
+   returns to `main`. Set `timeout: 600000` (10 minutes):
+   the child's work before the commit-approval gate is
+   bounded (branch gate, staging, commit message prep),
+   and the wedge at that gate is the designed handoff —
+   the timeout bounds the orchestrator's wait before
+   gate-timeout recovery engages. Omit
+   `task_classification`, `checkpoint_step`, and
+   `expected_artifact` as above.
 
-3. **Subagent 3** (`/uf.finale`): DELEGATE. Expected
-   outcome: changes committed and pushed; a PR created
-   with `Closes #N` in the commit message and PR body.
-   The PR targets the parent `unbound-force/unbound-force`
-   repo with head `jflowers:<branch>`. The PR stays open
-   for human review.
+**Disk handoff verification**: VERIFY outcomes on disk
+at each boundary:
 
-**Disk handoff verification**: Before spawning each next
-subagent, VERIFY the previous subagent's outputs on disk:
-
-| After | VERIFY on disk |
+| Boundary | VERIFY on disk |
 |---|---|
-| `/opsx-propose` | Spec artifacts exist (proposal.md, design.md, specs/, tasks.md); the `opsx/<name>` branch is checked out |
-| `/uf.unleash` | Implementation files exist and tests pass |
-| `/uf.finale` | A PR URL is returned |
+| Before `/uf.finale` | The working tree is on the item's feature branch (not `main`), and any untracked `internal/scaffold/AGENTS.md` has been removed (Stray file removal) |
+| After `/uf.finale` | A PR exists for the branch; the tree is back on `main` and clean |
 
-**On failure**: STOP and report the missing output.
+**On failure**: route the item through the blocked-item
+protocol (Unleash Paused-Exit Handling below) and report
+the missing outcome.
 
 **Clean tree between items**: After each item completes
 (PR created), VERIFY the return to `main` with a clean
@@ -164,34 +210,98 @@ the next item starts.
 
 **On failure**: STOP and report the dirty tree.
 
-### Gate Relay Protocol
+### Direct Human Gate Surfacing
 
-When a subagent reaches a mandatory human confirmation
-gate, the subagent RELAYs a structured value to the
-orchestrator:
+Tool-rendered paused exits inside delegated commands
+surface to the human: the child returns its exit text
+and the orchestrator relays it verbatim (Unleash
+Paused-Exit Handling below). Question-tool prompts
+inside a delegated child do NOT surface — the parented
+child session cannot carry them to the human, and the
+delegation wedges at the gate until its timeout. The
+orchestrator MUST NOT relay gates via structured values,
+MUST NOT resume children via `task_id`, and MUST NOT
+instruct children to avoid the question tool.
 
-```
-GATE:<name>
-<exact question text>
-<full proposed text / findings verbatim>
-<options list>
-```
+**Gate-timeout recovery**: when a delegation crosses a
+mandatory question gate (for example `/uf.unleash`
+spec-review or `/uf.finale` commit approval) and wedges
+until timeout, the human either clears the gate
+interactively on the feature branch (re-entering the
+child command in a direct session) before re-delegating,
+or the orchestrator re-anchors via `get_progress`,
+`parse_tasks`, and `git status` and drives the remaining
+steps. Direct-drive is bounded to mechanical steps: any
+gate requiring consent — committing, pushing, or opening
+a PR — MUST be answered by the human through a
+pause-relay question before the orchestrator executes
+the consented step; the orchestrator MUST NOT commit,
+push, or open a PR on its own authority. Re-delegating
+without clearing the gate re-hangs at the same gate.
 
-The subagent stays resumable via its `task_id`. The
-orchestrator then:
+The orchestrator's own `question` tool use is limited
+to Phase 0 triage (non-mechanical item resolution and
+the work-item confirmation table) and pause-relay
+decisions — `/uf.unleash` paused exits and delegation
+failures (the blocked-item question below) and
+non-green CI on a created PR (see Tracking). All other
+human interaction happens inside the delegated commands'
+own gate protocols — surfaced to the orchestrator as
+paused exits or timeouts, not as live questions.
 
-1. **Action**: Receive the `GATE:` return value.
-2. **Action**: ASK the question through the `question`
-   tool. Pass the exact question, full text, and
-   options. **On failure**: none (the question tool
-   blocks until answered).
-3. **Action**: RESUME the same subagent via `task_id`
-   with the human's answer.
+### Unleash Paused-Exit Handling
 
-Subagents MUST NOT invoke the `question` tool directly.
-All human interaction flows through the orchestrator.
-This prevents subagents from racing for user input and
-ensures consistent gate formatting.
+`/uf.unleash` may exit paused, requiring human action
+before the item can continue. Recognize any
+`/uf.unleash paused at:` heading; the variant named in
+the heading selects the re-run class in step 4 below.
+
+On a paused exit — or a hard delegation failure (an
+error envelope carrying neither exit text nor a demo
+block):
+
+1. **Relay**: emit the exit text verbatim.
+2. **Block**: mark the todowrite entry `in_progress`
+   with a `[BLOCKED: <variant>]` annotation.
+3. **Ask**: present the pause-relay question — re-run
+   the item after human action, skip the item, or
+   abort the run. When the wedge is a consent gate
+   (for example the finale commit approval), the
+   question relays the pending consent decision and
+   the orchestrator completes only the consented
+   mechanical steps.
+4. **On re-run**: delegate `/uf.unleash` again with the
+   same `command_path` and no routing context — that is,
+   omitting orchestrator-side tier and branch directives
+   while the prompt still carries the work item's
+   description and issue reference(s). Split by variant
+   class (the orchestrator holds the variant from the
+   `[BLOCKED:]` annotation):
+   - **Mid-pipeline variants** (clarify, spec-review,
+     implement-worker-failed, implement-merge-conflict,
+     implement-phase-checkpoint, code-review-preflight,
+     code-review-no-success,
+     code-review-iterations-exhausted, planner-failure):
+     the feature branch and its durable state exist; the
+     child re-anchors and resumes.
+   - **Tier-routing variants** (tier-routing-dirty-tree,
+     tier-routing-missing-tooling): the exit fired inside
+     `uf_unleash_route_decision` before any branch or
+     durable state exists; the re-run is a fresh restart
+     on `main` whose delegation prompt MUST re-carry the
+     description and issue reference(s) — without them
+     the child wedges asking what to build.
+5. **Finale**: delegate `/uf.finale` only after a run
+   completes and presents the demo block. Orchestrated
+   runs supersede the demo block's interactive
+   next-step choice; its two options address
+   interactive runs.
+
+The remaining human control points are the Phase 0
+work-item table, the delegated commands' own gates
+(surfaced as paused exits or gate-timeout wedges),
+pause-relay questions, and non-green CI on a created
+PR (see Tracking).
 
 ### Guardrails
 
@@ -202,8 +312,13 @@ These rules are non-negotiable:
   MUST have its `internal/scaffold/assets/...` copy
   synced byte-identical, or `TestEmbeddedAssets_MatchSource`
   fails.
-- **Explicit staging**: Stage files explicitly by path.
-  `git add -A` and `git add .` are forbidden.
+- **Explicit staging**: The orchestrator stages and
+  commits nothing — staging happens inside the
+  delegated `/uf.finale` child via `uf_finale_stage`.
+  The orchestrator-side rule is verification only; if
+  it ever stages, it MUST use explicit file paths.
+  At the orchestrator level, `git add -A` and
+  `git add .` are forbidden.
 - **Stray file removal**: Remove any untracked
   `internal/scaffold/AGENTS.md` before staging. Never
   commit it.
@@ -212,9 +327,16 @@ These rules are non-negotiable:
 - **PR targeting**: PRs MUST target the parent
   `unbound-force/unbound-force` repo with head
   `jflowers:<branch>`.
-- **Closes linkage**: The commit message and PR body
-  MUST include `Closes #N` for each issue in the work
-  item.
+- **Closes-linkage backstop**: `/uf.finale` threads
+  `Closes #<issue>` into the PR body from
+  `originating_issue` in `.openspec.yaml` (recorded by
+  the tier's entry command from the route decision's
+  issue number when routed from an issue). After the
+  PR is created, VERIFY the PR body contains
+  `Closes #<issue>` for each issue in the work item via
+  `gh pr view <PR number> --json body`; append missing
+  lines via `gh pr edit <PR number>` and report the
+  repair.
 - **No auto-merge**: The PR MUST NOT be merged
   automatically. It stays open for human review.
 
@@ -230,7 +352,14 @@ Maintain `todowrite` with one entry per work item:
 
 Mark an entry complete (`[x]`) only after both hold:
 1. The item's PR has been created
-2. CI checks on the PR are green
+2. `gh pr checks <PR number>` is green
+
+Blocked items stay `in_progress` with the paused
+variant annotated. On non-green CI, keep the entry
+`in_progress`, report the failing checks, and ask the
+human whether to re-run `/uf.unleash` on the feature
+branch, leave the item blocked, or continue with the
+next item.
 
 Entries MUST NOT be marked complete prematurely. The
 `todowrite` tracker is the source of truth for item

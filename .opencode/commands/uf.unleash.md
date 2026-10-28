@@ -2,9 +2,10 @@
 description: >
   Run the full Speckit, OpenSpec, or quick change pipeline
   autonomously: route to a workflow tier when no spec exists,
-  clarify ambiguities with Dewey, generate plan and tasks,
-  review specs, implement with parallel Swarm workers,
-  review code, store learnings, and present demo
+  clarify ambiguities with Dewey, then ask the human
+  interactively for questions Dewey cannot answer, generate
+  plan and tasks, review specs, implement with parallel Swarm
+  workers, review code, store learnings, and present demo
   instructions. Exits to the human only when it genuinely
   needs human judgment.
 ---
@@ -426,18 +427,91 @@ and proceed to Step 2 (Plan).
      to the unanswerable list.
 
 3. **If Dewey is NOT available**: add ALL questions to
-   the unanswerable list. Note:
-   > "Dewey not available -- all clarification questions
-   > require human input."
+   the unanswerable list as ask-gate candidates -- the
+   gate asks through the question tool, which is
+   independent of Dewey, so the gate still runs. These
+   questions flow directly to the clarify exit below
+   only when the question tool is unavailable in the
+   session. Note:
+   > "Dewey not available -- clarification questions
+   > route to the interactive ask gate, exiting for
+   > human input only when the question tool is
+   > unavailable."
 
-**After processing all questions**:
+**After the per-question Dewey loop -- the interactive
+clarify ask gate**: when the unanswerable list is NOT
+empty and the question tool is available in the
+session, ask the human every unanswerable question
+before taking the clarify exit. The gate is required
+human input within Step 1 -- the same class of
+mid-pipeline interaction as the Step 4 per-finding
+spec review decision gate -- not a between-step
+confirmation pause, and it has no question cap: every
+unanswerable question MUST be resolved or deferred
+before Step 1 completes. Questions Dewey answered
+never reach the gate -- their silent auto-resolution
+without human confirmation is preserved.
 
-- If the unanswerable list is empty: all questions were
-  auto-resolved. Announce how many were resolved and
-  proceed to Step 2 (Plan).
-- If the unanswerable list is NOT empty: **EXIT** by
-  calling `format_unleash_exit` with variant `clarify`
-  and the unanswerable questions, each passed as
+For each question on the unanswerable list:
+
+1. Ask the human through a single
+   **question tool call** carrying the question text
+   and its surrounding spec context -- the `context`
+   lines the scan returned -- so the human sees the
+   spec's own framing of the question. Questions MUST
+   NOT be batched: exactly one question per call, and
+   the next question MUST NOT be presented until the
+   previous question's response has been received.
+2. Formulate the ask:
+   - SHOULD present 2-5 mutually exclusive answer
+     options drawn from the question's own enumerated
+     alternatives when the question text enumerates
+     them.
+   - MUST list the spec's stated working default
+     first, labeled "(Recommended)", when the spec
+     states one.
+   - MUST keep the custom free-form answer option
+     enabled for answers outside the enumerated
+     options.
+   - MUST include a defer option in every ask.
+3. Apply the human's response:
+   - A chosen option or a custom free-form answer:
+     resolve the question by calling
+     `resolve_clarification` with `resolved_by:
+     "human"`, omitting `source` entirely (the ask
+     gate itself is the answer's provenance):
+
+     ```
+     resolve_clarification
+       feature_dir: FEATURE_DIR
+       question: [the question exactly as scanned]
+       answer: [the chosen or custom answer]
+       resolved_by: "human"
+     ```
+
+     On failure, emit the envelope's error and
+     **STOP**.
+   - Defer: make no resolve call. The question stays
+     on the unanswerable list and flows to the clarify
+     exit below.
+
+**If the question tool is NOT available** in the
+session: keep today's behavior -- no ask is attempted.
+All unanswerable questions flow directly to the
+clarify exit below.
+
+**After processing**:
+
+- Announce the counts: how many questions were
+  auto-resolved by Dewey, how many were human-answered
+  at the ask gate, and how many were deferred.
+- If the unanswerable list is empty: every question
+  was resolved. Proceed to Step 2 (Plan).
+- If questions remain on the unanswerable list --
+  deferred at the ask gate, or unasked because the
+  question tool was unavailable: **EXIT** by calling
+  `format_unleash_exit` with variant `clarify` and
+  the remaining questions, each passed as
   `{question, context}` exactly as scanned:
 
   ```
@@ -1740,19 +1814,26 @@ retains its no-artifact fallback.
 
 - **NEVER pause between steps to ask for human
   confirmation** -- proceed immediately from one step to
-  the next. The single exception is the per-finding spec
-  review decision gate in Step 4: when a spec review
-  returns REQUEST CHANGES, each finding's question tool
-  MUST be presented and answered before any spec
-  artifact is modified or any finding is waived. That
-  gate is the only legitimate mid-pipeline human
-  interaction. The valid reasons to exit the pipeline
-  are: unanswerable clarification questions, unresolved
-  spec findings after the per-finding gate (pause choice
-  or iteration cap), build/test failures that persist
-  after the fix loop's 3 iterations, merge conflicts,
-  and 3 review iterations exhausted. All other
-  transitions are autonomous.
+  the next. The only legitimate mid-pipeline human
+  interactions are the interactive clarify ask gate in
+  Step 1 (Speckit) and the per-finding spec review
+  decision gate in Step 4 -- required human input
+  within a step, not between-step confirmations. At
+  the ask gate, every question Dewey cannot answer
+  MUST be asked through the question tool, one at a
+  time, before the clarify exit is taken. At the
+  Step 4 gate, when a spec review returns REQUEST
+  CHANGES, each finding's question tool MUST be
+  presented and answered before any spec artifact is
+  modified or any finding is waived. The valid
+  reasons to exit the pipeline are: deferred clarify
+  questions (or unasked when the question tool is
+  unavailable), unresolved spec findings after the
+  per-finding gate (pause choice or iteration cap),
+  build/test failures that persist after the fix loop's
+  3 iterations, merge conflicts, and 3 review
+  iterations exhausted. All other transitions are
+  autonomous.
 - **NEVER modify content on `main`** -- tier routing may
   start on main, but the route decision tool creates the
   `quick/<name>` branch and the speckit/openspec entry

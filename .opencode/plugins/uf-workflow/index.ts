@@ -3027,9 +3027,40 @@ const ResolveClarificationInputSchema = z
       }),
     question: z.string().min(1).max(4096),
     answer: z.string().min(1).max(16384),
-    source: z.string().min(1).max(1024),
+    // unleash-interactive-clarify D4: who resolved the question. "dewey"
+    // (the default) preserves today's silent auto-resolution contract;
+    // "human" marks an answer collected through the interactive clarify
+    // ask gate.
+    resolved_by: z.enum(["dewey", "human"]).default("dewey"),
+    // Presence is conditional on resolved_by — enforced fail-closed by
+    // the superRefine below, not left to caller discipline.
+    source: z.string().min(1).max(1024).optional(),
   })
   .strict()
+  .superRefine((input, context) => {
+    // D4: dewey resolutions (an omitted resolved_by defaults to "dewey"
+    // before refinement runs) carry their provenance in source — the
+    // Clarifications entry interpolates it.
+    if (input.resolved_by === "dewey" && input.source === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["source"],
+        message: "source is required when resolved_by is dewey or omitted",
+      })
+    }
+    // D4: a human answer originates in the ask gate itself; accepting a
+    // source would silently drop it (the human suffix does not
+    // interpolate one), so the combination is rejected instead.
+    if (input.resolved_by === "human" && input.source !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["source"],
+        message:
+          "source must be omitted when resolved_by is human -- " +
+          "the answer originates in the ask gate",
+      })
+    }
+  })
 
 /** Spec.md read outcome: the file text, or a pre-built failure envelope. */
 type SpecReadOutcome =
@@ -3254,15 +3285,24 @@ export function createScanClarificationsTool(
  * Factory that creates the resolve_clarification tool with injectable
  * working directory and filesystem dependencies for testability.
  *
- * Resolution semantics (OpenSpec change unleash-deterministic-tools, D8):
+ * Resolution semantics (OpenSpec change unleash-deterministic-tools, D8;
+ * provenance modes per unleash-interactive-clarify, D4):
  * - reads <feature_dir>spec.md and replaces the first marker whose
  *   extracted question equals the input question with the answer text
  *   inline (mid-line markers keep their surrounding text)
  * - no matching marker fails MARKER_NOT_FOUND, so resolving the same
  *   question twice fails on the second call — the marker is gone
- * - appends the `- Q: <question> -> A: <answer> (Dewey-resolved from
- *   <source>)` entry to ## Clarifications, creating the section at the
- *   bottom of spec.md when absent, and writes the modified file back
+ * - appends the `- Q: <question> -> A: <answer> <provenance>` entry to
+ *   ## Clarifications, creating the section at the bottom of spec.md
+ *   when absent, and writes the modified file back. The provenance
+ *   suffix follows resolved_by: "dewey" (the default when the field is
+ *   omitted) renders `(Dewey-resolved from <source>)` — byte-identical
+ *   to the pre-resolved_by template — while "human" renders
+ *   `(human-answered during /uf.unleash clarify)`
+ * - source is conditional on resolved_by, enforced fail-closed at the
+ *   schema level (superRefine, not caller discipline): required when
+ *   resolved_by is "dewey" or omitted, rejected when it is "human" —
+ *   the ask gate itself is a human answer's provenance
  * - returns {feature_dir, question, remaining} where remaining counts the
  *   markers still present after the resolution
  * - does NOT checkpoint: clarify completion is derived from markers by
@@ -3283,10 +3323,16 @@ export function createResolveClarificationTool(
       "bare-with-text [NEEDS CLARIFICATION <text>], and completely bare [NEEDS CLARIFICATION]. " +
       "Bare/empty forms extract as unscoped questions using the raw marker text as " +
       "fallback. Resolving removes the marker, writes the answer inline where the marker " +
-      "was, appends the - Q: ... -> A: ... (Dewey-resolved from ...) entry to ## " +
-      "Clarifications (creating the section at the bottom when absent), and writes spec.md " +
-      "back. Returns {feature_dir, question, remaining}. A missing marker fails " +
-      "MARKER_NOT_FOUND — resolving the same question twice fails on the second call.",
+      "was, appends the - Q: ... -> A: ... entry to ## Clarifications (creating the " +
+      "section at the bottom when absent) carrying the resolution's provenance, and " +
+      "writes spec.md back. resolved_by selects the mode: \"dewey\" (the default when " +
+      "omitted — a silent Dewey knowledge-base auto-resolution) renders the entry suffix " +
+      "(Dewey-resolved from ...); \"human\" (an answer collected through the /uf.unleash " +
+      "interactive clarify ask gate) renders (human-answered during /uf.unleash " +
+      "clarify). source is required for \"dewey\" (or an omitted resolved_by) and MUST " +
+      "be omitted for \"human\" — enforced fail-closed at the schema level. Returns " +
+      "{feature_dir, question, remaining}. A missing marker fails MARKER_NOT_FOUND — " +
+      "resolving the same question twice fails on the second call.",
     args: {
       feature_dir: ResolveClarificationInputSchema.shape.feature_dir.describe(
         "Feature directory relative to the repo root (e.g. openspec/changes/name/ or specs/018-name/), as returned by uf_unleash_branch_gate.",
@@ -3297,8 +3343,15 @@ export function createResolveClarificationTool(
       answer: ResolveClarificationInputSchema.shape.answer.describe(
         "Answer text written inline where the marker was.",
       ),
+      resolved_by: ResolveClarificationInputSchema.shape.resolved_by.describe(
+        "Who resolved the question: \"dewey\" (the default when omitted — a silent " +
+          "auto-resolution composed from Dewey knowledge-base results) or \"human\" " +
+          "(an answer collected through the /uf.unleash interactive clarify ask gate).",
+      ),
       source: ResolveClarificationInputSchema.shape.source.describe(
-        "Dewey provenance recorded in the Clarifications entry (page name or block UUID).",
+        "Dewey provenance recorded in the Clarifications entry (page name or block UUID). " +
+          "Required when resolved_by is \"dewey\" or omitted; must be omitted when " +
+          "resolved_by is \"human\" — the ask gate itself is the human answer's provenance.",
       ),
     },
     async execute(args) {
@@ -3348,8 +3401,19 @@ export function createResolveClarificationTool(
         }
 
         // Append the Q -> A entry to ## Clarifications (created at the
-        // bottom when absent) and write the modified spec.md back.
-        const entry = `- Q: ${input.question} -> A: ${input.answer} (Dewey-resolved from ${input.source})`
+        // bottom when absent) and write the modified spec.md back. The
+        // suffix records who resolved the question (design D4): dewey
+        // resolutions interpolate their source — byte-identical to the
+        // pre-resolved_by template, so the default path leaves existing
+        // callers and assertions unaffected — while ask-gate answers name
+        // the gate itself. The schema's superRefine guarantees source is
+        // present on the dewey path (and forbids it on the human path),
+        // so the interpolation never sees undefined.
+        const provenance =
+          input.resolved_by === "human"
+            ? "(human-answered during /uf.unleash clarify)"
+            : `(Dewey-resolved from ${input.source})`
+        const entry = `- Q: ${input.question} -> A: ${input.answer} ${provenance}`
         const updatedText = appendClarificationsEntry(updatedLines.join("\n"), entry)
         try {
           await deps.writeText(specPath, updatedText)
