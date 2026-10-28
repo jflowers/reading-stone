@@ -99,7 +99,9 @@ export interface CoverageEntry {
  *
  * @param rootPath Absolute or relative project root; validated and
  * realpath-resolved by `resolveRoot` (an invalid root throws
- * `InvalidRootPathError`, the server maps to `-32602`).
+ * `InvalidRootPathError`, the server maps to `-32602`). Document keys
+ * are contained against both this request's cwd-resolved spelling and
+ * the realpath form (see `containedRelativePath`).
  * @param patterns The raw `patterns` parameter value; shape-validated by
  * the server (`-32602`, T019) before analysis runs, normalized here
  * through the same FR-001 helpers `analyze` filters with.
@@ -114,6 +116,10 @@ export async function parseCoverage(
   stderr: Writable = process.stderr,
 ): Promise<readonly Record<string, unknown>[]> {
   const realRoot = await resolveRoot(rootPath);
+  // The request's cwd-resolved root spelling — resolveRoot's step-1
+  // arithmetic, before its step-2 realpath. Document keys are contained
+  // against it alongside the canonical form (see containedRelativePath).
+  const logicalRoot = resolve(rootPath);
   // The artifact is read through the bounded safe reader at the full 16 MiB
   // budget: JSON cannot parse from a truncated prefix, so a smaller marker
   // budget (the generated-marker precedent) is useless here — the package.json
@@ -143,10 +149,11 @@ export async function parseCoverage(
   const patternSet = normalizePatterns(patterns);
   const entries: CoverageEntry[] = [];
   for (const [key, value] of Object.entries(document)) {
-    // Containment first (FR-024): a key that does not resolve under the
-    // resolved root is skipped whatever its payload. Then the pattern
-    // filter, then conformance (FR-026) — cheap rejections first.
-    const relPath = containedRelativePath(realRoot, key);
+    // Containment first (FR-024): a key that does not resolve under
+    // either spelling of the root is skipped whatever its payload. Then
+    // the pattern filter, then conformance (FR-026) — cheap rejections
+    // first.
+    const relPath = containedRelativePath(realRoot, logicalRoot, key);
     if (relPath === null) {
       continue;
     }
@@ -481,11 +488,11 @@ function compareFnMapKeys(
 // ---------------------------------------------------------------------------
 
 /**
- * Normalizes one document file key to its root-relative POSIX path, or
- * rejects it (FR-024's spec edge case). Both emitter shapes key files —
- * vitest root-relatively, jest absolutely — so every key resolves against
- * the resolved root before `path.relative` reduces it; an absolute key
- * passes `resolve` unchanged, and a relative key joins the root.
+ * Normalizes one document file key against ONE spelling of the analysis
+ * root. Both emitter shapes key files — vitest root-relatively, jest
+ * absolutely — so every key resolves against that root before
+ * `path.relative` reduces it; an absolute key passes `resolve`
+ * unchanged, and a relative key joins the root.
  *
  * Containment is lexical, via `path.relative`: the result must be neither
  * absolute (a different Windows drive), empty (the root itself — a
@@ -496,16 +503,45 @@ function compareFnMapKeys(
  * rejected rather than risk an escape. The separator normalization to
  * POSIX mirrors the wire contract every other root-relative path honors.
  *
- * @param root The resolved absolute analysis root.
+ * @param root One spelling of the absolute analysis root.
  * @param key The document's file key (relative or absolute).
- * @returns The root-relative POSIX path, or null when not under the root.
+ * @returns The root-relative POSIX path, or null when not under this root.
  */
-function containedRelativePath(root: string, key: string): string | null {
+function relativeUnderRoot(root: string, key: string): string | null {
   const rel = relative(root, resolve(root, key));
   if (rel === "" || isAbsolute(rel) || rel.startsWith("..")) {
     return null;
   }
   return rel.split(sep).join("/");
+}
+
+/**
+ * Normalizes one document file key to its root-relative POSIX path, or
+ * rejects it (FR-024's spec edge case), trying BOTH spellings of the
+ * analysis root: the realpath form `resolveRoot` canonicalized to, and
+ * the request's cwd-resolved `root_path` it canonicalized FROM. An
+ * Istanbul document keys files by whatever spelling the emitting test
+ * run saw — jest keys absolutely, and a `root_path` spelled through a
+ * symlink (macOS's `/var` → `/private/var`, a linked workspace)
+ * realpaths to a different lexical form, so a document keyed by the
+ * request's own spelling would be silently dropped — a false negative
+ * Principle II forbids. Both spellings denote the same directory
+ * (`resolveRoot` derived the one from the other), so neither admits an
+ * escape the other would not; at most one can contain an absolute key,
+ * so the outcome stays a deterministic function of the request and
+ * document (Principle I). A key under neither is skipped.
+ *
+ * @param realRoot The realpath-resolved analysis root.
+ * @param logicalRoot The request's cwd-resolved root spelling.
+ * @param key The document's file key (relative or absolute).
+ * @returns The root-relative POSIX path, or null when not under the root.
+ */
+function containedRelativePath(
+  realRoot: string,
+  logicalRoot: string,
+  key: string,
+): string | null {
+  return relativeUnderRoot(realRoot, key) ?? relativeUnderRoot(logicalRoot, key);
 }
 
 /**
