@@ -1,6 +1,6 @@
 import { lstatSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import type { Writable } from "node:stream";
 import { ScriptKind, type SourceFile } from "typescript/unstable/ast";
 import type { FileSystem, FileSystemEntries } from "typescript/unstable/fs";
@@ -11,6 +11,7 @@ import {
   DiagnosticCategory,
   type Program,
 } from "typescript/unstable/sync";
+import { relativeUnderBase } from "./internal.js";
 import { readBoundedSync } from "./safeio.js";
 
 /**
@@ -770,19 +771,17 @@ function pathExists(path: string): boolean {
 }
 
 /**
- * Lexical containment: `candidate` is strictly inside `base`. The
- * "begins with `..`" test is deliberately literal (the safeio precedent):
- * as defense in depth it errs toward rejecting, so even a pathological
- * in-base sibling such as `..hidden.ts` is refused rather than risk an
- * escape.
+ * Lexical containment: `candidate` is strictly inside `base`, via the
+ * shared `relativeUnderBase` helper (src/internal.ts) — the deliberately
+ * literal `..` defense included, so even a pathological in-base sibling
+ * such as `..hidden.ts` is refused rather than risk an escape.
  *
  * @param base Containing directory.
  * @param candidate Path to test.
  * @returns Whether the candidate is strictly beneath the base.
  */
 function isPathInside(base: string, candidate: string): boolean {
-  const rel = relative(base, candidate);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  return relativeUnderBase(base, candidate) !== null;
 }
 
 /**

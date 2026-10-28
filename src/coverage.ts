@@ -1,8 +1,9 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import type { Writable } from "node:stream";
 
 import { normalizePatterns, pathInScope } from "./analysis.js";
 import { resolveRoot } from "./discovery.js";
+import { relativeUnderBase } from "./internal.js";
 import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
 
 /**
@@ -675,29 +676,19 @@ function compareFnMapKeys(
 /**
  * Normalizes one document file key against ONE spelling of the analysis
  * root. Both emitter shapes key files — vitest root-relatively, jest
- * absolutely — so every key resolves against that root before
- * `path.relative` reduces it; an absolute key passes `resolve`
- * unchanged, and a relative key joins the root.
- *
- * Containment is lexical, via `path.relative`: the result must be neither
- * absolute (a different Windows drive), empty (the root itself — a
- * directory, not a file beneath it), nor `..`-prefixed. The `..` test is
- * deliberately literal — the safeio precedent — so a sibling sharing the
- * root's leading string (`${root}-trap/...`, which a `startsWith` check
- * would wrongly keep) and an in-root `..hidden`-style key are both
- * rejected rather than risk an escape. The separator normalization to
- * POSIX mirrors the wire contract every other root-relative path honors.
+ * absolutely — so every key resolves against that root before the shared
+ * containment helper reduces it: an absolute key passes `resolve`
+ * unchanged, and a relative key joins the root. Containment itself is
+ * `relativeUnderBase` (src/internal.ts) — lexical, with the deliberately
+ * literal `..` defense — and its separator normalization to POSIX
+ * mirrors the wire contract every other root-relative path honors.
  *
  * @param root One spelling of the absolute analysis root.
  * @param key The document's file key (relative or absolute).
  * @returns The root-relative POSIX path, or null when not under this root.
  */
 function relativeUnderRoot(root: string, key: string): string | null {
-  const rel = relative(root, resolve(root, key));
-  if (rel === "" || isAbsolute(rel) || rel.startsWith("..")) {
-    return null;
-  }
-  return rel.split(sep).join("/");
+  return relativeUnderBase(root, resolve(root, key));
 }
 
 /**

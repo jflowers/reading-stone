@@ -1,4 +1,3 @@
-import { isAbsolute, relative, sep } from "node:path";
 import type { Writable } from "node:stream";
 import {
   type ArrowFunction,
@@ -36,6 +35,7 @@ import {
   type SetAccessorDeclaration,
   type SourceFile,
 } from "typescript/unstable/ast";
+import { compareFileLineName, relativeUnderBase } from "./internal.js";
 import type { ProgramContext } from "./program.js";
 
 /**
@@ -228,7 +228,7 @@ function collectSources(
   }
   const pairs: Array<[string, SourceFile]> = [];
   for (const fileName of context.program.getSourceFileNames()) {
-    const relPath = rootRelativePath(realRoot, fileName);
+    const relPath = relativeUnderBase(realRoot, fileName);
     if (relPath === null) {
       continue;
     }
@@ -239,25 +239,6 @@ function collectSources(
     pairs.push([relPath, sourceFile]);
   }
   return pairs;
-}
-
-/**
- * Root-relative POSIX spelling of an absolute compiler file name, or `null`
- * when the file is not strictly inside the root. The "begins with `..`"
- * test is deliberately literal (the safeio precedent): as defense in depth
- * it errs toward rejecting, so even a pathological in-root sibling such as
- * `..hidden.ts` is refused rather than risk an escape.
- *
- * @param realRoot Realpath-resolved absolute analysis root.
- * @param fileName Absolute compiler-resolved file name.
- * @returns The root-relative POSIX path, or `null` when out of root.
- */
-function rootRelativePath(realRoot: string, fileName: string): string | null {
-  const rel = relative(realRoot, fileName);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-    return null;
-  }
-  return rel.split(sep).join("/");
 }
 
 /**
@@ -300,26 +281,22 @@ function extractFromFile(
 }
 
 /**
- * The FR-008 order: `(relPath, line, name)`, codepoint comparison for the
- * string keys, and `0` on full-key ties so the platform-default stable
- * sort resolves them by emission (source) order — the getter-before-setter
- * resolution for a one-line accessor pair.
+ * The FR-008 order, via the shared `(file, line, name)` comparator
+ * (src/internal.ts): codepoint comparison for the string keys and `0` on
+ * full-key ties so the platform-default stable sort resolves them by
+ * emission (source) order — the getter-before-setter resolution for a
+ * one-line accessor pair. The record's file key is `relPath`, the same
+ * root-relative POSIX spelling the wire payloads carry as `file`.
  *
  * @param a Left record.
  * @param b Right record.
  * @returns The three-key comparison result.
  */
 function compareRecords(a: ExtractionRecord, b: ExtractionRecord): number {
-  if (a.relPath !== b.relPath) {
-    return a.relPath < b.relPath ? -1 : 1;
-  }
-  if (a.line !== b.line) {
-    return a.line - b.line;
-  }
-  if (a.name !== b.name) {
-    return a.name < b.name ? -1 : 1;
-  }
-  return 0;
+  return compareFileLineName(
+    { file: a.relPath, line: a.line, name: a.name },
+    { file: b.relPath, line: b.line, name: b.name },
+  );
 }
 
 /**

@@ -64,6 +64,7 @@ import {
   isSchedulingCall,
   TIMER_GLOBAL_NAMES,
 } from "./extract.js";
+import { compareFileLineName } from "./internal.js";
 import { derivePackage, type Effect, type FunctionRecord } from "./models.js";
 import type { ProgramContext } from "./program.js";
 import { resolveSideEffectType } from "./taxonomy.js";
@@ -551,31 +552,8 @@ export function assembleFunctionRecords(
       side_effects: effects.get(record) ?? [],
     }),
   );
-  assembled.sort(compareFunctionRecords);
+  assembled.sort(compareFileLineName);
   return assembled;
-}
-
-/**
- * The `(file, line, name)` record comparison (research R8): codepoint
- * ordering on the file path and name — the platform-default string
- * comparison the wire contract's golden tests pin — with numeric line
- * ordering between them. Total on the assembled record set.
- *
- * @param a Left record.
- * @param b Right record.
- * @returns The three-key comparison result.
- */
-function compareFunctionRecords(a: FunctionRecord, b: FunctionRecord): number {
-  if (a.file !== b.file) {
-    return a.file < b.file ? -1 : 1;
-  }
-  if (a.line !== b.line) {
-    return a.line - b.line;
-  }
-  if (a.name !== b.name) {
-    return a.name < b.name ? -1 : 1;
-  }
-  return 0;
 }
 
 /**
