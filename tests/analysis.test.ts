@@ -599,3 +599,82 @@ describe("prepareAnalysis: root path resolution", () => {
     },
   );
 });
+
+// Scripts ONE test's pipeline stages (the tests/program.test.ts
+// compiler-drift-guard pattern): the real modules pass through untouched
+// except that `extractFunctions` always throws — a mid-pipeline failure
+// after a successful bootstrap — and `buildProgramContext` returns a
+// recording fake context whose dispose is a spy. The fake never spawns a
+// native compiler server, so the failure-path contract is pinned without
+// one. Returns the dispose spy for the release assertions.
+function mockFailingExtraction(
+  mode: "program" | "parse-only",
+): ReturnType<typeof vi.fn> {
+  const dispose = vi.fn();
+  vi.doMock("../src/program.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../src/program.js")>();
+    return {
+      ...actual,
+      buildProgramContext: () =>
+        mode === "program"
+          ? { mode: "program", dispose }
+          : { mode: "parse-only", sources: new Map() },
+    };
+  });
+  vi.doMock("../src/extract.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../src/extract.js")>();
+    return {
+      ...actual,
+      extractFunctions: () => {
+        throw new Error("compiler channel died during extraction");
+      },
+    };
+  });
+  return dispose;
+}
+
+// Imports a fresh, mock-respecting copy of src/analysis.ts: vi.resetModules()
+// clears the registry so the dynamic import re-evaluates the module (and its
+// program/extract dependencies) through the active doMock registrations,
+// while the file's static import — used by every unmocked test above — keeps
+// its original real-module binding.
+async function importFreshAnalysis(): Promise<typeof import("../src/analysis.js")> {
+  vi.resetModules();
+  return await import("../src/analysis.js");
+}
+
+describe("prepareAnalysis: extraction-failure context release", () => {
+  afterEach(() => {
+    vi.doUnmock("../src/program.js");
+    vi.doUnmock("../src/extract.js");
+    vi.resetModules();
+  });
+
+  it("disposes the program-mode compiler context when extraction throws — and still rethrows the failure", {
+    timeout: 30_000,
+  }, async () => {
+    const dispose = mockFailingExtraction("program");
+    const root = await makeTree({ "src/lib.ts": KEEP });
+    const sink = memorySink();
+    const { prepareAnalysis: freshPrepare } = await importFreshAnalysis();
+    await expect(freshPrepare(root, undefined, sink.stream)).rejects.toThrow(
+      "compiler channel died during extraction",
+    );
+    // Exactly one release: the failed pipeline never hands the context to
+    // a consumer, so the catch path is the only disposer.
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("rethrows a parse-only extraction failure unchanged — nothing to dispose, no dispose call", {
+    timeout: 30_000,
+  }, async () => {
+    const dispose = mockFailingExtraction("parse-only");
+    const root = await makeTree({ "src/lib.ts": KEEP });
+    const sink = memorySink();
+    const { prepareAnalysis: freshPrepare } = await importFreshAnalysis();
+    await expect(freshPrepare(root, undefined, sink.stream)).rejects.toThrow(
+      "compiler channel died during extraction",
+    );
+    expect(dispose).not.toHaveBeenCalled();
+  });
+});
