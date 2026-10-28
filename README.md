@@ -109,7 +109,12 @@ fixed transport bounds (not configurable in v1):
 
 Empty `coverage` results usually mean no artifact exists yet: run the
 project's own test command with an Istanbul reporter writing
-`coverage/coverage-final.json` first, then request `coverage`.
+`coverage/coverage-final.json` first, then request `coverage`. When the
+document parses but no file entry matches the Istanbul shape, or entries
+are skipped for size (per-file record caps, or the document-level
+attribution work budget), Reading Stone says so on stderr — one line per
+skipped document or file — while stdout still carries only the JSON-RPC
+response.
 
 The read-don't-run coverage behavior is a deliberate, recorded divergence
 from the Gaze analyzer protocol (FR-025), which frames coverage as the

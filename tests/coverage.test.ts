@@ -60,6 +60,18 @@
 // planted: FR-024 pins root containment and patterns only (research R10
 // rejects conforming entries to discovered sources), so a document entry
 // with no on-disk file must still report.
+//
+// REVIEW-FIX PINS (the code-review cycles this suite grew): the vitest v8
+// emitter-shape tree pins the null-end-column conformance relaxation (the
+// guard-critical false negative: real v8 artifacts write "column": null on
+// END positions, and the old numeric-column requirement silently emptied
+// them); the zero-conformance diagnostic pins the one stderr line a
+// parseable-but-nowhere-conforming document now writes; and the
+// resource-bound fixtures pin the per-entry record caps and the
+// document-level attribution work budget (sizes generated from the
+// src/coverage.ts constants — MAX_FUNCTIONS_PER_FILE_ENTRY = 5000,
+// MAX_STATEMENTS_PER_FILE_ENTRY = 50000, MAX_ATTRIBUTION_WORK = 25,000,000
+// — each crossed by exactly one record or work unit).
 
 import { realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
@@ -934,6 +946,158 @@ const CONTAINMENT_EXPECTED: ReadonlyArray<Record<string, unknown>> = [
 ];
 
 // ---------------------------------------------------------------------------
+// The vitest v8 emitter-shape tree (review fix: null end columns): the
+// real vitest v8 pipeline writes `"column": null` on END positions when
+// the sourcemap carries no column information — the motivating artifact
+// had null end columns on 1542 of 1558 statementMap records and in 272
+// fnMap decl/loc positions across its 250 records. Before the fix,
+// requiring a numeric end column rejected every entry of such a document
+// and parseCoverage answered {"functions": []} — the silent false negative
+// (Constitution Principle II) this tree pins shut.
+// ---------------------------------------------------------------------------
+
+/** A null end column: the v8 emitter's "no column bound on this line". */
+function v8End(line: number): { line: number; column: null } {
+  return { line, column: null };
+}
+
+const V8_SOURCE = [
+  "export function tally(values: number[]): number {",
+  "  let total = 0;",
+  "  for (const value of values) {",
+  "    total += value;",
+  "  }",
+  "  return total;",
+  "}",
+  "",
+].join("\n");
+
+// Every END position is null-columned — statement ends, fnMap decl ends,
+// and fnMap loc ends — mirroring the motivating artifact's dominant form.
+// The v8 emitter also keys files absolutely; v8Document below does too.
+const V8_NULL_END_COVERAGE = {
+  statementMap: {
+    "0": { start: pos(2, 2), end: v8End(2) }, // let total = 0;
+    "1": { start: pos(3, 2), end: v8End(5) }, // for (const value of values) { ... }
+    "2": { start: pos(4, 4), end: v8End(4) }, // total += value; (never taken)
+    "3": { start: pos(6, 2), end: v8End(6) }, // return total;
+  },
+  fnMap: {
+    "0": {
+      name: "tally",
+      decl: { start: pos(1, 16), end: v8End(1) },
+      loc: { start: pos(1, 7), end: v8End(7) },
+    },
+  },
+  s: { "0": 1, "1": 3, "2": 0, "3": 1 },
+};
+
+const V8_END_LINE_SOURCE = [
+  "export function unboundedEnd(step: number): number {",
+  "  const doubled = step * 2;",
+  "  return doubled;",
+  "}",
+  "",
+].join("\n");
+
+// The normalized containment semantics: statement "1" sits ON the fnMap
+// loc's end line at column 90 — beyond any plausible real column — and
+// still attributes, because a null end column means the range holds
+// through the whole end line.
+const V8_END_LINE_COVERAGE = {
+  statementMap: {
+    "0": { start: pos(2, 2), end: v8End(2) },
+    "1": { start: pos(3, 90), end: v8End(3) },
+  },
+  fnMap: {
+    "0": {
+      name: "unboundedEnd",
+      decl: { start: pos(1, 16), end: v8End(1) },
+      loc: { start: pos(1, 7), end: v8End(3) },
+    },
+  },
+  s: { "0": 1, "1": 1 },
+};
+
+// The real vitest v8 emitter keys files by absolute path (the motivating
+// artifact's shape).
+function v8Document(root: string): string {
+  return JSON.stringify({
+    [join(root, "src/v8-end-line.ts")]: V8_END_LINE_COVERAGE,
+    [join(root, "src/v8.ts")]: V8_NULL_END_COVERAGE,
+  });
+}
+
+// "src/v8-end-line.ts" sorts before "src/v8.ts" ("-" before ".").
+const V8_EXPECTED: ReadonlyArray<Record<string, unknown>> = [
+  {
+    file: "src/v8-end-line.ts",
+    function: "unboundedEnd",
+    start_line: 1,
+    end_line: 3,
+    covered_stmts: 2,
+    total_stmts: 2,
+    percentage: 100,
+  },
+  {
+    file: "src/v8.ts",
+    function: "tally",
+    start_line: 1,
+    end_line: 7,
+    covered_stmts: 3,
+    total_stmts: 4,
+    percentage: 75,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// The resource-bound fixtures (review fix: record caps and the attribution
+// work budget). Generated sizes cross the src/coverage.ts constants by
+// exactly one record or fit under the remainder by exactly one work unit;
+// see the header's REVIEW-FIX PINS note for the constant values.
+// ---------------------------------------------------------------------------
+
+// 5001 fnMap records — one over the per-entry function cap.
+function fnFloodCoverage(): Record<string, unknown> {
+  const fnMap: Record<string, unknown> = {};
+  for (let index = 0; index <= 5000; index += 1) {
+    fnMap[String(index)] = fnRecord(`flood${index}`, loc(1, 0, 1, 0), loc(2, 0, 3, 0));
+  }
+  return { statementMap: { "0": loc(2, 2, 2, 10) }, fnMap, s: { "0": 1 } };
+}
+
+// 50001 statementMap records — one over the per-entry statement cap.
+function statementFloodCoverage(): Record<string, unknown> {
+  const statementMap: Record<string, unknown> = {};
+  for (let index = 0; index <= 50000; index += 1) {
+    statementMap[String(index)] = loc(2, 2, 2, 10);
+  }
+  return {
+    statementMap,
+    fnMap: { "0": fnRecord("drown", loc(1, 16, 1, 21), loc(1, 7, 3, 2)) },
+    s: { "0": 1 },
+  };
+}
+
+// statements × functions of attribution work in one conforming,
+// under-the-caps file entry: every statement lies inside every fnMap loc,
+// so the whole product is real containment work.
+function workHeavyCoverage(
+  statements: number,
+  functions: number,
+): Record<string, unknown> {
+  const statementMap: Record<string, unknown> = {};
+  for (let index = 0; index < statements; index += 1) {
+    statementMap[String(index)] = loc(2, 2, 2, 10);
+  }
+  const fnMap: Record<string, unknown> = {};
+  for (let index = 0; index < functions; index += 1) {
+    fnMap[String(index)] = fnRecord(`work${index}`, loc(1, 0, 1, 0), loc(1, 0, 4, 0));
+  }
+  return { statementMap, fnMap, s: { "0": 1 } };
+}
+
+// ---------------------------------------------------------------------------
 // The suites.
 // ---------------------------------------------------------------------------
 
@@ -1043,6 +1207,10 @@ describe("pattern scoping (FR-001/FR-024; US4 scenario 6)", () => {
     const root = await patternsTree();
     const run = await coverageTree(root, ["docs"]);
     expect(run.entries).toEqual([]);
+    // The document conforms; the request simply matched nothing — the
+    // zero-conformance diagnostic must not fire (it counts document
+    // shape, never this request's filters).
+    expect(run.stderr()).toBe("");
   });
 
   it("null, empty-array, ./..., and ... patterns all mean the whole tree (FR-001 catch-alls)", async () => {
@@ -1061,6 +1229,9 @@ describe("per-entry tolerance (FR-026; US4 scenario 5)", () => {
     const run = await coverageTree(root);
     expect(entryProjection(run.entries)).toEqual(TOLERANCE_EXPECTED);
     expectWireInvariants(run.entries);
+    // Some entries conform, so per-entry tolerance stays silent (the
+    // zero-conformance diagnostic fires only when NONE do).
+    expect(run.stderr()).toBe("");
   });
 
   it("the skip set is deterministic: repeat responses are byte-identical", async () => {
@@ -1114,6 +1285,160 @@ describe("root containment (FR-024; spec edge case)", () => {
     const run = await coverageTree(root);
     expect(entryProjection(run.entries)).toEqual(CONTAINMENT_EXPECTED);
     expectWireInvariants(run.entries);
+    // The document conforms (inside.ts holds its shape); the escapes are
+    // a legitimate empty-result cause, not a document problem — the
+    // zero-conformance diagnostic must not fire.
+    expect(run.stderr()).toBe("");
+  });
+});
+
+describe("vitest v8 emitter shape (review fix: null end columns)", () => {
+  it("a v8-shaped document with null end columns on every range reports its entries — never a silent empty result", async () => {
+    const root = await makeTree({
+      "src/v8-end-line.ts": V8_END_LINE_SOURCE,
+      "src/v8.ts": V8_SOURCE,
+    });
+    await plantCoverageDocument(root, v8Document(root));
+    const run = await coverageTree(root);
+    expect(entryProjection(run.entries)).toEqual(V8_EXPECTED);
+    expectWireInvariants(run.entries);
+    // A fully conforming v8 document: no diagnostic.
+    expect(run.stderr()).toBe("");
+  });
+
+  it("a statement on a null-columned end line attributes through the whole line — the end-of-line sentinel", async () => {
+    const root = await makeTree({
+      "src/v8-end-line.ts": V8_END_LINE_SOURCE,
+      "src/v8.ts": V8_SOURCE,
+    });
+    await plantCoverageDocument(root, v8Document(root));
+    const run = await coverageTree(root);
+    const unbounded = entryFor(run.entries, "unboundedEnd", "src/v8-end-line.ts");
+    expect(unbounded.total_stmts).toBe(2);
+    expect(unbounded.covered_stmts).toBe(2);
+  });
+
+  it("repeat responses over the v8-shaped document are byte-identical (SC-006)", async () => {
+    const root = await makeTree({
+      "src/v8-end-line.ts": V8_END_LINE_SOURCE,
+      "src/v8.ts": V8_SOURCE,
+    });
+    await plantCoverageDocument(root, v8Document(root));
+    const first = await coverageTree(root);
+    const second = await coverageTree(root);
+    expect(JSON.stringify(second.entries)).toBe(JSON.stringify(first.entries));
+  });
+});
+
+describe("zero-conformance diagnostic (review fix: the not-silent rung)", () => {
+  it("a parseable document whose every file entry is non-conforming yields empty coverage plus exactly one stderr diagnostic line", async () => {
+    const root = await makeTree({});
+    await plantCoverageDocument(
+      root,
+      JSON.stringify({
+        "src/missing-s.ts": MISSING_S,
+        "src/shapeless-fn.ts": SHAPELESS_FN,
+      }),
+    );
+    const run = await coverageTree(root);
+    expect(run.entries).toEqual([]);
+    expect(run.stderr()).toBe(
+      "reading-stone: skipping coverage document: no conforming file entries\n",
+    );
+  });
+
+  it("the diagnostic is deterministic: repeat responses carry the identical line", async () => {
+    const root = await makeTree({});
+    await plantCoverageDocument(
+      root,
+      JSON.stringify({ "src/shapeless-fn.ts": SHAPELESS_FN }),
+    );
+    const first = await coverageTree(root);
+    const second = await coverageTree(root);
+    expect(second.entries).toEqual([]);
+    expect(second.stderr()).toBe(first.stderr());
+  });
+});
+
+describe("coverage resource bounds (review fix: record caps and attribution work budget)", () => {
+  it("a file entry over the fnMap record cap is skipped with one stderr line while conforming companions report", async () => {
+    const root = await makeTree({});
+    await plantCoverageDocument(
+      root,
+      JSON.stringify({
+        "src/fn-flood.ts": fnFloodCoverage(),
+        "src/steady.ts": STEADY_COVERAGE,
+      }),
+    );
+    const run = await coverageTree(root);
+    expect(entryProjection(run.entries)).toEqual([
+      {
+        file: "src/steady.ts",
+        function: "steady",
+        start_line: 1,
+        end_line: 3,
+        covered_stmts: 1,
+        total_stmts: 1,
+        percentage: 100,
+      },
+    ]);
+    expect(run.stderr()).toBe(
+      "reading-stone: skipping src/fn-flood.ts: coverage record budget exceeded\n",
+    );
+  });
+
+  it("a file entry over the statementMap record cap is skipped with one stderr line", async () => {
+    const root = await makeTree({});
+    await plantCoverageDocument(
+      root,
+      JSON.stringify({ "src/statement-flood.ts": statementFloodCoverage() }),
+    );
+    const run = await coverageTree(root);
+    expect(run.entries).toEqual([]);
+    expect(run.stderr()).toBe(
+      "reading-stone: skipping src/statement-flood.ts: coverage record budget exceeded\n",
+    );
+  });
+
+  it("the document-level work budget skips a later heavy entry that would exceed the remainder, while smaller entries still fit", async () => {
+    const root = await makeTree({});
+    await plantCoverageDocument(
+      root,
+      JSON.stringify({
+        // 3000 × 5000 = 15,000,000 work: admitted (budget 25,000,000),
+        // leaving 10,000,000.
+        "src/early.ts": workHeavyCoverage(3000, 5000),
+        // 1 × 1 = 1 work: still fits the remainder.
+        "src/tiny.ts": STEADY_COVERAGE,
+        // 15,000,000 exceeds the 9,999,999 remainder: skipped, one line.
+        "src/late.ts": workHeavyCoverage(3000, 5000),
+      }),
+    );
+    const run = await coverageTree(root);
+    expect(run.entries.filter((entry) => entry.file === "src/late.ts")).toEqual([]);
+    expect(run.entries.filter((entry) => entry.file === "src/early.ts")).toHaveLength(
+      5000,
+    );
+    expect(run.entries.filter((entry) => entry.file === "src/tiny.ts")).toHaveLength(1);
+    expectWireInvariants(run.entries);
+    expect(run.stderr()).toBe(
+      "reading-stone: skipping src/late.ts: attribution work budget exceeded\n",
+    );
+  });
+
+  it("the skip set is deterministic: repeat responses over the budget document are byte-identical", async () => {
+    const root = await makeTree({});
+    await plantCoverageDocument(
+      root,
+      JSON.stringify({
+        "src/early.ts": workHeavyCoverage(3000, 5000),
+        "src/late.ts": workHeavyCoverage(3000, 5000),
+      }),
+    );
+    const first = await coverageTree(root);
+    const second = await coverageTree(root);
+    expect(JSON.stringify(second.entries)).toBe(JSON.stringify(first.entries));
+    expect(second.stderr()).toBe(first.stderr());
   });
 });
 
@@ -1136,6 +1461,8 @@ describe("degradation ladder (FR-025; US4 scenarios 3-4)", () => {
       await plantCoverageDocument(root, contents);
       const run = await coverageTree(root);
       expect(run.entries).toEqual([]);
+      // These rungs never reach the document loop: silent by design.
+      expect(run.stderr()).toBe("");
     },
   );
 
@@ -1144,6 +1471,9 @@ describe("degradation ladder (FR-025; US4 scenarios 3-4)", () => {
     await plantCoverageDocument(root, "{}");
     const run = await coverageTree(root);
     expect(run.entries).toEqual([]);
+    // No keys: nothing conformed, but nothing failed to either — the
+    // zero-conformance diagnostic fires only for a document with keys.
+    expect(run.stderr()).toBe("");
   });
 
   it.skipIf(runningAsRoot)(

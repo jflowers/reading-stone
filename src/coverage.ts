@@ -28,9 +28,16 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * **Degradation ladder** (FR-025): an absent artifact, a skipped read, a
  * JSON parse failure, or a non-object top level each yield the empty entry
  * list — never a JSON-RPC error. A skipped read has already written its
- * one stderr diagnostic line inside `readBounded`; every other rung is
- * silent because there is nothing to report and nothing wrong with the
- * request.
+ * one stderr diagnostic line inside `readBounded`; the parse-failure and
+ * non-object rungs stay silent because there is nothing to report and
+ * nothing wrong with the request. One further rung is deliberately NOT
+ * silent: a parseable object document in which no file entry holds the
+ * referenced shape writes exactly one diagnostic line — `reading-stone:
+ * skipping coverage document: no conforming file entries` — because a
+ * document that parses yet conforms nowhere is the signature of an
+ * emitter-shape mismatch, and reporting empty there silently was a false
+ * negative (Principle II). An empty `{}` document has no keys and stays
+ * silent: nothing conformed, but nothing failed to either.
  *
  * **Per-entry tolerance** (FR-026): within a parseable document, a file
  * entry whose `statementMap`, `fnMap`, or `s` — or the shapes they
@@ -42,6 +49,29 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * `branchMap`/`b`/`f` may be present and are ignored — `s` is the only
  * execution-count source (the fixtures plant `f` values that contradict
  * `s` precisely to pin this).
+ *
+ * **Null end columns** (the vitest v8 emitter's real shape): Istanbul's
+ * v8 coverage pipeline writes `"column": null` on END positions whenever
+ * the sourcemap carries no column information — the motivating artifact
+ * had null end columns on 1542 of 1558 statementMap records and in the
+ * fnMap decl/loc ranges of 272 positions across its 250 records — so
+ * requiring a numeric end column rejected every entry of a real document.
+ * The conformance check therefore requires a numeric `line` on both
+ * positions and a numeric START column, accepts a null or absent end
+ * column, and normalizes it to the end-of-line sentinel
+ * (`UNBOUNDED_END_COLUMN`): the range then deterministically contains
+ * every position on its end line.
+ *
+ * **Resource bounds** (Principle V — the artifact is untrusted input):
+ * attribution is O(statements × functions) per file entry, which the
+ * 16 MiB read bound alone does not bound. Two budgets mirror extract.ts's
+ * AST depth budget: a file entry over either per-entry record cap
+ * (`MAX_STATEMENTS_PER_FILE_ENTRY` / `MAX_FUNCTIONS_PER_FILE_ENTRY`) is
+ * skipped with one diagnostic line, and a document-level attribution work
+ * budget (`MAX_ATTRIBUTION_WORK`, the running sum of statements ×
+ * functions) skips any entry that would exceed its remainder, likewise
+ * one line per skip. Skips are deterministic — JSON key enumeration order
+ * is spec-defined — and never throw or become a JSON-RPC error.
  */
 
 /**
@@ -51,6 +81,43 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * coverage elsewhere report empty coverage; documented limitation).
  */
 const COVERAGE_ARTIFACT_PATH = "coverage/coverage-final.json";
+
+/**
+ * The end-of-line sentinel a null or absent END column normalizes to (the
+ * vitest v8 emitter's real shape — see the module header): Istanbul's v8
+ * pipeline writes `"column": null` when a sourcemap position carries no
+ * column information, meaning "no column bound on this line", so the
+ * normalized range contains every position on its end line. A real column
+ * can never reach it, and the spans it inflates (end-minus-start) only
+ * lose "smallest span" attribution contests to precisely bounded ranges —
+ * the deterministic, conservative direction.
+ */
+const UNBOUNDED_END_COLUMN = Number.MAX_SAFE_INTEGER;
+
+/**
+ * The per-file-entry record caps (Principle V; the extract.ts
+ * AST-depth-budget precedent): a file entry whose statementMap or fnMap
+ * holds more records than these caps is skipped with one stderr
+ * diagnostic line. Real entries sit orders of magnitude below (the
+ * motivating artifact's largest file entry: 618 statements, 90
+ * functions), while a 16 MiB document can carry far more — and
+ * attribution cost grows with the product, not the sum, of the two
+ * counts.
+ */
+const MAX_STATEMENTS_PER_FILE_ENTRY = 50_000;
+const MAX_FUNCTIONS_PER_FILE_ENTRY = 5_000;
+
+/**
+ * The document-level attribution work budget: the cumulative sum of
+ * statements × functions across admitted file entries never exceeds this
+ * many containment comparisons (tens of milliseconds at V8 speed), and an
+ * entry that would exceed the remainder is skipped with one stderr
+ * diagnostic line. Sized to clear real projects with room to spare (the
+ * motivating artifact needs 74,536 work units total) while capping the
+ * multiplicatively adversarial document the 16 MiB read bound alone
+ * permits.
+ */
+const MAX_ATTRIBUTION_WORK = 25_000_000;
 
 /**
  * One coverage entry (data-model.md's CoverageEntry; FR-024): a fnMap
@@ -148,11 +215,32 @@ export async function parseCoverage(
   // same path-prefix rules" is structural, never re-derived here.
   const patternSet = normalizePatterns(patterns);
   const entries: CoverageEntry[] = [];
+  // Conformance is counted over the WHOLE document, not the contained,
+  // in-scope subset: the zero-conformance diagnostic below reports a
+  // document whose every entry fails the referenced shape — an
+  // emitter-mismatch signature — while a request whose patterns match
+  // nothing, or a document keyed entirely outside the root, is a
+  // legitimate empty result over a conforming document and must stay
+  // silent. Conformance therefore runs before the key-string rejections;
+  // parseFileCoverage is linear in the already-16-MiB-bound document, so
+  // validating a key this request will filter out costs nothing the read
+  // has not already paid.
+  let fileEntryCount = 0;
+  let conformingFileEntries = 0;
+  // The document-level attribution work budget (Principle V): admission
+  // consumes statements × functions, and an entry that would exceed the
+  // remainder is skipped below.
+  let attributionWorkRemaining = MAX_ATTRIBUTION_WORK;
   for (const [key, value] of Object.entries(document)) {
-    // Containment first (FR-024): a key that does not resolve under
-    // either spelling of the root is skipped whatever its payload. Then
-    // the pattern filter, then conformance (FR-026) — cheap rejections
-    // first.
+    fileEntryCount += 1;
+    const fileCoverage = parseFileCoverage(value);
+    if (fileCoverage === null) {
+      continue; // Non-conforming file entry (FR-026).
+    }
+    conformingFileEntries += 1;
+    // Containment (FR-024): a key that does not resolve under either
+    // spelling of the root is skipped whatever its payload. Then the
+    // pattern filter — cheap key-string rejections.
     const relPath = containedRelativePath(realRoot, logicalRoot, key);
     if (relPath === null) {
       continue;
@@ -160,11 +248,49 @@ export async function parseCoverage(
     if (!pathInScope(relPath, patternSet)) {
       continue;
     }
-    const fileCoverage = parseFileCoverage(value);
-    if (fileCoverage === null) {
+    // The per-entry record caps (Principle V): a file entry this large is
+    // pathological, and attribution cost grows with the product of the
+    // two counts — skip it with one diagnostic line, never an error.
+    const statementCount = Object.keys(fileCoverage.statementMap).length;
+    const functionCount = Object.keys(fileCoverage.fnMap).length;
+    if (
+      statementCount > MAX_STATEMENTS_PER_FILE_ENTRY ||
+      functionCount > MAX_FUNCTIONS_PER_FILE_ENTRY
+    ) {
+      stderr.write(
+        `reading-stone: skipping ${relPath}: coverage record budget exceeded\n`,
+      );
       continue;
     }
-    entries.push(...coverageEntriesFor(relPath, fileCoverage));
+    // The document-level work budget: an entry that would exhaust the
+    // remainder is skipped with one diagnostic line. Later, smaller
+    // entries can still fit what remains; the JSON key enumeration order
+    // that decides admission is spec-defined, so the skip set is
+    // deterministic.
+    const attributionWork = statementCount * functionCount;
+    if (attributionWork > attributionWorkRemaining) {
+      stderr.write(
+        `reading-stone: skipping ${relPath}: attribution work budget exceeded\n`,
+      );
+      continue;
+    }
+    attributionWorkRemaining -= attributionWork;
+    // A bounded push, never a spread: near the 16 MiB read bound a
+    // document's file entries can together emit more entries than a
+    // single spread call's argument limit allows (RangeError around 10^5
+    // arguments), while the entries array itself stays far below any
+    // engine limit.
+    for (const entry of coverageEntriesFor(relPath, fileCoverage)) {
+      entries.push(entry);
+    }
+  }
+  // The zero-conformance diagnostic (see the module header): fire only
+  // when the document had keys at all — an empty {} document conformed
+  // nowhere but also failed nowhere.
+  if (fileEntryCount > 0 && conformingFileEntries === 0) {
+    stderr.write(
+      "reading-stone: skipping coverage document: no conforming file entries\n",
+    );
   }
   entries.sort(compareEntries);
   return entries.map(serializeCoverageEntry);
@@ -174,7 +300,12 @@ export async function parseCoverage(
 // Istanbul document model (data-model.md; untrusted parsed input)
 // ---------------------------------------------------------------------------
 
-/** One Istanbul position: 1-based line, 0-based column. */
+/**
+ * One Istanbul position: 1-based line, 0-based column. This is the
+ * NORMALIZED shape — a parsed end position may carry a null column, which
+ * `parseSourceRange` replaces with `UNBOUNDED_END_COLUMN`, so every value
+ * of this type is numeric.
+ */
 interface SourcePosition {
   readonly line: number;
   readonly column: number;
@@ -214,16 +345,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Whether `value` holds the referenced `Pos` shape: an object whose `line`
- * and `column` are numbers. JSON.parse cannot produce NaN or Infinity, so
- * `typeof` is the whole finiteness story for parsed input; deeper range
- * checks (integer, 1-based) are not pinned by the document model and would
- * risk dropping entries FR-024 requires reporting.
+ * Whether `value` holds the referenced START `Pos` shape: an object whose
+ * `line` and `column` are both numbers. JSON.parse cannot produce NaN or
+ * Infinity, so `typeof` is the whole finiteness story for parsed input;
+ * deeper range checks (integer, 1-based) are not pinned by the document
+ * model and would risk dropping entries FR-024 requires reporting.
  *
  * @param value The parsed JSON value to test.
- * @returns Whether the value is a position of the referenced shape.
+ * @returns Whether the value is a start position of the referenced shape.
  */
-function isSourcePosition(value: unknown): value is SourcePosition {
+function isStartPosition(value: unknown): value is SourcePosition {
   return (
     isRecord(value) &&
     typeof value.line === "number" &&
@@ -232,42 +363,94 @@ function isSourcePosition(value: unknown): value is SourcePosition {
 }
 
 /**
- * Whether `value` holds the referenced `Loc` shape: an object with `start`
- * and `end` positions.
+ * One parsed END position before normalization: the column may be a
+ * number, null, or absent (see `isEndPosition`).
+ */
+interface RawEndPosition {
+  readonly line: number;
+  readonly column: number | null | undefined;
+}
+
+/**
+ * Whether `value` holds the referenced END `Pos` shape: a numeric `line`,
+ * and a `column` that is a number or null/absent. Istanbul's v8 emitters
+ * (vitest's coverage pipeline) write `"column": null` on end positions
+ * when the sourcemap carries no column information — the motivating
+ * real-world artifact had null end columns on 1542 of 1558 statementMap
+ * records — so a conformance check demanding a numeric end column
+ * rejected every entry of a real document (a silent false negative,
+ * Principle II). A null or absent end column normalizes to the
+ * end-of-line sentinel in `parseSourceRange`.
  *
  * @param value The parsed JSON value to test.
- * @returns Whether the value is a range of the referenced shape.
+ * @returns Whether the value is an end position of the referenced shape.
  */
-function isSourceRange(value: unknown): value is SourceRange {
+function isEndPosition(value: unknown): value is RawEndPosition {
   return (
-    isRecord(value) && isSourcePosition(value.start) && isSourcePosition(value.end)
+    isRecord(value) &&
+    typeof value.line === "number" &&
+    (typeof value.column === "number" ||
+      value.column === null ||
+      value.column === undefined)
   );
 }
 
 /**
- * Whether `value` holds the referenced fnMap record shape: an object with a
- * string `name` and `decl`/`loc` ranges. A record missing any of the three
- * (the SHAPELESS_FN fixture: `decl` present, `loc` absent) is non-conforming
- * — the referenced shape does not hold, so FR-026 skips the file entry.
- * Extra fields (real Istanbul records carry them) are not violations: the
- * conformance check verifies the required shape, never forbids additions.
+ * Validates one referenced `Loc` shape and returns it NORMALIZED: a fresh
+ * range whose null or absent end column (see `isEndPosition`) is replaced
+ * by the end-of-line sentinel, so every position downstream
+ * (`comparePositions`, `rangeContains`, span math) sees numeric columns
+ * and the rules stay total. Both positions are copied fresh, so the types
+ * rest on validation rather than casts and the normalized range never
+ * aliases the parsed document.
  *
- * @param value The parsed JSON value to test.
- * @returns Whether the value is an fnMap record of the referenced shape.
+ * @param value The parsed JSON range to validate.
+ * @returns The normalized range, or null when the referenced shape does
+ * not hold.
  */
-function isFnMapRecord(value: unknown): value is FnMapRecord {
-  return (
-    isRecord(value) &&
-    typeof value.name === "string" &&
-    isSourceRange(value.decl) &&
-    isSourceRange(value.loc)
-  );
+function parseSourceRange(value: unknown): SourceRange | null {
+  if (!isRecord(value) || !isStartPosition(value.start) || !isEndPosition(value.end)) {
+    return null;
+  }
+  const end = value.end;
+  const endColumn = typeof end.column === "number" ? end.column : UNBOUNDED_END_COLUMN;
+  return {
+    start: { line: value.start.line, column: value.start.column },
+    end: { line: end.line, column: endColumn },
+  };
+}
+
+/**
+ * Validates one referenced fnMap record shape and returns it with its
+ * `decl`/`loc` ranges normalized (see `parseSourceRange`): an object with
+ * a string `name` and two conforming ranges. A record missing any of the
+ * three (the SHAPELESS_FN fixture: `decl` present, `loc` absent) is
+ * non-conforming — the referenced shape does not hold, so FR-026 skips
+ * the file entry. Extra fields (real Istanbul records carry them) are not
+ * violations: the conformance check verifies the required shape, never
+ * forbids additions.
+ *
+ * @param value The parsed JSON value to validate.
+ * @returns The normalized fnMap record, or null when non-conforming.
+ */
+function parseFnMapRecord(value: unknown): FnMapRecord | null {
+  if (!isRecord(value) || typeof value.name !== "string") {
+    return null;
+  }
+  const decl = parseSourceRange(value.decl);
+  const loc = parseSourceRange(value.loc);
+  if (decl === null || loc === null) {
+    return null;
+  }
+  return { name: value.name, decl, loc };
 }
 
 /**
  * Validates one file entry against the conformance check (FR-026) and
- * returns it with its three maps narrowed to typed records — fresh copies,
- * so the types rest on validation rather than casts.
+ * returns it with its three maps narrowed to typed records — fresh,
+ * normalized copies (a null or absent end column becomes the end-of-line
+ * sentinel; see `parseSourceRange`), so the types rest on validation
+ * rather than casts.
  *
  * The unit of conformance is the whole file entry: `statementMap`, `fnMap`,
  * and `s` must be objects AND every value they reference must hold its
@@ -289,17 +472,19 @@ function parseFileCoverage(value: unknown): FileCoverage | null {
   }
   const statements: Record<string, SourceRange> = {};
   for (const [id, range] of Object.entries(statementMap)) {
-    if (!isSourceRange(range)) {
+    const parsed = parseSourceRange(range);
+    if (parsed === null) {
       return null;
     }
-    statements[id] = range;
+    statements[id] = parsed;
   }
   const functions: Record<string, FnMapRecord> = {};
   for (const [id, record] of Object.entries(fnMap)) {
-    if (!isFnMapRecord(record)) {
+    const parsed = parseFnMapRecord(record);
+    if (parsed === null) {
       return null;
     }
-    functions[id] = record;
+    functions[id] = parsed;
   }
   const counts: Record<string, number> = {};
   for (const [id, count] of Object.entries(s)) {
