@@ -67,6 +67,42 @@ function errorBody(response: Record<string, unknown>): {
   return (response.error ?? {}) as { code: number; message: string };
 }
 
+// One serialized classify_signals row (003 FR-001): the identity fields
+// plus the integer weight. `reasoning` is deliberately absent — its
+// wording is implementation-defined (spec 003 assumption 8), so the
+// classify_signals cases project rows to the five contract-pinned fields
+// and compare with toEqual, the same assertion discipline
+// tests/helpers/wire.ts pins effect projections with.
+interface WireSignal {
+  readonly function: string;
+  readonly package: string;
+  readonly side_effect_type: string;
+  readonly source: string;
+  readonly weight: number;
+}
+
+// The classify_signals result's wire rows, projected to the five pinned
+// fields (quickstart Section 4's jq shape). The result object must carry
+// exactly one key — `signals` (contracts/classify-signals.md Section 3) —
+// so an error response or a malformed result fails loud here, never a
+// soft empty match: the red-first cases answer -32601 until T030
+// registers the handler, and this helper surfaces that as the explicit
+// absence of a result rather than a vacuous pass.
+function resultSignals(response: Record<string, unknown>): readonly WireSignal[] {
+  const result = (response.result ?? {}) as Record<string, unknown>;
+  expect(Object.keys(result).sort()).toEqual(["signals"]);
+  expect(Array.isArray(result.signals)).toBe(true);
+  return (result.signals as readonly Record<string, unknown>[]).map(
+    (signal): WireSignal => ({
+      function: signal.function as string,
+      package: signal.package as string,
+      side_effect_type: signal.side_effect_type as string,
+      source: signal.source as string,
+      weight: signal.weight as number,
+    }),
+  );
+}
+
 const INIT = request(1, "initialize", { root_path: "/abs/project" });
 
 // chmod-based inaccessibility is meaningless for root, where mode bits do
@@ -465,7 +501,10 @@ describe("server: analyze", () => {
   // handler registers. The initialize tests above compare against
   // `initializeResult()` (tautologically green if the function drifts);
   // tests/protocol.test.ts pins the unit output — this literal pin makes a
-  // capability flip visible through the server wire too.
+  // capability flip visible through the server wire too. The pinned state
+  // now includes spec 003's classify_signals flip (FR-015; T030 lands it
+  // true), so this pin stays red with the 003 server suite until then —
+  // the flip's visibility working exactly as designed.
   it("leaves the initialize capability response unchanged", async () => {
     const { responses } = await drive([INIT]);
     expect(responses[0]?.result).toEqual({
@@ -476,7 +515,7 @@ describe("server: analyze", () => {
       capabilities: {
         discover: true,
         test_mapping: false,
-        classify_signals: false,
+        classify_signals: true,
         streaming: false,
         doc_coverage: false,
         cognitive_complexity: false,
@@ -978,6 +1017,395 @@ describe("server: coverage", () => {
   });
 });
 
+// T026 (spec 003; US2 tests; FR-014/FR-015; SC-005/SC-006; contracts/
+// classify-signals.md conformance requirements 1-6). RED-FIRST, exactly
+// as the analyze/complexity/coverage blocks were before their handlers
+// registered: every case below answers -32601 until T029 lands the
+// adapter entry and T030 registers the handler with the capability flip,
+// then the whole block turns green without further edits. The -32602
+// matrix pins the identical message strings the analyze block pins for
+// the same input — one validator and one error table in src, so the same
+// literals here, never re-derived.
+describe("server: classify_signals", () => {
+  const activeFixtures: FixtureTree[] = [];
+  const lockedDirectories: string[] = [];
+
+  // Creates a fixture tree registered for afterEach cleanup; returns the
+  // tree's root path to use as the classify_signals request's root_path.
+  async function fixtureTree(files: Readonly<Record<string, string>>): Promise<string> {
+    const tree = await createFixtureTree(files);
+    activeFixtures.push(tree);
+    return tree.root;
+  }
+
+  afterEach(async () => {
+    // Recursive cleanup cannot descend into a chmod-000 directory, so every
+    // locked directory is unlocked before its fixture tree is removed.
+    for (const directory of lockedDirectories.splice(0)) {
+      await chmod(directory, 0o755);
+    }
+    await Promise.all(activeFixtures.splice(0).map((tree) => tree.cleanup()));
+  });
+
+  // The quickstart tree (specs/003-classify-signals/quickstart.md
+  // Section 1), verbatim — the canonical controlled-signal profile: one
+  // signal category per function, deliberately minimal, WITH a tsconfig
+  // because the profile's interface and caller-count signals need program
+  // mode. The interface in print.ts is module-local so the +6
+  // exported-receiver component does not fire; handle's `Handle` prefix
+  // is deliberately routed away from StdoutWrite (the routing gate),
+  // leaving the interface signal alone at the contractual boundary.
+  // Mirrored from tests/analysis.test.ts's T017 fixture on purpose — the
+  // dispatch surface pins its own canned trees (the analyze/complexity/
+  // coverage precedent), so the server contract stays pinned even if the
+  // pipeline suite's fixture drifts.
+  const QUICKSTART_TSCONFIG = `{
+  "compilerOptions": {
+    "strict": true
+  }
+}`;
+
+  const QUICKSTART_SOURCES: Readonly<Record<string, string>> = {
+    "src/calc.ts": `function getTotal(input: number): number {
+  return input * 2;
+}
+`,
+    "src/noise.ts": `/**
+ * Logs the message for debugging.
+ */
+function logMessage(message: string, logger: { info(m: string): void }): void {
+  logger.info(message);
+}
+`,
+    "src/banner.ts": `/**
+ * Logs the banner to stdout.
+ */
+function writeBanner(banner: string): void {
+  console.log(banner);
+}
+`,
+    "src/quiet.ts": `function tweak(counter: { n: number }): void {
+  counter.n = counter.n + 1;
+}
+`,
+    "src/print.ts": `interface Handler {
+  handle(event: string): void;
+}
+
+class PrintHandler implements Handler {
+  handle(event: string): void {
+    console.log(event);
+  }
+}
+`,
+    "src/util.ts": `export function formatLabel(value: string): string {
+  return \`[\${value}]\`;
+}
+`,
+    "src/main1.ts": `import { formatLabel } from "./util";
+
+export function main1(): string {
+  return formatLabel("one");
+}
+`,
+    "src/main2.ts": `import { formatLabel } from "./util";
+
+export function main2(): string {
+  return formatLabel("two");
+}
+`,
+  };
+
+  const quickstartTree: Readonly<Record<string, string>> = {
+    ...QUICKSTART_SOURCES,
+    "tsconfig.json": QUICKSTART_TSCONFIG,
+  };
+
+  // The quickstart signal feed (quickstart Section 4) — the exact 11 rows
+  // in the FR-014 (package, function, side_effect_type, source) codepoint
+  // order, every weight re-derivable from the Section 5 arithmetic.
+  // tweak contributes no row (its PointerArgMutation pair matches no
+  // extractor — the no-signal P0 floor), and writeBanner's pair is the
+  // tree's one mixed-polarity set, so it alone carries the contradiction.
+  const expectedSignals: readonly WireSignal[] = [
+    // src.banner — writeBanner's StdoutWrite pair mixes the positive
+    // naming row with the negative docstring row, so the pipeline
+    // synthesizes exactly one contradiction row (source order within the
+    // pair is codepoint order: contradiction < docstring <
+    // naming_convention).
+    {
+      function: "writeBanner",
+      package: "src.banner",
+      side_effect_type: "StdoutWrite",
+      source: "contradiction",
+      weight: -20,
+    },
+    {
+      function: "writeBanner",
+      package: "src.banner",
+      side_effect_type: "StdoutWrite",
+      source: "docstring",
+      weight: -15,
+    },
+    {
+      function: "writeBanner",
+      package: "src.banner",
+      side_effect_type: "StdoutWrite",
+      source: "naming_convention",
+      weight: 10,
+    },
+    // src.calc — getTotal's ReturnValue pair: the lone `Get` prefix +10.
+    {
+      function: "getTotal",
+      package: "src.calc",
+      side_effect_type: "ReturnValue",
+      source: "naming_convention",
+      weight: 10,
+    },
+    // src.main1 / src.main2 — exported functions, one visibility row each.
+    {
+      function: "main1",
+      package: "src.main1",
+      side_effect_type: "ReturnValue",
+      source: "visibility",
+      weight: 8,
+    },
+    {
+      function: "main2",
+      package: "src.main2",
+      side_effect_type: "ReturnValue",
+      source: "visibility",
+      weight: 8,
+    },
+    // src.noise — logMessage's LogWrite pair is all-negative (no
+    // contradiction): docstring `Logs` -15, naming `log` -10.
+    {
+      function: "logMessage",
+      package: "src.noise",
+      side_effect_type: "LogWrite",
+      source: "docstring",
+      weight: -15,
+    },
+    {
+      function: "logMessage",
+      package: "src.noise",
+      side_effect_type: "LogWrite",
+      source: "naming_convention",
+      weight: -10,
+    },
+    // src.print — handle's StdoutWrite pair: interface satisfaction +30
+    // (program mode); the `Handle` prefix is routed away from
+    // StdoutWrite, so no naming row fires.
+    {
+      function: "handle",
+      package: "src.print",
+      side_effect_type: "StdoutWrite",
+      source: "interface",
+      weight: 30,
+    },
+    // src.util — formatLabel's ReturnValue pair: caller_count +10 (main1
+    // and main2 — two distinct in-scope modules) and visibility +8
+    // (exported).
+    {
+      function: "formatLabel",
+      package: "src.util",
+      side_effect_type: "ReturnValue",
+      source: "caller_count",
+      weight: 10,
+    },
+    {
+      function: "formatLabel",
+      package: "src.util",
+      side_effect_type: "ReturnValue",
+      source: "visibility",
+      weight: 8,
+    },
+  ];
+
+  it("round-trips a valid classify_signals request", { timeout: 60_000 }, async () => {
+    const root = await fixtureTree(quickstartTree);
+    const { responses, stderr } = await drive([
+      request(50, "classify_signals", { root_path: root }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(50);
+    expect(resultSignals(responses[0] ?? {})).toEqual(expectedSignals);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["absent params", undefined],
+    ["null params", null],
+    ["array params", []],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(51, "classify_signals", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must be an object",
+    );
+    expect(responses[0]?.id).toBe(51);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["missing root_path", {}],
+    ["non-string root_path", { root_path: 42 }],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(52, "classify_signals", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: root_path must be a string",
+    );
+    expect(responses[0]?.id).toBe(52);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["non-array patterns", { root_path: "/abs/project", patterns: "src/**/*.ts" }],
+    ["number patterns", { root_path: "/abs/project", patterns: 42 }],
+    [
+      "patterns array with a non-string element",
+      { root_path: "/abs/project", patterns: ["src", 7] },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(53, "classify_signals", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: patterns must be an array of strings",
+    );
+    expect(responses[0]?.id).toBe(53);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["an extra key beside root_path", { root_path: "/abs/project", extra: true }],
+    [
+      "an extra key beside root_path and patterns",
+      { root_path: "/abs/project", patterns: ["src/**"], extra: true },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(54, "classify_signals", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must contain only root_path and patterns",
+    );
+    expect(responses[0]?.id).toBe(54);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a nonexistent root_path with -32602", async () => {
+    const root = await fixtureTree({});
+    const missing = join(root, "does-not-exist");
+    const { responses, stderr } = await drive([
+      request(55, "classify_signals", { root_path: missing }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${missing}`,
+    );
+    expect(responses[0]?.id).toBe(55);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a non-directory root_path with -32602", async () => {
+    const root = await fixtureTree({ "not-a-dir.ts": "export {};\n" });
+    const file = join(root, "not-a-dir.ts");
+    const { responses, stderr } = await drive([
+      request(56, "classify_signals", { root_path: file }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${file}`,
+    );
+    expect(responses[0]?.id).toBe(56);
+    expect(stderr).toBe("");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "rejects an inaccessible root_path with -32602",
+    async () => {
+      const root = await fixtureTree({
+        "locked/nested/a.ts": "export const a = 1;\n",
+      });
+      const locked = join(root, "locked");
+      const nested = join(locked, "nested");
+      await chmod(locked, 0o000);
+      lockedDirectories.push(locked);
+      const { responses, stderr } = await drive([
+        request(57, "classify_signals", { root_path: nested }),
+      ]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+      expect(errorBody(responses[0] ?? {}).message).toBe(
+        `Invalid params: root_path is not a directory: ${nested}`,
+      );
+      expect(responses[0]?.id).toBe(57);
+      expect(stderr).toBe("");
+    },
+  );
+
+  it("answers a repeated request with byte-identical response lines", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await fixtureTree(quickstartTree);
+    const line = request(58, "classify_signals", { root_path: root });
+    const { responses, rawLines, stderr } = await drive([line, line]);
+    expect(responses).toHaveLength(2);
+    expect(rawLines).toHaveLength(2);
+    expect(rawLines[0]).toBe(rawLines[1]);
+    expect(responses[0]?.id).toBe(58);
+    expect(resultSignals(responses[0] ?? {})).toEqual(expectedSignals);
+    expect(stderr).toBe("");
+  });
+
+  it("answers a pattern set matching nothing with an empty signals array", {
+    timeout: 60_000,
+  }, async () => {
+    // FR-014 / spec edge case: a `patterns` set matching no file is a
+    // success — `{"signals": []}` — never an error (the quickstart
+    // Section 7 scope check). The tree still carries its tsconfig, so
+    // the request genuinely runs the pipeline and answers an empty feed
+    // rather than failing early.
+    const root = await fixtureTree(quickstartTree);
+    const { responses, stderr } = await drive([
+      request(59, "classify_signals", { root_path: root, patterns: ["nope"] }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(59);
+    expect(resultSignals(responses[0] ?? {})).toEqual([]);
+    expect(stderr).toBe("");
+  });
+
+  // SC-006 / FR-015: classify_signals is capability-gated from the
+  // platform's side (Gaze calls it when and only when the flag is true),
+  // so the initialize handshake must advertise it. The literal pin — not
+  // `initializeResult()`, which would be tautologically green — makes a
+  // flag drift visible through the server wire, mirroring the analyze
+  // block's FR-028 pin above; tests/protocol.test.ts (T027) pins the
+  // unit output the same way.
+  it("advertises classify_signals in the initialize capability response", async () => {
+    const { responses } = await drive([INIT]);
+    const result = responses[0]?.result as Record<string, unknown> | undefined;
+    expect(result?.capabilities).toEqual({
+      discover: true,
+      test_mapping: false,
+      classify_signals: true,
+      streaming: false,
+      doc_coverage: false,
+      cognitive_complexity: false,
+    });
+  });
+});
+
 describe("server: request validation", () => {
   it("answers malformed JSON with -32700 and stays alive", async () => {
     const { responses } = await drive([
@@ -1063,16 +1491,18 @@ describe("server: dispatch", () => {
   // `coverage` is pinned the same way by the "server: coverage" block
   // — red until T029 registers the handler — and is dropped for the same
   // reason, leaving the FR-028 terminal set.
-  it.each([
-    "test_mapping",
-    "classify_signals",
-    "analyze/stream",
-    "doc_coverage",
-    "cognitive_complexity",
-  ])("answers reserved method %s with -32601", async (method) => {
-    const { responses } = await drive([request(6, method)]);
-    expect(errorBody(responses[0] ?? {}).code).toBe(-32601);
-  });
+  // `classify_signals` is pinned the same way by the "server:
+  // classify_signals" block below — red until T029/T030 land the method
+  // (adapter entry, then registration with the capability flip) — and is
+  // dropped for the same reason, shrinking the reserved set to FR-015's
+  // terminal four.
+  it.each(["test_mapping", "analyze/stream", "doc_coverage", "cognitive_complexity"])(
+    "answers reserved method %s with -32601",
+    async (method) => {
+      const { responses } = await drive([request(6, method)]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32601);
+    },
+  );
 
   it("converts a thrown Error into -32603 with the message", async () => {
     const dispatch = new Map<string, Handler>([
