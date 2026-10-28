@@ -152,7 +152,7 @@ Single project: `src/` and `tests/` at the repository root (per plan.md Project 
 
 ### Implementation for User Story 5
 
-- [ ] T032 [US5] Create docs/effect-disposition.md (FR-030): render the normative disposition table from specs/002-analysis-engine/data-model.md — all 48 canonical types by tier (6 P0, 11 P1, 16 P2, 9 P3, 6 P4) with columns for taxonomy type, tier, disposition, TypeScript mapping (constructs detected), and rationale; every `N/A` row carries its non-empty rationale verbatim from the data-model table; P1 rows carry detect mappings; include the parse-only precision notes where the table records them (SliceMutation's type-blind method-name surface, MapMutation's parse-only default, CallbackInvocation's mode boundary, the deferred-callback attribution caveat)
+- [x] T032 [US5] Create docs/effect-disposition.md (FR-030): render the normative disposition table from specs/002-analysis-engine/data-model.md — all 48 canonical types by tier (6 P0, 11 P1, 16 P2, 9 P3, 6 P4) with columns for taxonomy type, tier, disposition, TypeScript mapping (constructs detected), and rationale; every `N/A` row carries its non-empty rationale verbatim from the data-model table; P1 rows carry detect mappings; include the parse-only precision notes where the table records them (SliceMutation's type-blind method-name surface, MapMutation's parse-only default, CallbackInvocation's mode boundary, the deferred-callback attribution caveat)
 
 **Checkpoint**: The detection surface is transparent and conformance-pinned — 48 rows, closed-set dispositions, non-empty N/A rationale (SC-008).
 
