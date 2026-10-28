@@ -25,7 +25,8 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * to drift. `analyze` (T018) closes that pipeline over the detector:
  * detection, FR-020's response assembly, and serialization, with the
  * program-mode context's lifetime owned by the handler (disposed in a
- * `finally` — no native compiler server outlives one analysis).
+ * `finally`) — and released by `prepareAnalysis` itself when extraction
+ * throws — so no native compiler server outlives one analysis.
  */
 
 /**
@@ -184,7 +185,10 @@ export interface PreparedAnalysis {
  * Diagnostics flow to the injected stderr; stdout is never touched (it is
  * reserved for JSON-RPC responses). The returned context's lifetime is
  * the consumer's — the analysis handlers dispose a program-mode context
- * when finished with it.
+ * when finished with it — and a mid-pipeline failure releases it here:
+ * when extraction throws, the program-mode context is disposed before
+ * the error propagates, so no native compiler server outlives the
+ * pipeline call either way.
  *
  * @param rootPath Absolute or relative project root; a relative path
  * resolves against the analyzer process working directory, and a symlinked
@@ -221,7 +225,19 @@ export async function prepareAnalysis(
   const inScope = sourceFiles.filter((relPath) => pathInScope(relPath, patternSet));
   const preRead = await preReadSources(realRoot, inScope, stderr);
   const context = buildProgramContext(realRoot, preRead, stderr);
-  const records = extractFunctions(realRoot, context, stderr);
+  let records: ExtractionRecord[];
+  try {
+    records = extractFunctions(realRoot, context, stderr);
+  } catch (error) {
+    // A program-mode context owns a live native compiler server; a failed
+    // extraction must not leak it. Release before the throw propagates —
+    // the same lifetime contract the handlers' finally owns (a parse-only
+    // context has nothing to dispose).
+    if (context.mode === "program") {
+      context.dispose();
+    }
+    throw error;
+  }
   return { context, records };
 }
 
