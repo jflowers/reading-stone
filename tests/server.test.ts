@@ -1,4 +1,4 @@
-import { chmod } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
@@ -717,6 +717,267 @@ describe("server: complexity", () => {
   });
 });
 
+describe("server: coverage", () => {
+  const activeFixtures: FixtureTree[] = [];
+  const lockedDirectories: string[] = [];
+
+  // Creates a fixture tree registered for afterEach cleanup; returns the
+  // tree's root path to use as the coverage request's root_path.
+  async function fixtureTree(files: Readonly<Record<string, string>>): Promise<string> {
+    const tree = await createFixtureTree(files);
+    activeFixtures.push(tree);
+    return tree.root;
+  }
+
+  afterEach(async () => {
+    // Recursive cleanup cannot descend into a chmod-000 directory, so every
+    // locked directory is unlocked before its fixture tree is removed.
+    for (const directory of lockedDirectories.splice(0)) {
+      await chmod(directory, 0o755);
+    }
+    await Promise.all(activeFixtures.splice(0).map((tree) => tree.cleanup()));
+  });
+
+  // The canned artifact (FR-023; Assumption 14 — hand-authored, never the
+  // product of executing the analyzed project's tests) pins the
+  // seven-field entry (FR-024) with every count computed by hand from the
+  // FR-023 attribution rule: all three `score.ts` statements start inside
+  // `grade`'s loc range (lines 2-4 within lines 1-5) and carry `s` counts
+  // 3, 3, 0, so `grade` = 2 covered of 3 total with percentage
+  // 66.66666666666667 — the full-precision value quickstart.md pins for
+  // the 2-of-3 case (Assumption 6; the exact double requires the
+  // (covered * 100) / total association — (2 / 3) * 100 itself rounds to
+  // 66.66666666666666). `math.ts`'s single statement starts inside
+  // `add`'s range (line 2 within lines 1-3) with `s` count 5, so `add` =
+  // 1 of 1 with percentage 100; `(anonymous_0)`'s range contains no
+  // statement starts, so it reports total_stmts 0 with percentage exactly
+  // 0.0 (never a division error) and its fnMap name verbatim — anonymous
+  // form included. `f`, `branchMap`, and `b` mirror a real Istanbul
+  // document and are ignored. Entries order by (file, start_line,
+  // function) per FR-024.
+  function coverageArtifact(root: string): string {
+    return JSON.stringify({
+      [join(root, "src/score.ts")]: {
+        statementMap: {
+          "0": { start: { line: 2, column: 2 }, end: { line: 4, column: 3 } },
+          "1": { start: { line: 3, column: 4 }, end: { line: 3, column: 10 } },
+          "2": { start: { line: 4, column: 2 }, end: { line: 4, column: 12 } },
+        },
+        fnMap: {
+          "0": {
+            name: "grade",
+            decl: { start: { line: 1, column: 0 }, end: { line: 1, column: 41 } },
+            loc: { start: { line: 1, column: 0 }, end: { line: 5, column: 1 } },
+            line: 1,
+          },
+        },
+        f: { "0": 3 },
+        s: { "0": 3, "1": 3, "2": 0 },
+        branchMap: {},
+        b: {},
+      },
+      [join(root, "src/utils/math.ts")]: {
+        statementMap: {
+          "0": { start: { line: 2, column: 2 }, end: { line: 2, column: 14 } },
+        },
+        fnMap: {
+          "0": {
+            name: "add",
+            decl: { start: { line: 1, column: 0 }, end: { line: 1, column: 35 } },
+            loc: { start: { line: 1, column: 0 }, end: { line: 3, column: 1 } },
+            line: 1,
+          },
+          "1": {
+            name: "(anonymous_0)",
+            decl: { start: { line: 5, column: 2 }, end: { line: 5, column: 18 } },
+            loc: { start: { line: 5, column: 2 }, end: { line: 5, column: 20 } },
+          },
+        },
+        s: { "0": 5 },
+      },
+    });
+  }
+
+  const expectedEntries = [
+    {
+      file: "src/score.ts",
+      function: "grade",
+      start_line: 1,
+      end_line: 5,
+      covered_stmts: 2,
+      total_stmts: 3,
+      percentage: 66.66666666666667,
+    },
+    {
+      file: "src/utils/math.ts",
+      function: "add",
+      start_line: 1,
+      end_line: 3,
+      covered_stmts: 1,
+      total_stmts: 1,
+      percentage: 100,
+    },
+    {
+      file: "src/utils/math.ts",
+      function: "(anonymous_0)",
+      start_line: 5,
+      end_line: 5,
+      covered_stmts: 0,
+      total_stmts: 0,
+      percentage: 0,
+    },
+  ];
+
+  // The document's file keys are absolute paths under the analysis root
+  // (the Istanbul shape), so the artifact cannot ride through the static
+  // files map — it is written after the fixture tree exists, at the
+  // conventional <root>/coverage/coverage-final.json location (FR-023).
+  async function artifactTree(): Promise<string> {
+    const root = await fixtureTree({});
+    await mkdir(join(root, "coverage"), { recursive: true });
+    await writeFile(
+      join(root, "coverage", "coverage-final.json"),
+      coverageArtifact(root),
+      "utf8",
+    );
+    return root;
+  }
+
+  it("round-trips a valid coverage request", async () => {
+    const root = await artifactTree();
+    const { responses, stderr } = await drive([
+      request(40, "coverage", { root_path: root }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(40);
+    expect(responses[0]?.result).toEqual({ functions: expectedEntries });
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["absent params", undefined],
+    ["null params", null],
+    ["array params", []],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(41, "coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must be an object",
+    );
+    expect(responses[0]?.id).toBe(41);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["missing root_path", {}],
+    ["non-string root_path", { root_path: 42 }],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(42, "coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: root_path must be a string",
+    );
+    expect(responses[0]?.id).toBe(42);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["non-array patterns", { root_path: "/abs/project", patterns: "src/**/*.ts" }],
+    ["number patterns", { root_path: "/abs/project", patterns: 42 }],
+    [
+      "patterns array with a non-string element",
+      { root_path: "/abs/project", patterns: ["src", 7] },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(43, "coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: patterns must be an array of strings",
+    );
+    expect(responses[0]?.id).toBe(43);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["an extra key beside root_path", { root_path: "/abs/project", extra: true }],
+    [
+      "an extra key beside root_path and patterns",
+      { root_path: "/abs/project", patterns: ["src/**"], extra: true },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(44, "coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must contain only root_path and patterns",
+    );
+    expect(responses[0]?.id).toBe(44);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a nonexistent root_path with -32602", async () => {
+    const root = await fixtureTree({});
+    const missing = join(root, "does-not-exist");
+    const { responses, stderr } = await drive([
+      request(45, "coverage", { root_path: missing }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${missing}`,
+    );
+    expect(responses[0]?.id).toBe(45);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a non-directory root_path with -32602", async () => {
+    const root = await fixtureTree({ "not-a-dir.ts": "export {};\n" });
+    const file = join(root, "not-a-dir.ts");
+    const { responses, stderr } = await drive([
+      request(46, "coverage", { root_path: file }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${file}`,
+    );
+    expect(responses[0]?.id).toBe(46);
+    expect(stderr).toBe("");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "rejects an inaccessible root_path with -32602",
+    async () => {
+      const root = await fixtureTree({
+        "locked/nested/a.ts": "export const a = 1;\n",
+      });
+      const locked = join(root, "locked");
+      const nested = join(locked, "nested");
+      await chmod(locked, 0o000);
+      lockedDirectories.push(locked);
+      const { responses, stderr } = await drive([
+        request(47, "coverage", { root_path: nested }),
+      ]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+      expect(errorBody(responses[0] ?? {}).message).toBe(
+        `Invalid params: root_path is not a directory: ${nested}`,
+      );
+      expect(responses[0]?.id).toBe(47);
+      expect(stderr).toBe("");
+    },
+  );
+
+  it("answers a repeated request with byte-identical response lines", async () => {
+    const root = await artifactTree();
+    const line = request(48, "coverage", { root_path: root });
+    const { responses, rawLines, stderr } = await drive([line, line]);
+    expect(responses).toHaveLength(2);
+    expect(rawLines).toHaveLength(2);
+    expect(rawLines[0]).toBe(rawLines[1]);
+    expect(responses[0]?.id).toBe(48);
+    expect(responses[0]?.result).toEqual({ functions: expectedEntries });
+    expect(stderr).toBe("");
+  });
+});
+
 describe("server: request validation", () => {
   it("answers malformed JSON with -32700 and stays alive", async () => {
     const { responses } = await drive([
@@ -799,8 +1060,10 @@ describe("server: dispatch", () => {
   // `complexity` is pinned the same way by the "server: complexity" block
   // — red until T024 registers the handler — and is dropped for the same
   // reason.
+  // `coverage` is pinned the same way by the "server: coverage" block
+  // — red until T029 registers the handler — and is dropped for the same
+  // reason, leaving the FR-028 terminal set.
   it.each([
-    "coverage",
     "test_mapping",
     "classify_signals",
     "analyze/stream",
