@@ -1,0 +1,562 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import type { Writable } from "node:stream";
+
+import { normalizePatterns, pathInScope } from "./analysis.js";
+import { resolveRoot } from "./discovery.js";
+import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
+
+/**
+ * The Istanbul coverage artifact parser (FR-023–FR-026; research R10;
+ * data-model.md's Istanbul document model; Constitution Principles I, II,
+ * and V). `parseCoverage` (T028) reads the pre-existing
+ * `<root>/coverage/coverage-final.json` — the conventional output location
+ * for both vitest's and jest's Istanbul JSON reporters — and attributes
+ * each statement to its innermost enclosing function.
+ *
+ * **Consumption, never production** (FR-025 — the constitution's required
+ * conflict-resolution record): the analyzer never runs the analyzed
+ * project's tests and never collects coverage itself. The artifact is the
+ * pre-existing output of the project's own test run, read through the
+ * bounded safe reader at the full 16 MiB budget — JSON cannot parse from a
+ * truncated prefix, the `package.json` precedent — so analyzed code is
+ * never executed (Principle V) and no single artifact can dominate memory.
+ * The `coverage/` directory is pruned from WALKING only; the artifact is
+ * read directly by its conventional path and the tree is never walked for
+ * coverage. Root validation is unchanged: `resolveRoot` →
+ * `InvalidRootPathError` → the server's `-32602` (contracts/coverage.md).
+ *
+ * **Degradation ladder** (FR-025): an absent artifact, a skipped read, a
+ * JSON parse failure, or a non-object top level each yield the empty entry
+ * list — never a JSON-RPC error. A skipped read has already written its
+ * one stderr diagnostic line inside `readBounded`; every other rung is
+ * silent because there is nothing to report and nothing wrong with the
+ * request.
+ *
+ * **Per-entry tolerance** (FR-026): within a parseable document, a file
+ * entry whose `statementMap`, `fnMap`, or `s` — or the shapes they
+ * reference — do not hold is skipped deterministically while conforming
+ * entries report; the document is never rejected wholesale. The file entry
+ * is the unit of conformance (data-model.md), so one malformed record
+ * anywhere in a file entry skips that whole entry: partial reads of a
+ * half-conforming entry would report counts the document never asserted.
+ * `branchMap`/`b`/`f` may be present and are ignored — `s` is the only
+ * execution-count source (the fixtures plant `f` values that contradict
+ * `s` precisely to pin this).
+ */
+
+/**
+ * The conventional artifact location (FR-023; contracts/coverage.md): the
+ * only path read — root-relative, so `readBounded`'s containment check
+ * accepts it — and not configurable via params in v1 (projects writing
+ * coverage elsewhere report empty coverage; documented limitation).
+ */
+const COVERAGE_ARTIFACT_PATH = "coverage/coverage-final.json";
+
+/**
+ * One coverage entry (data-model.md's CoverageEntry; FR-024): a fnMap
+ * function with its attributed statement counts. Field names mirror the
+ * wire payload exactly — no camelCase/wire split applies to this record —
+ * and the entity is an immutable value record (convention pack AP-004).
+ */
+export interface CoverageEntry {
+  /** Root-relative POSIX path of the file the fnMap function belongs to. */
+  readonly file: string;
+  /** The fnMap name verbatim, including `(anonymous_N)` forms. */
+  readonly function: string;
+  /** 1-based fnMap `decl.start.line` — the declaration start line. */
+  readonly start_line: number;
+  /** The fnMap `loc.end.line` — the body end line. */
+  readonly end_line: number;
+  /** Attributed statements with execution count > 0 (integer ≥ 0). */
+  readonly covered_stmts: number;
+  /** All attributed statements (integer ≥ 0). */
+  readonly total_stmts: number;
+  /** `(covered * 100) / total` at full float precision; 0 when total is 0. */
+  readonly percentage: number;
+}
+
+/**
+ * The `coverage` method's entry (FR-023–FR-026; the analyze-shaped surface
+ * T018 established): the serialized `CoverageEntry[]` payload — one entry
+ * per fnMap function of every conforming, contained, in-scope file entry,
+ * assembled in the `(file, start_line, function)` total order, and mapped
+ * through `serializeCoverageEntry` so every entry on the returned array is
+ * already wire-shaped.
+ *
+ * The returned array — not a `{functions: [...]}` wrapper — is the
+ * documented result shape the server wraps into its JSON-RPC success
+ * response (T029); both this entry and the payload are deterministic pure
+ * functions of the analyzed tree and artifact (Constitution Principle I:
+ * byte-identical repeat responses). The full degradation ladder (FR-025)
+ * resolves to the empty array, never a thrown error: only `resolveRoot`'s
+ * `InvalidRootPathError` escapes, for the server to map to `-32602`.
+ *
+ * Unlike `analyze`/`computeComplexity` there is no pipeline to prepare and
+ * no compiler context to own: the tree is never walked (discovery
+ * confinement is deliberately absent — FR-024 pins root containment and
+ * `patterns` only, so a document entry with no on-disk source still
+ * reports, research R10), and no native resource outlives the call.
+ *
+ * @param rootPath Absolute or relative project root; validated and
+ * realpath-resolved by `resolveRoot` (an invalid root throws
+ * `InvalidRootPathError`, the server maps to `-32602`).
+ * @param patterns The raw `patterns` parameter value; shape-validated by
+ * the server (`-32602`, T019) before analysis runs, normalized here
+ * through the same FR-001 helpers `analyze` filters with.
+ * @param stderr Injected diagnostic sink (Testability principle); defaults
+ * to `process.stderr`. Stdout is never touched.
+ * @returns The serialized coverage entries, `(file, start_line,
+ * function)`-sorted; empty on every degradation-ladder rung.
+ */
+export async function parseCoverage(
+  rootPath: string,
+  patterns: unknown,
+  stderr: Writable = process.stderr,
+): Promise<readonly Record<string, unknown>[]> {
+  const realRoot = await resolveRoot(rootPath);
+  // The artifact is read through the bounded safe reader at the full 16 MiB
+  // budget: JSON cannot parse from a truncated prefix, so a smaller marker
+  // budget (the generated-marker precedent) is useless here — the package.json
+  // precedent (research R10). A skip resolves null after readBounded's own
+  // one-diagnostic line (absent, unreadable, symlink, oversized).
+  const text = await readBounded(
+    realRoot,
+    COVERAGE_ARTIFACT_PATH,
+    MAX_FILE_BYTES,
+    stderr,
+  );
+  if (text === null) {
+    return [];
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    return []; // Unparseable document (FR-025) — empty coverage, not an error.
+  }
+  if (!isRecord(document)) {
+    return []; // Non-object top level — array, scalar, or null (FR-025).
+  }
+  // The same normalize-then-test pair every pattern-filtered method applies
+  // (FR-024; R11): the helpers are shared with analyze/complexity, so "the
+  // same path-prefix rules" is structural, never re-derived here.
+  const patternSet = normalizePatterns(patterns);
+  const entries: CoverageEntry[] = [];
+  for (const [key, value] of Object.entries(document)) {
+    // Containment first (FR-024): a key that does not resolve under the
+    // resolved root is skipped whatever its payload. Then the pattern
+    // filter, then conformance (FR-026) — cheap rejections first.
+    const relPath = containedRelativePath(realRoot, key);
+    if (relPath === null) {
+      continue;
+    }
+    if (!pathInScope(relPath, patternSet)) {
+      continue;
+    }
+    const fileCoverage = parseFileCoverage(value);
+    if (fileCoverage === null) {
+      continue;
+    }
+    entries.push(...coverageEntriesFor(relPath, fileCoverage));
+  }
+  entries.sort(compareEntries);
+  return entries.map(serializeCoverageEntry);
+}
+
+// ---------------------------------------------------------------------------
+// Istanbul document model (data-model.md; untrusted parsed input)
+// ---------------------------------------------------------------------------
+
+/** One Istanbul position: 1-based line, 0-based column. */
+interface SourcePosition {
+  readonly line: number;
+  readonly column: number;
+}
+
+/** One Istanbul location range: inclusive start and end positions. */
+interface SourceRange {
+  readonly start: SourcePosition;
+  readonly end: SourcePosition;
+}
+
+/** One Istanbul fnMap record: the function's name and its two ranges. */
+interface FnMapRecord {
+  readonly name: string;
+  readonly decl: SourceRange;
+  readonly loc: SourceRange;
+}
+
+/** One validated file entry: the three maps attribution consumes. */
+interface FileCoverage {
+  readonly statementMap: Readonly<Record<string, SourceRange>>;
+  readonly fnMap: Readonly<Record<string, FnMapRecord>>;
+  readonly s: Readonly<Record<string, number>>;
+}
+
+/**
+ * Whether `value` is a plain object — the document model's "object"
+ * (FR-026): `typeof` object, not null, and not an array. Istanbul's maps
+ * are keyed by string ids, so an array is as non-conforming as a scalar;
+ * rejecting both keeps the check total where `typeof` alone is not.
+ *
+ * @param value The parsed JSON value to test.
+ * @returns Whether the value is a non-array, non-null object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether `value` holds the referenced `Pos` shape: an object whose `line`
+ * and `column` are numbers. JSON.parse cannot produce NaN or Infinity, so
+ * `typeof` is the whole finiteness story for parsed input; deeper range
+ * checks (integer, 1-based) are not pinned by the document model and would
+ * risk dropping entries FR-024 requires reporting.
+ *
+ * @param value The parsed JSON value to test.
+ * @returns Whether the value is a position of the referenced shape.
+ */
+function isSourcePosition(value: unknown): value is SourcePosition {
+  return (
+    isRecord(value) &&
+    typeof value.line === "number" &&
+    typeof value.column === "number"
+  );
+}
+
+/**
+ * Whether `value` holds the referenced `Loc` shape: an object with `start`
+ * and `end` positions.
+ *
+ * @param value The parsed JSON value to test.
+ * @returns Whether the value is a range of the referenced shape.
+ */
+function isSourceRange(value: unknown): value is SourceRange {
+  return (
+    isRecord(value) && isSourcePosition(value.start) && isSourcePosition(value.end)
+  );
+}
+
+/**
+ * Whether `value` holds the referenced fnMap record shape: an object with a
+ * string `name` and `decl`/`loc` ranges. A record missing any of the three
+ * (the SHAPELESS_FN fixture: `decl` present, `loc` absent) is non-conforming
+ * — the referenced shape does not hold, so FR-026 skips the file entry.
+ * Extra fields (real Istanbul records carry them) are not violations: the
+ * conformance check verifies the required shape, never forbids additions.
+ *
+ * @param value The parsed JSON value to test.
+ * @returns Whether the value is an fnMap record of the referenced shape.
+ */
+function isFnMapRecord(value: unknown): value is FnMapRecord {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    isSourceRange(value.decl) &&
+    isSourceRange(value.loc)
+  );
+}
+
+/**
+ * Validates one file entry against the conformance check (FR-026) and
+ * returns it with its three maps narrowed to typed records — fresh copies,
+ * so the types rest on validation rather than casts.
+ *
+ * The unit of conformance is the whole file entry: `statementMap`, `fnMap`,
+ * and `s` must be objects AND every value they reference must hold its
+ * shape, or the entry is skipped. A statement id missing from `s` is not a
+ * shape violation — `s`'s referenced shape is "statementId → number" for
+ * the ids it carries — so such a statement counts toward `total_stmts`
+ * uncovered (the pinned `s[id] > 0` formula reads absence as not-executed).
+ *
+ * @param value The parsed file-entry value.
+ * @returns The validated file coverage, or null when non-conforming.
+ */
+function parseFileCoverage(value: unknown): FileCoverage | null {
+  if (!isRecord(value)) {
+    return null; // A scalar or array file entry (FR-026).
+  }
+  const { statementMap, fnMap, s } = value;
+  if (!isRecord(statementMap) || !isRecord(fnMap) || !isRecord(s)) {
+    return null; // A missing or non-object map (FR-026).
+  }
+  const statements: Record<string, SourceRange> = {};
+  for (const [id, range] of Object.entries(statementMap)) {
+    if (!isSourceRange(range)) {
+      return null;
+    }
+    statements[id] = range;
+  }
+  const functions: Record<string, FnMapRecord> = {};
+  for (const [id, record] of Object.entries(fnMap)) {
+    if (!isFnMapRecord(record)) {
+      return null;
+    }
+    functions[id] = record;
+  }
+  const counts: Record<string, number> = {};
+  for (const [id, count] of Object.entries(s)) {
+    if (typeof count !== "number") {
+      return null;
+    }
+    counts[id] = count;
+  }
+  return { statementMap: statements, fnMap: functions, s: counts };
+}
+
+// ---------------------------------------------------------------------------
+// Attribution (FR-023; contracts/coverage.md; research R10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compares two positions as `(line, column)` — line first, then column
+ * (FR-023's pinned comparison).
+ *
+ * @param a Left position.
+ * @param b Right position.
+ * @returns Negative, zero, or positive as `a` sorts before, equal, or after.
+ */
+function comparePositions(a: SourcePosition, b: SourcePosition): number {
+  if (a.line !== b.line) {
+    return a.line - b.line;
+  }
+  return a.column - b.column;
+}
+
+/**
+ * Whether `range` contains `position` inclusively: the position sorts on or
+ * after the range's start and on or before its end (both compared as
+ * `(line, column)`).
+ *
+ * @param range The candidate containing range.
+ * @param position The statement's start position.
+ * @returns Whether the position lies within the range.
+ */
+function rangeContains(range: SourceRange, position: SourcePosition): boolean {
+  return (
+    comparePositions(position, range.start) >= 0 &&
+    comparePositions(position, range.end) <= 0
+  );
+}
+
+/**
+ * One loc range's span as a `(lineCount, columnExtent)` tuple: the tuple
+ * FR-023's "smallest span" compares, lines primary and columns secondary.
+ * Both components are end-minus-start, so an identical range yields an
+ * identical tuple and the fnMap-key tiebreak decides; the two-component
+ * form keeps the metric total where a single blended number would tie
+ * ranges of different shapes.
+ */
+type Span = readonly [number, number];
+
+/**
+ * Compares two spans as `(lineCount, columnExtent)`, lines primary.
+ *
+ * @param a Left span.
+ * @param b Right span.
+ * @returns Negative, zero, or positive as `a` is smaller, equal, or larger.
+ */
+function compareSpans(a: Span, b: Span): number {
+  if (a[0] !== b[0]) {
+    return a[0] - b[0];
+  }
+  return a[1] - b[1];
+}
+
+/**
+ * Attributes one statement start to its innermost containing fnMap function
+ * (FR-023): among the functions whose `loc` range contains the position,
+ * the smallest span wins; equal spans fall to the lexicographically
+ * smallest fnMap key, so the rule is total (the tie fixture's keys "2" and
+ * "10" name identical ranges — "10" < "2" decides, discriminated from
+ * insertion order). A start contained by no range attributes to nothing.
+ *
+ * @param fnMap The file entry's validated fnMap.
+ * @param start The statement's start position.
+ * @returns The owning fnMap key, or null when no range contains the start.
+ */
+function attributeStatement(
+  fnMap: Readonly<Record<string, FnMapRecord>>,
+  start: SourcePosition,
+): string | null {
+  let bestKey: string | null = null;
+  let bestSpan: Span | null = null;
+  for (const [key, record] of Object.entries(fnMap)) {
+    if (!rangeContains(record.loc, start)) {
+      continue;
+    }
+    const span: Span = [
+      record.loc.end.line - record.loc.start.line,
+      record.loc.end.column - record.loc.start.column,
+    ];
+    // Smallest span wins; an equal span falls to the smaller fnMap key.
+    const versusBest = bestSpan === null ? -1 : compareSpans(span, bestSpan);
+    if (versusBest < 0 || (versusBest === 0 && bestKey !== null && key < bestKey)) {
+      bestKey = key;
+      bestSpan = span;
+    }
+  }
+  return bestKey;
+}
+
+/**
+ * Builds one file entry's coverage entries: attribute every statementMap
+ * statement to its innermost function, count per function, then emit one
+ * entry per fnMap function — functions with no attributed statements
+ * included, reporting `total_stmts` 0 and exactly `percentage` 0 (FR-023's
+ * no-division-error rule; the empty-body fixture).
+ *
+ * Statements inside a nested function's range count toward the innermost
+ * enclosing function only (US4 scenario 7): attribution assigns each
+ * statement to exactly one owner, so the enclosing function's totals never
+ * include the nested statement. Entries are constructed in lexicographic
+ * fnMap-key order, so full `(file, start_line, function)` ties keep a
+ * deterministic relative order through the stable final sort.
+ *
+ * @param relPath The file entry's root-relative POSIX path.
+ * @param fileCoverage The file entry's validated maps.
+ * @returns One coverage entry per fnMap function, fnMap-key-ordered.
+ */
+function coverageEntriesFor(
+  relPath: string,
+  fileCoverage: FileCoverage,
+): CoverageEntry[] {
+  const coveredCounts = new Map<string, number>();
+  const totalCounts = new Map<string, number>();
+  for (const [id, range] of Object.entries(fileCoverage.statementMap)) {
+    const owner = attributeStatement(fileCoverage.fnMap, range.start);
+    if (owner === null) {
+      continue; // No fnMap range contains the start: unattributed.
+    }
+    totalCounts.set(owner, (totalCounts.get(owner) ?? 0) + 1);
+    const count = fileCoverage.s[id];
+    if (count !== undefined && count > 0) {
+      coveredCounts.set(owner, (coveredCounts.get(owner) ?? 0) + 1);
+    }
+  }
+  const entries: CoverageEntry[] = [];
+  for (const [key, record] of Object.entries(fileCoverage.fnMap).sort(
+    compareFnMapKeys,
+  )) {
+    const totalStmts = totalCounts.get(key) ?? 0;
+    const coveredStmts = coveredCounts.get(key) ?? 0;
+    entries.push({
+      file: relPath,
+      function: record.name,
+      start_line: record.decl.start.line,
+      end_line: record.loc.end.line,
+      covered_stmts: coveredStmts,
+      total_stmts: totalStmts,
+      // Multiply-first association: (covered * 100) / total reproduces the
+      // pinned double 66.66666666666667 for 2-of-3; the division-first
+      // (covered / total) * 100 is one ulp lower. Total 0 is exactly 0.0 —
+      // never a division error (FR-023).
+      percentage: totalStmts === 0 ? 0 : (coveredStmts * 100) / totalStmts,
+    });
+  }
+  return entries;
+}
+
+/**
+ * Compares fnMap entry pairs by key — code-unit comparison (not
+ * `localeCompare`, which is locale-dependent) — for the canonical
+ * construction order inside one file entry.
+ *
+ * @param a Left [key, record] pair.
+ * @param b Right [key, record] pair.
+ * @returns The key comparison result.
+ */
+function compareFnMapKeys(
+  a: readonly [string, FnMapRecord],
+  b: readonly [string, FnMapRecord],
+): number {
+  if (a[0] !== b[0]) {
+    return a[0] < b[0] ? -1 : 1;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Containment, ordering, and serialization (FR-024)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalizes one document file key to its root-relative POSIX path, or
+ * rejects it (FR-024's spec edge case). Both emitter shapes key files —
+ * vitest root-relatively, jest absolutely — so every key resolves against
+ * the resolved root before `path.relative` reduces it; an absolute key
+ * passes `resolve` unchanged, and a relative key joins the root.
+ *
+ * Containment is lexical, via `path.relative`: the result must be neither
+ * absolute (a different Windows drive), empty (the root itself — a
+ * directory, not a file beneath it), nor `..`-prefixed. The `..` test is
+ * deliberately literal — the safeio precedent — so a sibling sharing the
+ * root's leading string (`${root}-trap/...`, which a `startsWith` check
+ * would wrongly keep) and an in-root `..hidden`-style key are both
+ * rejected rather than risk an escape. The separator normalization to
+ * POSIX mirrors the wire contract every other root-relative path honors.
+ *
+ * @param root The resolved absolute analysis root.
+ * @param key The document's file key (relative or absolute).
+ * @returns The root-relative POSIX path, or null when not under the root.
+ */
+function containedRelativePath(root: string, key: string): string | null {
+  const rel = relative(root, resolve(root, key));
+  if (rel === "" || isAbsolute(rel) || rel.startsWith("..")) {
+    return null;
+  }
+  return rel.split(sep).join("/");
+}
+
+/**
+ * The FR-024 total order over entries: `(file, start_line, function)`,
+ * code-unit comparison for the string keys, numeric line ordering between
+ * them, and `0` on full-key ties — applied whatever order the document's
+ * keys and fnMaps arrive in, so the wire guarantee holds structurally.
+ *
+ * @param a Left entry.
+ * @param b Right entry.
+ * @returns The three-key comparison result.
+ */
+function compareEntries(a: CoverageEntry, b: CoverageEntry): number {
+  if (a.file !== b.file) {
+    return a.file < b.file ? -1 : 1;
+  }
+  if (a.start_line !== b.start_line) {
+    return a.start_line - b.start_line;
+  }
+  if (a.function !== b.function) {
+    return a.function < b.function ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Serializes a `CoverageEntry` to its wire shape (FR-024): exactly the
+ * seven fields, emitted in the canonical sorted-key order the protocol
+ * layer's sorted-key serializer produces — so the server's `serialize`
+ * pass re-orders these keys as a structural no-op and each entry is
+ * wire-final in the form that serializer defines.
+ *
+ * A pure projection, deliberately without the fail-loud field validation
+ * `models.ts`'s record serializers apply (the `serializeComplexityEntry`
+ * precedent): every `CoverageEntry` is constructed at this module's single
+ * site from fields whose validity is structural — validated document
+ * strings and numbers — and the wire shape itself (exactly these seven
+ * keys) is pinned by `tests/coverage.test.ts`'s wire-invariant assertions.
+ *
+ * @param entry The coverage entry to serialize.
+ * @returns A JSON-ready object with `covered_stmts`, `end_line`, `file`,
+ * `function`, `percentage`, `start_line`, and `total_stmts`.
+ */
+export function serializeCoverageEntry(entry: CoverageEntry): Record<string, unknown> {
+  return {
+    covered_stmts: entry.covered_stmts,
+    end_line: entry.end_line,
+    file: entry.file,
+    function: entry.function,
+    percentage: entry.percentage,
+    start_line: entry.start_line,
+    total_stmts: entry.total_stmts,
+  };
+}
