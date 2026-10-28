@@ -313,6 +313,14 @@ const PARAM_METHODS_SOURCE = `export function appendTo(p: unknown[], v: unknown)
 }
 `;
 
+// The method-arm mode boundary: a mutator-named method on a parameter
+// whose type is NOT array-like — SliceMutation in parse-only (the
+// type-blind name-form), a clean fallthrough under the checker.
+const NONARRAY_PARAM_METHODS_SOURCE = `export function appendToObject(p: { push(v: unknown): void }, v: unknown): void {
+  p.push(v);
+}
+`;
+
 // The same tsconfig shape tests/program.test.ts uses to exercise the program
 // bootstrap (a valid config whose root set the pipeline overrides anyway).
 const TSCONFIG_STRICT =
@@ -826,6 +834,7 @@ export function caller(v: number): void {
       "amb-unknown.ts": AMB_UNKNOWN_SOURCE,
       "param-computed.ts": PARAM_COMPUTED_SOURCE,
       "param-methods.ts": PARAM_METHODS_SOURCE,
+      "param-methods-nonarray.ts": NONARRAY_PARAM_METHODS_SOURCE,
     });
     cleanup = tree.cleanup;
     root = tree.root;
@@ -988,6 +997,13 @@ export function caller(v: number): void {
     ]);
   });
 
+  it("parse-only mutating array methods on NON-array-typed parameters are still SliceMutation — no checker to consult, the name and shape decide (FR-015)", () => {
+    const record = recordFor(result, "appendToObject", "param-methods-nonarray.ts");
+    expect(locatedEffects(record)).toEqual([
+      { type: "SliceMutation", location: "param-methods-nonarray.ts:2:3" },
+    ]);
+  });
+
   it("wire shape over the P1/ambiguity tree: canonical types, no classification, key sets, and both documented orders (FR-018, FR-019, FR-020)", () => {
     expectWireInvariants(result);
   });
@@ -1065,6 +1081,19 @@ describe("FR-015 param-write split and type-based ambiguity in program mode (che
 `,
       "param-computed.ts": PARAM_COMPUTED_SOURCE,
       "param-methods.ts": PARAM_METHODS_SOURCE,
+      "param-methods-nonarray.ts": NONARRAY_PARAM_METHODS_SOURCE,
+      "nameform-edges.ts": `export function sendJson(res: { json(body: unknown): void }, body: unknown): void {
+  res.json(body);
+}
+
+export function closePort(port: { close(): void }): void {
+  port.close();
+}
+
+export function cancelWork(controller: { abort(): void }): void {
+  controller.abort();
+}
+`,
       "amb-eval.ts": AMB_EVAL_SOURCE,
       "amb-function.ts": AMB_FUNCTION_SOURCE,
       "amb-computed.ts": AMB_COMPUTED_SOURCE,
@@ -1172,6 +1201,32 @@ describe("FR-015 param-write split and type-based ambiguity in program mode (che
     const record = recordFor(result, "appendTo", "param-methods.ts");
     expect(locatedEffects(record)).toEqual([
       { type: "SliceMutation", location: "param-methods.ts:2:3" },
+    ]);
+  });
+
+  it("the method-arm mode boundary: a mutating array method on a NON-array-typed parameter is not SliceMutation under the checker — the call falls through clean (FR-015)", () => {
+    const record = recordFor(result, "appendToObject", "param-methods-nonarray.ts");
+    expect(projectedEffects(record)).toEqual([]);
+  });
+
+  it("name-form persistence under the checker: res.json on a non-Response-typed receiver named res still emits HTTPResponseWrite (FR-015)", () => {
+    const record = recordFor(result, "sendJson", "nameform-edges.ts");
+    expect(locatedEffects(record)).toEqual([
+      { type: "HTTPResponseWrite", location: "nameform-edges.ts:2:3" },
+    ]);
+  });
+
+  it("name-form persistence under the checker: port.close on a non-MessagePort-typed receiver named port still emits ChannelClose — never ResourceManagement (FR-015)", () => {
+    const record = recordFor(result, "closePort", "nameform-edges.ts");
+    expect(locatedEffects(record)).toEqual([
+      { type: "ChannelClose", location: "nameform-edges.ts:6:3" },
+    ]);
+  });
+
+  it("name-form persistence under the checker: .abort on a non-AbortController-typed receiver still emits ContextCancellation — receiver-blind in both modes (FR-015)", () => {
+    const record = recordFor(result, "cancelWork", "nameform-edges.ts");
+    expect(locatedEffects(record)).toEqual([
+      { type: "ContextCancellation", location: "nameform-edges.ts:10:3" },
     ]);
   });
 
