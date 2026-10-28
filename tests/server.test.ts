@@ -485,6 +485,238 @@ describe("server: analyze", () => {
   });
 });
 
+describe("server: complexity", () => {
+  const activeFixtures: FixtureTree[] = [];
+  const lockedDirectories: string[] = [];
+
+  // Creates a fixture tree registered for afterEach cleanup; returns the
+  // tree's root path to use as the complexity request's root_path.
+  async function fixtureTree(files: Readonly<Record<string, string>>): Promise<string> {
+    const tree = await createFixtureTree(files);
+    activeFixtures.push(tree);
+    return tree.root;
+  }
+
+  afterEach(async () => {
+    // Recursive cleanup cannot descend into a chmod-000 directory, so every
+    // locked directory is unlocked before its fixture tree is removed.
+    for (const directory of lockedDirectories.splice(0)) {
+      await chmod(directory, 0o755);
+    }
+    await Promise.all(activeFixtures.splice(0).map((tree) => tree.cleanup()));
+  });
+
+  // The canned tree pins the five-field complexity entry (FR-022) with
+  // every score computed by hand from the FR-021 closed decision-point
+  // list: `grade` = 1 + if + else-if; `classify` = 1 + two case clauses
+  // (a `default` arm never counts); `tally` = 1 + for, for-of, for-in,
+  // while, do; `parse` = 1 + catch; `label` = 1 + && + || + ternary;
+  // `pick` = 1 + two ??; `coalesce` = 1 because the logical assignments
+  // &&=/||=/??= are the documented exclusion (Assumption 10); `noop` = 1
+  // because an empty body scores 1. Entries order by (file, line, name)
+  // per FR-020 over the extraction pipeline shared with analyze (FR-022).
+  const complexityTree: Readonly<Record<string, string>> = {
+    "src/branches.ts":
+      'export function grade(score: number): string {\n  if (score >= 90) {\n    return "A";\n  } else if (score >= 80) {\n    return "B";\n  }\n  return "F";\n}\n\nexport function classify(code: number): string {\n  switch (code) {\n    case 1:\n      return "one";\n    case 2:\n      return "two";\n    default:\n      return "many";\n  }\n}\n',
+    "src/loops.ts":
+      "export function tally(count: number): number {\n  let total = 0;\n  for (let i = 0; i < count; i++) {\n    total += 1;\n  }\n  for (const value of [1, 2, 3]) {\n    total += value;\n  }\n  for (const key in { a: 1 }) {\n    total += 1;\n  }\n  while (total > 100) {\n    total -= 100;\n  }\n  do {\n    total += 1;\n  } while (total < 0);\n  return total;\n}\n\nexport function parse(text: string): number {\n  try {\n    return JSON.parse(text) as number;\n  } catch {\n    return 0;\n  }\n}\n",
+    "src/operators.ts":
+      'export function label(a: boolean, b: boolean, c: boolean): string {\n  return a && (b || c) ? "some" : "none";\n}\n\nexport function pick(a: string | null, b: string | null): string {\n  return a ?? b ?? "none";\n}\n\nexport function coalesce(a: boolean | null, b: boolean | null): boolean | null {\n  a ||= b;\n  a &&= b;\n  a ??= b;\n  return a;\n}\n\nexport function noop(): void {}\n',
+  };
+  const expectedEntries = [
+    {
+      name: "grade",
+      package: "src.branches",
+      file: "src/branches.ts",
+      line: 1,
+      complexity: 3,
+    },
+    {
+      name: "classify",
+      package: "src.branches",
+      file: "src/branches.ts",
+      line: 10,
+      complexity: 3,
+    },
+    {
+      name: "tally",
+      package: "src.loops",
+      file: "src/loops.ts",
+      line: 1,
+      complexity: 6,
+    },
+    {
+      name: "parse",
+      package: "src.loops",
+      file: "src/loops.ts",
+      line: 21,
+      complexity: 2,
+    },
+    {
+      name: "label",
+      package: "src.operators",
+      file: "src/operators.ts",
+      line: 1,
+      complexity: 4,
+    },
+    {
+      name: "pick",
+      package: "src.operators",
+      file: "src/operators.ts",
+      line: 5,
+      complexity: 3,
+    },
+    {
+      name: "coalesce",
+      package: "src.operators",
+      file: "src/operators.ts",
+      line: 9,
+      complexity: 1,
+    },
+    {
+      name: "noop",
+      package: "src.operators",
+      file: "src/operators.ts",
+      line: 16,
+      complexity: 1,
+    },
+  ];
+
+  it("round-trips a valid complexity request", async () => {
+    const root = await fixtureTree(complexityTree);
+    const { responses, stderr } = await drive([
+      request(30, "complexity", { root_path: root }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(30);
+    expect(responses[0]?.result).toEqual({ functions: expectedEntries });
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["absent params", undefined],
+    ["null params", null],
+    ["array params", []],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(31, "complexity", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must be an object",
+    );
+    expect(responses[0]?.id).toBe(31);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["missing root_path", {}],
+    ["non-string root_path", { root_path: 42 }],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(32, "complexity", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: root_path must be a string",
+    );
+    expect(responses[0]?.id).toBe(32);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["non-array patterns", { root_path: "/abs/project", patterns: "src/**/*.ts" }],
+    ["number patterns", { root_path: "/abs/project", patterns: 42 }],
+    [
+      "patterns array with a non-string element",
+      { root_path: "/abs/project", patterns: ["src", 7] },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(33, "complexity", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: patterns must be an array of strings",
+    );
+    expect(responses[0]?.id).toBe(33);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["an extra key beside root_path", { root_path: "/abs/project", extra: true }],
+    [
+      "an extra key beside root_path and patterns",
+      { root_path: "/abs/project", patterns: ["src/**"], extra: true },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(34, "complexity", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must contain only root_path and patterns",
+    );
+    expect(responses[0]?.id).toBe(34);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a nonexistent root_path with -32602", async () => {
+    const root = await fixtureTree({});
+    const missing = join(root, "does-not-exist");
+    const { responses, stderr } = await drive([
+      request(35, "complexity", { root_path: missing }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${missing}`,
+    );
+    expect(responses[0]?.id).toBe(35);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a non-directory root_path with -32602", async () => {
+    const root = await fixtureTree({ "not-a-dir.ts": "export {};\n" });
+    const file = join(root, "not-a-dir.ts");
+    const { responses, stderr } = await drive([
+      request(36, "complexity", { root_path: file }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${file}`,
+    );
+    expect(responses[0]?.id).toBe(36);
+    expect(stderr).toBe("");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "rejects an inaccessible root_path with -32602",
+    async () => {
+      const root = await fixtureTree({
+        "locked/nested/a.ts": "export const a = 1;\n",
+      });
+      const locked = join(root, "locked");
+      const nested = join(locked, "nested");
+      await chmod(locked, 0o000);
+      lockedDirectories.push(locked);
+      const { responses, stderr } = await drive([
+        request(37, "complexity", { root_path: nested }),
+      ]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+      expect(errorBody(responses[0] ?? {}).message).toBe(
+        `Invalid params: root_path is not a directory: ${nested}`,
+      );
+      expect(responses[0]?.id).toBe(37);
+      expect(stderr).toBe("");
+    },
+  );
+
+  it("answers a repeated request with byte-identical response lines", async () => {
+    const root = await fixtureTree(complexityTree);
+    const line = request(38, "complexity", { root_path: root });
+    const { responses, rawLines, stderr } = await drive([line, line]);
+    expect(responses).toHaveLength(2);
+    expect(rawLines).toHaveLength(2);
+    expect(rawLines[0]).toBe(rawLines[1]);
+    expect(responses[0]?.id).toBe(38);
+    expect(responses[0]?.result).toEqual({ functions: expectedEntries });
+    expect(stderr).toBe("");
+  });
+});
+
 describe("server: request validation", () => {
   it("answers malformed JSON with -32700 and stays alive", async () => {
     const { responses } = await drive([
@@ -564,8 +796,10 @@ describe("server: dispatch", () => {
   // `analyze` is pinned by the "server: analyze" block above — those cases
   // stay red until the handler registers (T019) — so it is dropped here
   // rather than double-pinned as reserved once it lands (FR-028).
+  // `complexity` is pinned the same way by the "server: complexity" block
+  // — red until T024 registers the handler — and is dropped for the same
+  // reason.
   it.each([
-    "complexity",
     "coverage",
     "test_mapping",
     "classify_signals",
