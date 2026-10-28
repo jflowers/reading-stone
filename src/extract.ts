@@ -3,6 +3,7 @@ import type { Writable } from "node:stream";
 import {
   type ArrowFunction,
   type BindingName,
+  type Block,
   type CallExpression,
   type ConstructorDeclaration,
   type FunctionDeclaration,
@@ -662,4 +663,75 @@ function isSchedulingCall(node: CallExpression): boolean {
     isIdentifier(callee.expression) &&
     callee.expression.text === "process"
   );
+}
+
+/**
+ * A function-like that owns its own extraction record (the R4 table's
+ * forms): a body-bearing function declaration, method, accessor, or
+ * constructor — the `body` presence the runtime predicate checks, with
+ * each declaration or member form's optional `FunctionBody` narrowed to a
+ * required `Block` — or an arrow or function expression, whose body is
+ * grammatically always present (`ConciseBody` and `FunctionBody`).
+ */
+export type ExtractedFunctionLike =
+  | ArrowFunction
+  | FunctionExpression
+  | (FunctionDeclaration & { readonly body: Block })
+  | (MethodDeclaration & { readonly body: Block })
+  | (ConstructorDeclaration & { readonly body: Block })
+  | (GetAccessorDeclaration & { readonly body: Block })
+  | (SetAccessorDeclaration & { readonly body: Block });
+
+/**
+ * Whether a function-like node is one of the R4 forms that owns its own
+ * extraction record — the shared half of the FR-009 attribution boundary:
+ * `extractFunctions` emits a record for exactly these, so a per-record
+ * consumer walk stops at exactly these (a nested form's constructs belong
+ * to its own record) and traverses unassigned function expressions into
+ * the enclosing record instead. The conditions mirror the walker dispatch
+ * above (body presence for the declaration and member forms, a
+ * name-giving parent position for the expression forms) and
+ * `detector.ts`'s private mirror of the same table; exported so the
+ * complexity engine's attribution walk (FR-022) consumes the one form
+ * table with no duplicated dispatch to drift.
+ *
+ * @param node The node to test.
+ * @returns Whether the node's body belongs to its own extraction record.
+ */
+export function isExtractedFunctionLike(node: Node): node is ExtractedFunctionLike {
+  if (isFunctionDeclaration(node)) {
+    return node.body !== undefined;
+  }
+  if (
+    isMethodDeclaration(node) ||
+    isConstructorDeclaration(node) ||
+    isGetAccessorDeclaration(node) ||
+    isSetAccessorDeclaration(node)
+  ) {
+    return node.body !== undefined;
+  }
+  if (isArrowFunction(node) || isFunctionExpression(node)) {
+    return isNamedExpressionPosition(node);
+  }
+  return false;
+}
+
+/**
+ * Whether an expression form sits in a parent position that names it —
+ * the R4 record condition for arrows and function expressions (a
+ * destructuring pattern cannot initialize from a function, so only an
+ * identifier variable name names one).
+ *
+ * @param node The arrow or function expression.
+ * @returns Whether the parent shape gives the function a record name.
+ */
+function isNamedExpressionPosition(node: ArrowFunction | FunctionExpression): boolean {
+  const parent = node.parent;
+  if (isVariableDeclaration(parent)) {
+    return parent.initializer === node && isIdentifier(parent.name);
+  }
+  if (isPropertyAssignment(parent) || isPropertyDeclaration(parent)) {
+    return parent.initializer === node;
+  }
+  return isExportAssignment(parent) && parent.expression === node;
 }
