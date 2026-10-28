@@ -1729,19 +1729,19 @@ class RecordWalker {
 
   /**
    * One property-form call through the name-form rule families in
-   * research R6.4's precedence order — receiver-specific families
-   * first: the stdio streams (console, process.std*), then the P1
-   * families (HTTP responses, channels, streams), then the fs family
+   * research R6.4's precedence order — a ladder of family helpers,
+   * each returning whether it claimed the call: the stdio streams
+   * first (console, process.std*), then the receiver-specific
+   * communication families (HTTP responses, channels), the fs family,
    * and the metaprogramming/Atomics receivers whose method names the
    * generic rules below would otherwise steal (`Reflect.set` vs the
-   * membership `set`, `Atomics.add` vs the membership `add`), then the
-   * resource-disposal name-form (below ChannelClose, pinned), logging,
-   * generic writers, the FR-015 param-write split, and the membership
-   * mutators — then the P2/P4 database, cancellation, clock, and
-   * WebAssembly name-forms and the typed finalizer arm. The first match
-   * wins; every family matches on closed method-name lists or pinned
-   * receiver spellings, so an unmatched call reports nothing until
-   * `CallbackInvocation`'s parameter-property remainder.
+   * membership `set`, `Atomics.add` vs the membership `add`); then the
+   * stream, disposal, logging, and writer name-forms, the FR-015
+   * param-write split, the membership mutators, and the P2/P4
+   * database, cancellation, clock, and registration name-forms. The
+   * first match wins; every family matches on closed method-name lists
+   * or pinned receiver spellings, so an unmatched call reports nothing
+   * until `visitReceiverAmbiguity`'s remainder.
    */
   private visitMethodCall(
     node: CallExpression,
@@ -1749,75 +1749,37 @@ class RecordWalker {
   ): void {
     const method = callee.name.text;
     const receiver = callee.expression;
-    // The P3 stdio families, pinned above every generic writer family
-    // (research R6.4): console.* and process.stdout/stderr.write.
     if (this.visitStdioCall(node, method, callee)) {
       return;
     }
-    if (HTTP_RESPONSE_METHODS.has(method) && this.isHttpResponseReceiver(receiver)) {
-      this.emit("HTTPResponseWrite", "writes to an HTTP response", node);
+    if (this.visitCommunicationCall(node, method, receiver)) {
       return;
     }
-    if (method === "postMessage") {
-      this.emit("ChannelSend", "sends a message to a channel", node);
-      return;
-    }
-    if (method === "close" && this.isChannelReceiver(receiver)) {
-      this.emit("ChannelClose", "closes a channel", node);
-      return;
-    }
-    // The fs family, pinned above WriterOutput (research R6.4).
     if (this.visitFileSystemCall(node, method, receiver)) {
       return;
     }
-    // The metaprogramming forms, pinned above the membership `set`.
     if (this.visitMetaprogrammingCall(node, callee)) {
       return;
     }
-    // The Atomics family, pinned above the membership `add`.
-    if (this.isAtomicsReceiver(receiver)) {
-      this.emit("AtomicOp", "performs an atomic shared-memory operation", node);
+    if (this.visitAtomicsCall(node, receiver)) {
       return;
     }
-    if (method === "pipe") {
-      this.emit("StreamOutput", "pipes a stream", node);
+    if (this.visitStreamCall(node, method)) {
       return;
     }
-    // ResourceManagement's disposal name-form — below ChannelClose
-    // (research R6.4's pinned precedence).
-    if (RESOURCE_DISPOSAL_METHODS.has(method)) {
-      this.emit("ResourceManagement", "releases a resource", node);
+    if (this.visitDisposalCall(node, method)) {
       return;
     }
-    if (LOG_WRITE_METHODS.has(method) && this.isLogReceiver(receiver)) {
-      this.emit("LogWrite", "writes a log record", node);
+    if (this.visitWriterCall(node, method, receiver)) {
       return;
     }
-    if (
-      WRITER_OUTPUT_METHODS.has(method) &&
-      !isProcessStdioReceiver(receiver) &&
-      !this.isHttpResponseReceiver(receiver)
-    ) {
-      this.emit("WriterOutput", "writes through a writer-like receiver", node);
-      return;
-    }
-    if (
-      ARRAY_MUTATOR_METHODS.has(method) &&
-      this.isParamReceiver(receiver) &&
-      this.isArrayTypedParamReceiver(receiver)
-    ) {
-      this.emit("SliceMutation", "calls a mutating array method on a parameter", node);
+    if (this.visitSliceMutationCall(node, method, receiver)) {
       return;
     }
     if (this.visitMembershipCall(node, method, receiver)) {
       return;
     }
-    if (DATABASE_WRITE_METHODS.has(method)) {
-      this.emit("DatabaseWrite", "writes to a database", node);
-      return;
-    }
-    if (DATABASE_TRANSACTION_METHODS.has(method)) {
-      this.emit("DatabaseTransaction", "manages a database transaction", node);
+    if (this.visitDatabaseCall(node, method)) {
       return;
     }
     if (this.visitContextCancellationCall(node, method, callee)) {
@@ -1826,12 +1788,7 @@ class RecordWalker {
     if (this.visitTimeDependencyCall(node, method, callee)) {
       return;
     }
-    if (isWebAssemblyInstantiateCallee(callee)) {
-      this.emit("CgoCall", "instantiates WebAssembly", node);
-      return;
-    }
-    if (method === "register" && this.isFinalizerRegistryReceiver(receiver)) {
-      this.emit("FinalizerRegistration", "registers a finalizer", node);
+    if (this.visitRegistrationCall(node, method, callee)) {
       return;
     }
     // FR-017's receiver ambiguity — the final remainder, after every
@@ -1883,6 +1840,181 @@ class RecordWalker {
     if (type !== undefined && (type.flags & TypeFlags.Any) !== 0) {
       this.emitAmbiguous(`calls a method on the any-typed receiver ${base.text}`, node);
     }
+  }
+
+  /**
+   * The receiver-specific communication families (research R6.4):
+   * `HTTPResponseWrite` on `res`/`response`-spelled or checker-typed
+   * response receivers, `ChannelSend` on any `postMessage`, and
+   * `ChannelClose` on port/channel/worker-spelled or MessagePort-family
+   * receivers — pinned above the fs family and above
+   * `ResourceManagement`'s `.close()`.
+   *
+   * @returns Whether a communication family claimed the call.
+   */
+  private visitCommunicationCall(
+    node: CallExpression,
+    method: string,
+    receiver: Expression,
+  ): boolean {
+    if (HTTP_RESPONSE_METHODS.has(method) && this.isHttpResponseReceiver(receiver)) {
+      this.emit("HTTPResponseWrite", "writes to an HTTP response", node);
+      return true;
+    }
+    if (method === "postMessage") {
+      this.emit("ChannelSend", "sends a message to a channel", node);
+      return true;
+    }
+    if (method === "close" && this.isChannelReceiver(receiver)) {
+      this.emit("ChannelClose", "closes a channel", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The `AtomicOp` row on the `Atomics` global — pinned above the
+   * membership mutators, whose `add` the receiver would otherwise
+   * steal (research R6.4).
+   *
+   * @returns Whether the call is an Atomics operation.
+   */
+  private visitAtomicsCall(node: CallExpression, receiver: Expression): boolean {
+    if (this.isAtomicsReceiver(receiver)) {
+      this.emit("AtomicOp", "performs an atomic shared-memory operation", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The `StreamOutput` name-form: `.pipe` on any receiver (the
+   * disposition table's streams row).
+   *
+   * @returns Whether the call is a pipe.
+   */
+  private visitStreamCall(node: CallExpression, method: string): boolean {
+    if (method === "pipe") {
+      this.emit("StreamOutput", "pipes a stream", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * `ResourceManagement`'s disposal name-form (the disposition table):
+   * `.close()`/`.dispose()` on resource receivers — deliberately below
+   * `ChannelClose`'s receivers (research R6.4's pinned precedence: the
+   * MessagePort family's `.close()` is a channel close, never a
+   * resource release).
+   *
+   * @returns Whether the call is a disposal form.
+   */
+  private visitDisposalCall(node: CallExpression, method: string): boolean {
+    if (RESOURCE_DISPOSAL_METHODS.has(method)) {
+      this.emit("ResourceManagement", "releases a resource", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The output name-form families: `LogWrite` on log/logger-named or
+   * Logger-typed receivers, then `WriterOutput`'s writer-like methods —
+   * excluding the process stdio streams and HTTP response receivers the
+   * earlier tiers own (research R6.4's precedence).
+   *
+   * @returns Whether an output family claimed the call.
+   */
+  private visitWriterCall(
+    node: CallExpression,
+    method: string,
+    receiver: Expression,
+  ): boolean {
+    if (LOG_WRITE_METHODS.has(method) && this.isLogReceiver(receiver)) {
+      this.emit("LogWrite", "writes a log record", node);
+      return true;
+    }
+    if (
+      WRITER_OUTPUT_METHODS.has(method) &&
+      !isProcessStdioReceiver(receiver) &&
+      !this.isHttpResponseReceiver(receiver)
+    ) {
+      this.emit("WriterOutput", "writes through a writer-like receiver", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The `SliceMutation` method arm of the FR-015 param-write split: the
+   * nine mutating array methods on a parameter receiver — array-typed
+   * in program mode, type-blind in parse-only
+   * (`isArrayTypedParamReceiver`). A non-array parameter's mutator
+   * call falls through to the later tiers, exactly as its element
+   * writes do.
+   *
+   * @returns Whether the call is a parameter slice mutation.
+   */
+  private visitSliceMutationCall(
+    node: CallExpression,
+    method: string,
+    receiver: Expression,
+  ): boolean {
+    if (
+      ARRAY_MUTATOR_METHODS.has(method) &&
+      this.isParamReceiver(receiver) &&
+      this.isArrayTypedParamReceiver(receiver)
+    ) {
+      this.emit("SliceMutation", "calls a mutating array method on a parameter", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The database name-forms (the disposition table's partial rows): the
+   * MongoDB-style write names and the transaction names, on any
+   * receiver — the documented false-positive surface of the partial
+   * tier.
+   *
+   * @returns Whether a database name-form claimed the call.
+   */
+  private visitDatabaseCall(node: CallExpression, method: string): boolean {
+    if (DATABASE_WRITE_METHODS.has(method)) {
+      this.emit("DatabaseWrite", "writes to a database", node);
+      return true;
+    }
+    if (DATABASE_TRANSACTION_METHODS.has(method)) {
+      this.emit("DatabaseTransaction", "manages a database transaction", node);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The registration name-forms: `WebAssembly.instantiate` (`CgoCall`)
+   * and the typed `.register(...)` on FinalizationRegistry receivers
+   * (`FinalizerRegistration` — program mode only; parse-only reports
+   * the construction form alone).
+   *
+   * @returns Whether a registration form claimed the call.
+   */
+  private visitRegistrationCall(
+    node: CallExpression,
+    method: string,
+    callee: PropertyAccessExpression,
+  ): boolean {
+    if (isWebAssemblyInstantiateCallee(callee)) {
+      this.emit("CgoCall", "instantiates WebAssembly", node);
+      return true;
+    }
+    const receiver = callee.expression;
+    if (method === "register" && this.isFinalizerRegistryReceiver(receiver)) {
+      this.emit("FinalizerRegistration", "registers a finalizer", node);
+      return true;
+    }
+    return false;
   }
 
   /**
