@@ -289,9 +289,8 @@ rule surface. "Parse-only" notes apply when no TypeChecker is available
 — one per canonical type; dispositions from the closed set
 {strict, must, partial, best-effort, N/A}; disposition matches tier
 mechanically (P0→strict, P1→must, P2→partial, P3/P4→best-effort) except
-N/A rows; all 6 N/A rows (Panic, MutexOp, WaitGroupOp, RecoverBehavior,
-ReflectionMutation, UnsafeMutation) carry non-empty rationale; no P1 row
-is N/A and every P1 row carries a detect mapping.
+N/A rows; every N/A row enumerated in the tables above carries non-empty
+rationale; no P1 row is N/A and every P1 row carries a detect mapping.
 
 ## Relationships
 
