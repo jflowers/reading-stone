@@ -233,6 +233,20 @@ acyclic, no layering inversion (discovery keeps throwing
 `InvalidRootPathError` for the server to map to `-32602`). Test files
 mirror source modules one-to-one, extending the existing vitest suites.
 
+**Implementation deviations** (recorded per review dispatch 44e85014):
+the `analyze` entry point landed in `src/analysis.ts` — alongside the
+`prepareAnalysis` pipeline it closes over — rather than in
+`src/detector.ts` as the module tree and task T018 place it; the
+committed tests pin the import from `../src/analysis.js`, which is the
+contract. The review fixes also added `src/internal.ts` (the shared
+`(file, line, name)` comparator and lexical path-containment helper,
+consolidated from per-module copies; a new leaf so no cycle or layering
+inversion is introduced) and pinned the runtime `typescript` dependency
+to the exact `7.0.2` rather than the caret range — the runtime consumes
+the `typescript/unstable/*` surface, which carries no semver stability
+guarantee, so a caret range could resolve a breaking 7.x in fresh
+installs.
+
 ## Complexity Tracking
 
 > **Fill ONLY if Constitution Check has violations that must be justified**
