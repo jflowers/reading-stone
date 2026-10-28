@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { analyze } from "./analysis.js";
+import { computeComplexity } from "./complexity.js";
 import { discover, InvalidRootPathError } from "./discovery.js";
 import {
   errorResponse,
@@ -299,6 +300,27 @@ export class Server {
         // only re-orders keys — repeated requests stay byte-identical
         // (SC-003/SC-006).
         return { functions: await analyze(rootPath, patterns, this.stderr) };
+      } catch (error) {
+        throw mapRootPathError(error) ?? error;
+      }
+    });
+    // `complexity` (FR-027, FR-022; research R12; contracts/complexity.md
+    // error table): the SAME shared analysis-params validation as analyze,
+    // then the T014 pipeline + T023 computation wrapped as
+    // `{"functions": [...]}`. The capability response is unchanged —
+    // complexity is a core method, not gated behind a capability flag
+    // (FR-028).
+    dispatch.set("complexity", async (params) => {
+      const { rootPath, patterns } = validateAnalysisParams(params);
+      try {
+        // computeComplexity (T023) closes the same prepareAnalysis
+        // pipeline (T014) analyze runs, so FR-022's parity is structural.
+        // Its result is already the serialized, wire-shaped record array,
+        // so the sorted-key envelope serializer only re-orders keys —
+        // repeated requests stay byte-identical (SC-003/SC-006). Skip
+        // diagnostics flow to the server's stderr, never stdout, which is
+        // reserved for JSON-RPC responses (FR-017).
+        return { functions: await computeComplexity(rootPath, patterns, this.stderr) };
       } catch (error) {
         throw mapRootPathError(error) ?? error;
       }
