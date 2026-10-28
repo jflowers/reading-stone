@@ -27,12 +27,14 @@
 //   else. The JSON-RPC envelope, parameter validation, and dispatch wiring
 //   are pinned end-to-end by tests/server.test.ts.
 //
-// PERCENTAGE PRECISION: the pinned formula is `(covered / total) * 100`
-// (FR-023, contracts/coverage.md, data-model.md, research R10), evaluated
-// left-to-right, so the expected tables below carry the expression itself
-// rather than a decimal literal: (2 / 3) * 100 is the double 66.6666666666666
-// while the literal 66.66666666666667 is a different double — (2 * 100) / 3.
-// Pinning the expression pins the formula bit-exactly. total_stmts 0 yields
+// PERCENTAGE PRECISION (reconciled): every spec artifact that states a
+// concrete value — issue #3, quickstart.md, tasks T026/T035, and the
+// server-suite golden (tests/server.test.ts) — pins the literal double
+// 66.66666666666667 for a 2-of-3 attribution. That double is produced by
+// the multiply-first association (2 * 100) / 3; the division-first
+// expression (2 / 3) * 100 is one ulp lower (66.66666666666666). The
+// tables below pin the literal, so src/coverage.ts MUST associate as
+// (covered * 100) / total. total_stmts 0 yields
 // exactly 0.0 — never a division error (FR-023).
 //
 // ATTRIBUTION RULE (FR-023; contracts/coverage.md; research R10): each
@@ -516,7 +518,7 @@ const PROJECT_EXPECTED: ReadonlyArray<Record<string, unknown>> = [
     end_line: 9,
     covered_stmts: 2,
     total_stmts: 3,
-    percentage: (2 / 3) * 100,
+    percentage: 66.66666666666667,
   },
   {
     file: "src/nested.ts",
@@ -543,7 +545,7 @@ const PROJECT_EXPECTED: ReadonlyArray<Record<string, unknown>> = [
     end_line: 10,
     covered_stmts: 2,
     total_stmts: 3,
-    percentage: (2 / 3) * 100,
+    percentage: 66.66666666666667,
   },
   {
     file: "src/utils/noop.ts",
@@ -598,7 +600,7 @@ const PATTERNS_EXPECTED: ReadonlyArray<Record<string, unknown>> = [
     end_line: 9,
     covered_stmts: 2,
     total_stmts: 3,
-    percentage: (2 / 3) * 100,
+    percentage: 66.66666666666667,
   },
   {
     file: "src/nested.ts",
@@ -634,7 +636,7 @@ const PATTERNS_EXPECTED: ReadonlyArray<Record<string, unknown>> = [
     end_line: 10,
     covered_stmts: 2,
     total_stmts: 3,
-    percentage: (2 / 3) * 100,
+    percentage: 66.66666666666667,
   },
 ];
 
@@ -971,14 +973,14 @@ describe("emitter parity and attribution (FR-023/FR-024; US4 scenarios 1-2, 7)",
     expect(anonymous.total_stmts).toBe(1);
   });
 
-  it("percentage is (covered / total) * 100 at full float precision, and exactly 0.0 when total_stmts is 0", async () => {
+  it("percentage is (covered * 100) / total at full float precision, and exactly 0.0 when total_stmts is 0", async () => {
     const root = await vitestShapedProjectTree();
     const run = await coverageTree(root);
-    // The pinned formula, evaluated left-to-right: (2 / 3) * 100 is the
-    // double 66.6666666666666 — NOT the literal 66.66666666666667, which
-    // is the different double (2 * 100) / 3.
+    // The pinned literal (issue #3, quickstart.md, tasks T026/T035, the
+    // server golden): 66.66666666666667 is the double (2 * 100) / 3 —
+    // the division-first (2 / 3) * 100 is one ulp lower.
     expect(entryFor(run.entries, "divide", "src/utils/math.ts").percentage).toBe(
-      (2 / 3) * 100,
+      66.66666666666667,
     );
     // total_stmts 0 (noop) and covered 0 of a nonzero total (inner) both
     // yield exactly 0.0 — never a division error.
