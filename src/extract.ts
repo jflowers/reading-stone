@@ -158,12 +158,12 @@ type MutableScopeFrame = {
 const AST_DEPTH_BUDGET = 2000;
 
 /**
- * The closed scheduling-construct set for the deferred walk flag (research
- * R6): bare global timer registration, Node's qualified `process.nextTick`,
- * promise continuation methods, and DOM-style event registration. Name-form
- * matches, receiver-blind — the documented P1 false-positive surface.
+ * The bare timer globals of the closed scheduling set (research R6):
+ * matched as whole callee identifiers, receiver-blind. Exported because
+ * `detector.ts`'s FR-016 spawn forms match the same globals — the two
+ * modules share the one set and can never disagree on it.
  */
-const TIMER_GLOBAL_NAMES: ReadonlySet<string> = new Set([
+export const TIMER_GLOBAL_NAMES: ReadonlySet<string> = new Set([
   "setTimeout",
   "setInterval",
   "queueMicrotask",
@@ -620,12 +620,14 @@ function propertyNameText(name: PropertyName, sourceFile: SourceFile): string {
 /**
  * Collects a binding name into a scope frame, recursing through
  * destructuring patterns (`const { a, b: c } = ...`, `const [x, y] = ...`)
- * so every bound spelling is tracked; pattern holes bind nothing.
+ * so every bound spelling is tracked; pattern holes bind nothing. Exported
+ * because the detector's scope machinery resolves the same parameter and
+ * variable spellings — the one collector, never a mirrored copy.
  *
  * @param name The binding-name node.
  * @param names The frame's accumulating name set.
  */
-function collectBindingNames(name: BindingName, names: Set<string>): void {
+export function collectBindingNames(name: BindingName, names: Set<string>): void {
   if (isIdentifier(name)) {
     names.add(name.text);
     return;
@@ -641,12 +643,15 @@ function collectBindingNames(name: BindingName, names: Set<string>): void {
  * Whether a call is one of the closed scheduling constructs (R6): a bare
  * `setTimeout`/`setInterval`/`queueMicrotask` reference, Node's
  * `process.nextTick`, a promise `.then`/`.catch`/`.finally` continuation,
- * or an `addEventListener` registration.
+ * or an `addEventListener` registration. Exported so the detector's
+ * deferral attribution consumes precisely the callbacks this module's
+ * `deferred` flag names — never a wider or narrower set (Constitution
+ * Principle I: the two walks agree on what "deferred" means).
  *
  * @param node The call expression.
  * @returns Whether the callee matches the scheduling set.
  */
-function isSchedulingCall(node: CallExpression): boolean {
+export function isSchedulingCall(node: CallExpression): boolean {
   const callee = node.expression;
   if (isIdentifier(callee)) {
     return TIMER_GLOBAL_NAMES.has(callee.text);
@@ -690,9 +695,9 @@ export type ExtractedFunctionLike =
  * to its own record) and traverses unassigned function expressions into
  * the enclosing record instead. The conditions mirror the walker dispatch
  * above (body presence for the declaration and member forms, a
- * name-giving parent position for the expression forms) and
- * `detector.ts`'s private mirror of the same table; exported so the
- * complexity engine's attribution walk (FR-022) consumes the one form
+ * name-giving parent position for the expression forms); exported so
+ * both per-record consumer walks — the complexity engine's attribution
+ * walk (FR-022) and the detector's FR-009 walk — consume the one form
  * table with no duplicated dispatch to drift.
  *
  * @param node The node to test.
