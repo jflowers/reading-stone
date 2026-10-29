@@ -1447,7 +1447,7 @@ type ClassifySignalsEntry = (
   rootPath: string,
   patterns: unknown,
   stderr: Writable,
-) => Promise<readonly Record<string, unknown>[]>;
+) => Promise<readonly Signal[]>;
 
 // Loads the classify_signals entry from src/analysis.js, failing loud
 // with a named error while T029 is outstanding. Dynamic on purpose:

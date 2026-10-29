@@ -11,7 +11,7 @@ import {
 import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
 import { classifyPairs } from "./signals/adapter.js";
 import { buildRecordEvidence } from "./signals/evidence.js";
-import { serializeSignal } from "./signals/types.js";
+import { type ClassifySignalsResult, serializeSignal } from "./signals/types.js";
 
 /**
  * Pattern rules and the shared analysis pipeline (FR-001, FR-002; research
@@ -384,7 +384,11 @@ export async function analyze(
  * through `serializeSignal` (validated fields, omit-unset-optionals
  * `reasoning`). The returned array — not a `{"signals": [...]}` wrapper —
  * is the payload the server handler wraps into its JSON-RPC success
- * response, exactly as it wraps `analyze`'s array.
+ * response, exactly as it wraps `analyze`'s array. The return type is
+ * `ClassifySignalsResult["signals"]` — the payload half of the wire result
+ * interface — so the entry-to-handler hand-off is compile-time pinned: the
+ * handler types its wrapper against the interface, and this return cannot
+ * drift from the wire contract.
  *
  * The stages are `analyze`'s, identically and in the identical order
  * (FR-013's one-shared-pipeline guarantee is structural, never a second
@@ -425,8 +429,10 @@ export async function analyze(
  * `prepareAnalysis`. A set matching nothing yields `[]`, never an error.
  * @param stderr Injected diagnostic sink (Testability principle); defaults
  * to `process.stderr`. Stdout is never touched.
- * @returns The serialized signals, `(package, function, side_effect_type,
- * source)`-sorted.
+ * @returns The serialized signals — `ClassifySignalsResult["signals"]`, the
+ * `readonly Signal[]` the server handler wraps under the result interface's
+ * single `signals` key — `(package, function, side_effect_type, source)`
+ * -sorted.
  * @throws InvalidRootPathError when the root does not exist, is not a
  * directory, or cannot be accessed; the server handler maps it to the
  * contract's `-32602` response.
@@ -435,7 +441,7 @@ export async function classifySignals(
   rootPath: string,
   patterns: unknown,
   stderr: Writable = process.stderr,
-): Promise<readonly Record<string, unknown>[]> {
+): Promise<ClassifySignalsResult["signals"]> {
   const prepared = await prepareAnalysis(rootPath, patterns, stderr);
   try {
     const effects = detectEffects(prepared.records, prepared.context);
