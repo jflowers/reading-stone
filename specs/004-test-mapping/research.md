@@ -556,9 +556,12 @@ the closed kind set, canonical `side_effect_type` membership through
 [0, 100], string fields type-checked — the `serializeSignal` house
 pattern. The result payload is `{"mappings": [...]}` typed against a
 `TestMappingResult` interface whose `mappings` key is
-`readonly MappingRow[]`, and the server handler types its wrapper
-against the interface so the one-key wire shape is compile-time
-pinned end to end (the `ClassifySignalsResult` pattern). Empty inputs
+`readonly MappingRow[]`; the pipeline entry constructs its result
+against the interface and returns the complete one-key envelope, and
+the server handler types the entry's return against the interface —
+adding no wrapper — so the one-key wire shape is compile-time pinned
+end to end (the `ClassifySignalsResult` pattern, the envelope
+assembled in the entry rather than the handler). Empty inputs
 — no test files, no production targets, a pattern set matching
 nothing, or no pairs — yield `{"mappings": []}`, never an error (US1-8,
 edge case 10).
@@ -594,8 +597,9 @@ record with the record's own closed sets.
 `mapRootPathError` mapping (`InvalidRootPathError` → the shared
 `-32602` root message; every other failure rethrows for handleLine's
 `-32603`), the handler body calling `testMapping(rootPath, patterns,
-this.stderr)` and wrapping its return as the typed
-`TestMappingResult` — skip diagnostics flow to the server's stderr,
+this.stderr)` — the entry assembles and returns the typed
+`TestMappingResult` whole, so the handler passes it through with no
+wrapper — skip diagnostics flow to the server's stderr,
 never stdout (spec 001 FR-017 discipline). `protocol.ts`'s `initializeResult()`
 flips `test_mapping: true` with the other five flags unchanged
 (FR-014); the reserved `-32601` set shrinks to exactly
