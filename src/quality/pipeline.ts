@@ -161,6 +161,7 @@ export async function testMapping(
       prepared.testPaths,
       prepared.context,
       prepared.rootPath,
+      stderr,
     );
     const index = buildTargetIndex(prepared.records, effects, prepared.context);
     const pairs = pairTests(tests, index);
@@ -173,7 +174,7 @@ export async function testMapping(
     const pending: PendingRow[] = [];
     for (const pair of pairs) {
       const sites = assertionsByTest.get(pair.test);
-      const assertions = sites ?? collectAssertions(pair.test);
+      const assertions = sites ?? collectAssertions(pair.test, stderr);
       if (sites === undefined) {
         assertionsByTest.set(pair.test, assertions);
       }

@@ -96,10 +96,14 @@ function testPathsOf(files: Readonly<Record<string, string>>): string[] {
 // Runs one collection over a fixture tree in the requested mode: build the
 // tree (plus a root tsconfig in program mode), bootstrap the ProgramContext
 // over the pre-read pairs, collect, and dispose the program-mode context
-// before returning — the same lifetime discipline the pipeline owns.
+// before returning — the same lifetime discipline the pipeline owns. The
+// diagnostic sink defaults to a fresh memory sink and is shared by the
+// bootstrap and the collection so a caller can assert on every diagnostic
+// the run wrote (the bounded-walk guard suite).
 async function collectFromTree(
   files: Readonly<Record<string, string>>,
   mode: "parse-only" | "program" = "parse-only",
+  sink = memorySink(),
 ): Promise<TestFunction[]> {
   const onDisk: Record<string, string> =
     mode === "program" ? { ...files, "tsconfig.json": TSCONFIG } : { ...files };
@@ -107,14 +111,13 @@ async function collectFromTree(
   const pairs = Object.entries(files)
     .filter(([relPath]) => COMPILABLE_EXTENSIONS.has(extname(relPath)))
     .map(([relPath, text]) => [relPath, text] as const);
-  const sink = memorySink();
   const context = buildProgramContext(root, pairs, sink.stream);
   try {
     // Fail loud when the requested mode did not materialize: a silent
     // tsconfig fallback would turn a "both modes" test into parse-only
     // twice.
     expect(context.mode).toBe(mode);
-    return collectTestFunctions(testPathsOf(files), context, root);
+    return collectTestFunctions(testPathsOf(files), context, root, sink.stream);
   } finally {
     if (context.mode === "program") {
       context.dispose();
@@ -626,5 +629,83 @@ it("ay", () => {});
     const context = buildProgramContext(root, [], sink.stream);
     expect(context.mode).toBe("parse-only");
     expect(collectTestFunctions([], context, root)).toEqual([]);
+  });
+});
+
+describe("collectTestFunctions (bounded-walk guard)", () => {
+  // T038 — the iteration-2 review-fix suite (F2; plan.md Scale/Scope;
+  // Constitution V): the collection walk is depth-bounded by the shared
+  // MAPPING_WALK_DEPTH_BUDGET (2000), so a programmatically pathological
+  // describe nest degrades to a per-file skip with exactly one diagnostic
+  // to the injected stderr — sibling files keep their tests, and the call
+  // never crashes. The fixture is generated, not spelled: nesting past
+  // the budget is not a shape anyone writes by hand.
+  const DEPTH = 2500;
+
+  function pathologicalNest(): string {
+    const open = Array.from(
+      { length: DEPTH },
+      (_, level) => `describe("d${level}", () => {`,
+    ).join("\n");
+    const close = Array.from({ length: DEPTH }, () => "});").join("\n");
+    return `${open}\nit("deep", () => {});\n${close}\n`;
+  }
+
+  it("skips a pathological describe nest whole, with exactly one diagnostic", async () => {
+    const sink = memorySink();
+    const tests = await collectFromTree(
+      {
+        "tests/pathological.test.ts": pathologicalNest(),
+        "tests/normal.test.ts": 'it("ok", () => {});\n',
+      },
+      "parse-only",
+      sink,
+    );
+    // The pathological file contributes nothing — including its shallow
+    // tail, since the skip unit is the FILE (the extractFromFile
+    // discipline) — while the sibling file's tests survive.
+    expect(identity(tests)).toEqual([
+      {
+        title: "ok",
+        qualifiedTitle: "ok",
+        relPath: "tests/normal.test.ts",
+        describeTitles: [],
+        line: 1,
+        index: 0,
+        hasCallback: true,
+      },
+    ]);
+    expect(sink.text()).toBe(
+      "reading-stone: skipping tests/pathological.test.ts: ast depth exceeds budget\n",
+    );
+  });
+
+  it("guards the program-mode walk identically", async () => {
+    // Both bootstrap modes share the one walk (research R5's parity), so
+    // the guard holds in checker mode too: the pathological file is
+    // served by the live compiler and skipped identically.
+    const sink = memorySink();
+    const tests = await collectFromTree(
+      {
+        "tests/pathological.test.ts": pathologicalNest(),
+        "tests/normal.test.ts": 'it("ok", () => {});\n',
+      },
+      "program",
+      sink,
+    );
+    expect(identity(tests)).toEqual([
+      {
+        title: "ok",
+        qualifiedTitle: "ok",
+        relPath: "tests/normal.test.ts",
+        describeTitles: [],
+        line: 1,
+        index: 0,
+        hasCallback: true,
+      },
+    ]);
+    expect(sink.text()).toBe(
+      "reading-stone: skipping tests/pathological.test.ts: ast depth exceeds budget\n",
+    );
   });
 });

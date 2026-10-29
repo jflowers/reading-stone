@@ -309,6 +309,57 @@ describe("testMapping", () => {
     ]);
   });
 
+  it("emits rows only for the first of two same-named methods in one file", async () => {
+    // T037 — the iteration-2 review-fix case (F1; FR-005 amended): two
+    // same-named class methods in ONE file are wire-indistinguishable
+    // targets — the pair set keeps the FIRST in analyze record order and
+    // collapses the later record (conservative imprecision: no
+    // wire-duplicate rows). The two methods carry DIFFERENT effect sets —
+    // A.render returns (ReturnValue), B.render logs (StdoutWrite) — so
+    // the emitted row's side_effect_type pins WHICH record won: only the
+    // first record's rows exist, and they say ReturnValue.
+    const sources: Readonly<Record<string, string>> = {
+      "src/ui.ts": [
+        "export class A {", // 1
+        "  render(): number {", // 2
+        "    return 1;", // 3
+        "  }", // 4
+        "}", // 5
+        "", // 6
+        "export class B {", // 7
+        "  render(): void {", // 8
+        '    console.log("b");', // 9
+        "  }", // 10
+        "}", // 11
+      ].join("\n"),
+      "tests/ui.test.ts": [
+        'import { A } from "../src/ui.js";', // 1
+        "", // 2
+        'it("render", () => {', // 3
+        "  expect(new A().render()).toBe(1);", // 4
+        "});", // 5
+      ].join("\n"),
+    };
+    const expected = [
+      {
+        test_function: "render",
+        test_file: "tests/ui.test.ts",
+        assertion_location: "tests/ui.test.ts:4",
+        assertion_type: "equality",
+        target_function: "render",
+        target_package: "src.ui",
+        side_effect_type: "ReturnValue",
+        confidence: 90,
+      },
+    ];
+
+    const checker = await mappingOf({ ...sources, "tsconfig.json": TSCONFIG });
+    expect(rows(checker.result)).toEqual(expected);
+
+    const parseOnly = await mappingOf(sources);
+    expect(rows(parseOnly.result)).toEqual(expected);
+  });
+
   it("reproduces identical serialized bytes across two full pipeline runs", async () => {
     // R10: the determinism golden — two complete testMapping calls, each
     // with its own prepareAnalysis walk, produce byte-identical serialized

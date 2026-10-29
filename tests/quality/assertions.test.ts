@@ -459,3 +459,53 @@ describe("suite", () => {
     expect(sites).toEqual([]);
   });
 });
+
+describe("collectAssertions (bounded-walk guard)", () => {
+  // T038 — the iteration-2 review-fix suite (F2; plan.md Scale/Scope;
+  // Constitution V): the assertion walk is depth-bounded by the shared
+  // MAPPING_WALK_DEPTH_BUDGET (2000), so a programmatically pathological
+  // callback subtree degrades to a per-test site discard with exactly one
+  // diagnostic to the injected stderr — sibling tests keep their sites,
+  // and the call never crashes.
+  it("discards only the pathological test's sites past the depth budget", async () => {
+    // 2500 nested parentheses — past the 2000 budget, trivially parseable
+    // by the native compiler (its stacks grow) — wrapping the asserted
+    // value so the subtree walk must recurse the full depth to reach the
+    // matcher.
+    const parens = "(".repeat(2500);
+    const closers = ")".repeat(2500);
+    const tests = await testsIn({
+      "tests/shallow.test.ts": 'it("shallow", () => {\n  expect(1).toBe(1);\n});\n',
+      "tests/deep.test.ts": `it("deep", () => {\n  expect(${parens}1${closers}).toBe(1);\n});\n`,
+    });
+    const shallow = tests.find((candidate) => candidate.title === "shallow");
+    const deep = tests.find((candidate) => candidate.title === "deep");
+    if (shallow === undefined || deep === undefined) {
+      throw new Error("fixture collected no shallow/deep tests");
+    }
+
+    const sink = memorySink();
+    // The pathological test's sites are discarded — `[]`, the same
+    // truthful shape as an assertion-free callback — with exactly one
+    // diagnostic naming the test (skip unit: the test, never the file,
+    // never the request).
+    expect(collectAssertions(deep, sink.stream)).toEqual([]);
+    expect(sink.text()).toBe(
+      "reading-stone: skipping assertions in tests/deep.test.ts:1: ast depth exceeds budget\n",
+    );
+
+    // The sibling test's sites collect normally on a clean sink — one
+    // pathological callback never contaminates its siblings.
+    const shallowSink = memorySink();
+    expect(shapeOf(collectAssertions(shallow, shallowSink.stream))).toEqual([
+      {
+        kind: "equality",
+        line: 2,
+        character: 2,
+        expectChain: true,
+        hasAssertedExpression: true,
+      },
+    ]);
+    expect(shallowSink.text()).toBe("");
+  });
+});
