@@ -1,0 +1,191 @@
+# Feature Specification: Test-to-Assertion Mapping (test_mapping)
+
+**Feature Branch**: `004-test-mapping`
+
+**Created**: 2026-10-29
+
+**Status**: Draft
+
+**Input**: User description: "Test-to-assertion mapping (`test_mapping` method) for vitest and jest test suites."
+
+**Originating issue**: [zero-dot-force/reading-stone#5](https://github.com/zero-dot-force/reading-stone/issues/5) — Test-to-assertion mapping (test_mapping method). Depends on #4 (classify_signals — closed and merged; local main already contains `src/signals/`, and this change builds on that state). The issue's proposed module layout (`src/quality/` package with `pairing.ts` / `assertions.ts` / `mapping.ts` / `pipeline.ts`) is implementation structure realized at plan time; this spec pins capabilities and wire contracts, not file paths.
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Exact mapping rows over the `test_mapping` method (Priority: P1)
+
+As Gaze (the consuming platform), when I send a `test_mapping` request carrying a project root and optional path patterns, I receive one mapping row per assertion in each paired test — the eight protocol keys (`test_function`, `test_file`, `assertion_location`, `assertion_type`, `target_function`, `target_package`, `side_effect_type`, `confidence`) with the pairing's exact integer confidence and the assertion's inferred canonical side-effect type — so that GazeCRAP and contract coverage compute for TypeScript projects from real test-to-assertion evidence. Today reading-stone advertises `test_mapping: false` and answers `-32601`, so the platform's quality path has no TypeScript analyzer feeding it (the reference Python analyzer, snake-eyes, is the precedent this ports).
+
+**Why this priority**: The method is the feature's entire protocol value — without it, Gaze cannot compute contract coverage from reading-stone at all. The method is also the constitution-sensitive core: Principle I demands the exact protocol row shape, deterministic ordering, and byte-identical repeat responses; Principle V demands the pipeline stay static (test files are untrusted input, never executed). The other three stories deepen the rows' breadth and truthfulness around this vertical slice.
+
+**Independent Test**: Can be fully tested by sending `test_mapping` requests over fixtures with known test-target pairs — conventional titles plus core `expect()` matchers — and asserting the exact returned rows (all eight keys), plus the capability-flag / reserved-method conformance checks, the shared `-32602` error table, and golden byte-identical repeat responses. No other story is required to observe value.
+
+**Acceptance Scenarios**:
+
+1. **Given** a fixture where `it("add", ...)` in a test file imports and calls the production function `add` (which has a `ReturnValue` effect) and asserts `expect(add(1, 2)).toBe(3)`, **When** `test_mapping` runs, **Then** exactly one row is returned: `test_function` `"add"`, `test_file` the root-relative POSIX path of the test file, `assertion_location` `"<path>:<line>"` of the `expect(` call, `assertion_type` `"equality"`, `target_function` `"add"`, `target_package` the dotted module path of the target's file, `side_effect_type` `"ReturnValue"`, `confidence` `90`.
+2. **Given** a paired test containing three assertions, **When** `test_mapping` runs, **Then** three rows are produced — the same `target_function` / `target_package` / `confidence` on all three, distinct `assertion_location` values in source order.
+3. **Given** a test that no pairing strategy matches, **When** the pipeline runs, **Then** that test produces no mapping rows — unpaired tests never emit confidence-0 rows.
+4. **Given** a `test_mapping` request with invalid params (non-object params, missing or non-string `root_path`, `patterns` present but not a string array, unknown keys, or an unusable root path), **When** handled, **Then** it is rejected with `-32602` per the shared analysis-params error table (spec 002 FR-027); analyzer-internal failures remain `-32603`.
+5. **Given** `initialize`, **When** called after this change, **Then** `capabilities.test_mapping` is `true` with the other five flags unchanged (`discover` and `classify_signals` stay `true`; `streaming`, `doc_coverage`, and `cognitive_complexity` stay `false`), and the reserved `-32601` set shrinks to exactly `analyze/stream`, `doc_coverage`, `cognitive_complexity`.
+6. **Given** the same tree analyzed twice, **When** the serialized responses are compared byte-for-byte, **Then** they are identical, with rows ordered by the stable key `(test_file, test_function, target_package, target_function, assertion source position)` (Constitution Principle I).
+7. **Given** a paired test whose target has no detected effects at all, **When** its value assertions are mapped, **Then** the rows still emit with the fallback `side_effect_type` (`ReturnValue`) — inference is total, never an omission (Constitution Principle II).
+8. **Given** a project with no test files, or with no production targets, **When** `test_mapping` runs, **Then** the result is `{"mappings": []}` — never an error.
+
+---
+
+### User Story 2 - Three pairing strategies with pinned confidences (Priority: P2)
+
+As the pipeline, I pair each collected test function with the production functions it exercises through three first-match-wins strategies — naming conventions (exact 90 / case-insensitive 70), direct calls (80), and the import graph (75) — so that mappings exist for conventionally-titled tests, call-driven tests, and import-driven tests alike, each pair carrying the confidence of the strategy that produced it.
+
+**Why this priority**: Name-convention pairing alone (US1's minimal slice) covers conventionally-written tests; the direct-call and import-graph strategies extend coverage to tests whose titles say nothing about their target. The pairing has no standalone protocol surface — its value is realized through US1's rows.
+
+**Independent Test**: Can be fully tested by unit-testing the pairing over multi-strategy fixture trees — one fixture per strategy (title-exact, title-case-only, call-only, import-only via a file-local helper), plus multi-target and deduplication fixtures — asserting exact confidences, first-match-wins behavior, and deterministic pair ordering.
+
+**Acceptance Scenarios**:
+
+1. **Given** a test whose title (or nearest enclosing `describe` title) exactly equals the target function's name, **When** paired, **Then** the pair carries confidence `90` — and the direct-call strategy does not also run or emit an `80` row for the same pair (first match wins).
+2. **Given** a test whose title matches the target name case-insensitively but not exactly, **When** paired, **Then** the pair carries confidence `70`.
+3. **Given** a test whose title matches no target but whose callback body contains a call expression resolving to the target, **When** paired, **Then** the pair carries confidence `80`.
+4. **Given** a test that references the target only through a file-local helper (no direct call, no title match) in a file that statically imports the target and references the imported binding somewhere in the file, **When** paired, **Then** the pair carries confidence `75` via the import-graph strategy.
+5. **Given** a test file importing two target-set functions but referencing only one of them anywhere in the file, **When** the import-graph strategy runs for a test not already paired, **Then** only the referenced import pairs — an unused import is dead evidence and pairs nothing.
+6. **Given** a strategy that matches multiple same-named targets across different packages, **When** pairs are emitted, **Then** each distinct `(target_package, target_function)` pairs, deterministically ordered by the analyze record order `(file, line, name)` — and no duplicate `(test_function, test_file, target_function)` pair ever exists.
+7. **Given** a test already paired by a higher-priority strategy, **When** lower-priority strategies would also match, **Then** the lower-priority strategies do not run for that test — evaluation stops at the first strategy with any match.
+
+---
+
+### User Story 3 - Assertion detection across vitest/jest and node:assert (Priority: P2)
+
+As the pipeline, I detect every assertion in each paired test — `expect()` chains with a matcher invocation and `node:assert` calls — classifying each into `equality`, `comparison`, `membership`, or `error_check` (empty string when unclassified), one row per assertion, so that zero-, partial-, and full-assertion-coverage projects are distinguishable and the platform's assertion-detection metric (which counts rows carrying a recognized type) sees real data.
+
+**Why this priority**: The breadth of recognized assertion forms determines how many rows carry a classified type; the core `expect().toBe` / `.toEqual` / `.toThrow` forms already flow through US1's slice. The four-kind vocabulary plus empty-string-unclassified is a deliberate divergence from the reference's six-value set, pinned by the originating issue.
+
+**Independent Test**: Can be fully tested by matcher-table fixtures — one per classification kind plus the unclassified, negated, awaited, and `resolves`/`rejects` forms, and `node:assert` fixtures — asserting the exact `assertion_type` per assertion, plus zero-, partial-, and full-assertion-coverage fixtures asserting the exact row sets.
+
+**Acceptance Scenarios**:
+
+1. **Given** `expect(x).toBe(y)`, `.toEqual(y)`, `.toStrictEqual(y)`, `.toBeCloseTo(y)`, `.toMatchObject(y)`, or the with-args mock matchers, **When** classified, **Then** `assertion_type` is `"equality"`.
+2. **Given** `expect(x).toBeGreaterThan(y)`, `.toBeGreaterThanOrEqual(y)`, `.toBeLessThan(y)`, or `.toBeLessThanOrEqual(y)`, **When** classified, **Then** `assertion_type` is `"comparison"`.
+3. **Given** `expect(x).toContain(y)`, `.toContainEqual(y)`, or `.toMatch(pattern)`, **When** classified, **Then** `assertion_type` is `"membership"`.
+4. **Given** `expect(fn).toThrow(...)` / `.toThrowError(...)` or `expect(promise).rejects.<any matcher>`, **When** classified, **Then** `assertion_type` is `"error_check"`; `expect(promise).resolves.<matcher>` preserves the matcher's own kind.
+5. **Given** `node:assert` calls — `assert.equal`, `assert.strictEqual`, `assert.deepEqual`, `assert.deepStrictEqual` (and their `not`-prefixed siblings), **When** classified, **Then** `assertion_type` is `"equality"`; `assert.throws`, `assert.doesNotThrow`, `assert.rejects`, `assert.doesNotReject` → `"error_check"`; `assert(value)`, `assert.ok(value)`, `assert.ifError(value)` → `""` (empty string).
+6. **Given** an unknown or custom matcher (for example from `expect.extend`) or a property/truthiness/occurrence matcher (`toBeTruthy`, `toBeDefined`, `toBeNaN`, `toHaveBeenCalled`, `toHaveBeenCalledTimes`, `toBeInstanceOf`), **When** classified, **Then** `assertion_type` is `""` — recognized assertion, unclassified kind.
+7. **Given** a negated assertion (`expect(x).not.toBe(y)` or `assert.notStrictEqual(a, b)`), **When** classified, **Then** the negation preserves the underlying kind (`"equality"` in both examples) — the `comparison` kind denotes ordered relations only.
+8. **Given** a paired test containing zero assertions, **When** rows are emitted, **Then** that test produces no rows (zero-assertion coverage); a fixture whose tests are partly asserting and partly empty produces rows only for the asserting tests (partial coverage); one whose every paired test asserts produces rows for all (full coverage).
+9. **Given** `expect(x)` with no matcher invocation on the chain, **When** assertions are collected, **Then** it is not an assertion and produces no row.
+10. **Given** an `expect()` chain containing two matcher invocations, or an awaited assertion (`await expect(...)...`), **When** collected, **Then** one row is emitted per matcher invocation, classified identically to its non-awaited form.
+
+---
+
+### User Story 4 - Assertion-to-effect inference through four provenance passes (Priority: P3)
+
+As the pipeline, I infer which side-effect type each assertion observes — tracing the asserted expression to the paired target's call through four passes in fixed order (direct identity, indirect root resolution, helper function bridging, inline call matching), with reference-pinned fallback chains when provenance fails — so that `side_effect_type` is truthful: assertions observing a generator's yielded sequence map `GeneratorYield`, error assertions map the error family, and value assertions on effect-less targets still map deterministically.
+
+**Why this priority**: The fallback chains are total (US1's rows already carry an inferred `side_effect_type` without provenance), so the passes deepen truthfulness rather than availability — they change outcomes where the return family and the first P0 effect compete, and for generator targets (the reference's hardest-learned lesson: mismatched inference silently zeroed contract coverage). No standalone protocol surface; realized through US1's rows.
+
+**Independent Test**: Can be fully tested by dedicated pass fixtures — one per pass, each pinning the resulting `side_effect_type` — plus generator-target fixtures, error-family fixtures, and fallback fixtures (no provenance, P0-only targets, effect-less targets), asserting exact `side_effect_type` values.
+
+**Acceptance Scenarios**:
+
+1. **Given** an assertion whose asserted expression is exactly a call to the paired target (`expect(target(...))` — direct identity), and a target carrying both `GeneratorYield` and a P0 effect but no `ReturnValue`, **When** inferred, **Then** `side_effect_type` is `"GeneratorYield"` (provenance prefers the return family).
+2. **Given** `const result = target(); expect(result.items).toContain(x)` (indirect root resolution — the asserted expression's root identifier is locally bound, possibly through `await` or a destructuring pattern, to the target's call), and a target with `ReturnValue`, **When** inferred, **Then** `side_effect_type` is `"ReturnValue"`.
+3. **Given** a file-local helper whose returned value derives from a direct call to the target, asserted in the test (helper function bridging), **When** inferred, **Then** `side_effect_type` is the target's return-family effect.
+4. **Given** an assertion with the target call nested inline within its argument subtree (`expect(list).toContain(target(item))` — inline call matching), **When** inferred, **Then** `side_effect_type` is the target's return-family effect.
+5. **Given** an `error_check` assertion on a target carrying `ErrorReturn`, **When** inferred, **Then** `side_effect_type` is `"ErrorReturn"`; with only `ErrorSignal`, `"ErrorSignal"`; with neither, the `"ErrorReturn"` fallback — error-family inference never requires provenance.
+6. **Given** a value assertion with no provenance through any pass on a target with no `ReturnValue` but at least one P0 effect, **When** inferred, **Then** `side_effect_type` is the target's first P0 effect (the standard fallback chain).
+7. **Given** provenance that succeeds on a target with no return-family effect present at all, **When** inferred, **Then** the standard fallback chain applies — provenance only reorders the return family ahead of it.
+8. **Given** provenance that would cross a nested function other than the single helper bridge, a mutable alias chain, or a control-flow merge, **When** inferred, **Then** the pass does not fire and the fallback chain governs — the boundary is conservative by design (unsupported provenance keeps the deterministic mapping rather than guessing).
+
+---
+
+### Edge Cases
+
+- What happens when no type checker is available (parse-only mode — no usable tsconfig)? Import-graph resolution and call resolution fall back to lexical name matching; pairing confidences are unchanged, and the provenance passes (AST-level) still run. Name collisions between local bindings and production functions are a documented parse-only false-positive surface (degradation reduces precision, never availability — spec 002 FR-004 philosophy).
+- What happens with two same-titled tests in different `describe` blocks? The describe-qualified title disambiguates them. Two same-titled siblings inside one `describe` share an identical `test_function` — a documented identity collision; their rows remain distinct by `assertion_location`.
+- What happens when a test's title argument is not a static string (computed at runtime)? The test is still collected with an empty title — never silently dropped (Constitution Principle II); pairing by naming conventions simply cannot fire for it.
+- What happens with parameterized tests (`it.each` / `test.each`)? One test function per callback — the `each` table multiplies runtime executions, not static structure; the title is the static template text.
+- What happens with assertions in `beforeEach` / `afterAll` hooks or at `describe` scope? They are outside every test callback's subtree and are not collected as any test's assertions (hooks are shared scaffolding, not tests).
+- What happens when a test file imports through a barrel re-export (`import { x } from "../src/index"`)? Checker-mode resolution follows the re-export to the declaring function; parse-only mode cannot cross the barrel (documented imprecision).
+- What happens with assertion libraries other than vitest/jest `expect` and `node:assert` (chai, should.js)? Out of scope — the originating issue pins vitest/jest plus `node:assert`; such assertions are simply not collected as assertions.
+- What happens with a paired target that has no detected effects? Value rows still emit with the `"ReturnValue"` fallback — inference is total (US1-7).
+- What happens when `patterns` matches no source files? The target set is empty, so no pairs form and the result is `{"mappings": []}`, never an error (spec 002 FR-001 prefix semantics).
+- What happens with mixed test frameworks in one tree (some files vitest-style, some jest-style)? Detection is syntax-driven — `it`/`test`/`describe` and `expect` are the same surface in both frameworks — and the discovered framework string is informational only.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+**Row model**
+
+- **FR-001**: Each element of `mappings` MUST be an object with exactly the keys `test_function`, `test_file`, `assertion_location`, `assertion_type`, `target_function`, `target_package`, `side_effect_type`, and `confidence`. `confidence` MUST be an integer in [0, 100]. `assertion_type` MUST be exactly one of `equality`, `comparison`, `membership`, `error_check`, or the empty string (unclassified — never `generic`, never `null`). `side_effect_type` MUST be one of the 48 canonical taxonomy names (aliases never emitted). `assertion_location` MUST be formatted `<path>:<line>` with the path relative to `root_path` and no column component; `test_file` MUST be a root-relative POSIX path. One row MUST be emitted per (paired test, assertion) pair — a test with three assertions yields three rows sharing target fields with distinct `assertion_location` values. Row serialization MUST fail loud on invalid field content (closed kind set, canonical type membership, integer confidence), mirroring the existing serializer conventions (Constitution Principle I).
+
+**Test-function collection**
+
+- **FR-002**: The pipeline MUST collect as test functions every callback passed to an `it` / `test` invocation in discovered test files, including modifier variants (`it.only`, `it.skip`, `it.concurrent`, `it.fails`, `test.each`, `it.each`, and siblings). `describe` callbacks are containers, not tests; `beforeEach` / `afterEach` / `beforeAll` / `afterAll` hooks and `bench` callbacks are not tests. The title is the invocation's first argument when it is a string literal or template literal (static text); a non-static first argument yields an empty title and the test is still collected — never dropped (Constitution Principle II).
+- **FR-003**: `test_function` MUST be the describe-qualified title: enclosing `describe` titles joined with `" > "` from outermost to innermost, then the `it` / `test` title; a top-level test's identity is its bare title. This mirrors the reference analyzer's class-qualified identity rule and keeps the pairing de-duplication key unambiguous for same-titled tests in different scopes.
+
+**Pairing**
+
+- **FR-004**: The pipeline MUST pair test functions with production targets through three strategies evaluated in fixed priority order — (1) naming conventions, (2) direct calls, (3) import graph — first-match-wins per test function: evaluation stops at the first strategy with any match, and only that strategy's pairs are emitted. The naming-conventions strategy pairs a test whose title or nearest enclosing `describe` title equals a target function's name — exact match confidence `90`, case-insensitive-only match `70`. The direct-calls strategy pairs a test whose callback body contains a call expression resolving to the target — confidence `80`. The import-graph strategy pairs a test (not already paired) whose file statically imports a target-set function and references that binding somewhere in the file outside the import clause — confidence `75`.
+- **FR-005**: When a single strategy matches multiple targets, each distinct `(target_package, target_function)` MUST be paired, deterministically ordered by the analyze record order `(file, line, name)`. No duplicate `(test_function, test_file, target_function)` pair may exist. A test matched by no strategy produces no mapping rows — never confidence-0 rows.
+- **FR-006**: Production targets MUST be the function set the shared analysis pipeline extracts over the discovered, exclusion-screened, pattern-filtered source arm (the identical `analyze` file set — spec 003's file-set parity). Test functions MUST be collected over the discovered, exclusion-screened test arm in full — `patterns` narrow the target arm only (a pattern excluding tests would sever the mapping input, not narrow it). Generated and skipped files are excluded from both arms by the existing screening.
+
+**Assertion detection**
+
+- **FR-007**: The pipeline MUST collect assertions from each paired test's callback subtree (including nested function expressions within it; hooks and describe-scope statements excluded): (a) `expect(...)` chains on which a matcher method is invoked — one row per matcher invocation — and (b) `node:assert` / `node:assert/strict` calls (`assert(...)`, `assert.ok`, `assert.equal`, `assert.throws`, and siblings), recognized through import resolution when a type checker is available and by local-name matching in parse-only mode. An `expect(...)` with no matcher invocation is not an assertion. The complete matcher / assert-form classification table MUST be pinned as normative data in this feature's data model, with every standard vitest/jest matcher and `node:assert` function routed to a kind or explicitly to none.
+- **FR-008**: `assertion_type` classification MUST follow the pinned table and its principles: two-argument value-comparison matchers route to their comparison kind (`equality` — `toBe`, `toEqual`, `toStrictEqual`, `toBeCloseTo`, `toMatchObject`, with-args mock matchers, `assert.equal` / `strictEqual` / `deepEqual` / `deepStrictEqual` and `not`-siblings; `comparison` — the `toBeGreaterThan` / `toBeLessThan` families; `membership` — `toContain`, `toContainEqual`, `toMatch`); error-shaped forms route to `error_check` (`toThrow`, `toThrowError`, `assert.throws` / `doesNotThrow` / `rejects` / `doesNotReject`, and every matcher under `.rejects`); property, truthiness, type, and bare-occurrence forms (`assert(value)`, `assert.ok`, `assert.ifError`, `toBeTruthy`, `toBeDefined`, `toBeNaN`, `toBeInstanceOf`, `toHaveBeenCalled`, `toHaveBeenCalledTimes`) and unknown or custom matchers route to the empty string. Negation (`.not.` and `not`-prefixed assert functions) preserves the underlying kind; `.resolves.` preserves the matcher's kind; `.rejects.` routes to `error_check`.
+
+**Effect-type inference**
+
+- **FR-009**: For `error_check` rows, `side_effect_type` MUST be `ErrorReturn` when the target carries it, else `ErrorSignal` when the target carries it, else the `ErrorReturn` fallback — the error family is selected by assertion type alone, never by provenance.
+- **FR-010**: For value-kind rows (`equality`, `comparison`, `membership`, and the empty string) with no established provenance, `side_effect_type` MUST follow the standard fallback chain: `ReturnValue` when the target carries it, else the target's first P0 effect, else `GeneratorYield`, else `AsyncGeneratorYield`, else the `ReturnValue` fallback — the reference analyzer's final semantics, generator-awareness included.
+- **FR-011**: For value-kind rows, the pipeline MUST establish provenance through four passes in fixed order — (1) direct identity: the asserted expression is exactly a call to the paired target; (2) indirect root resolution: the asserted expression's root identifier is locally bound in the test function to the target's call result, with `await` wrappers and destructuring patterns transparent; (3) helper function bridging: the root resolves through a single file-local helper whose returned value derives from a direct call to the target; (4) inline call matching: the target call appears inline within the assertion's argument subtree. When a pass succeeds, the return family (`ReturnValue` → `GeneratorYield` → `AsyncGeneratorYield`) MUST be preferred ahead of the FR-010 chain, falling through to it when no return-family effect is present. Provenance MUST NOT cross nested functions other than the single helper bridge, mutable alias chains, or control-flow merges — unsupported provenance falls back deterministically rather than guessing.
+
+**Pipeline and method**
+
+- **FR-012**: The pipeline MUST orchestrate the stages — target analysis over the shared `prepareAnalysis` pipeline, test-function collection over the test arm, pairing, assertion detection, effect-type inference, row assembly — and MUST remain strictly static: test files are untrusted input, parsed with the TypeScript compiler API, never executed or imported (Constitution Principle V).
+- **FR-013**: The dispatch layer MUST register a `test_mapping` handler accepting the shared analysis params (`root_path` required string, `patterns` optional string array) with the same validation and `-32602` error table as `analyze` (spec 002 FR-027); analyzer-internal failures remain `-32603`. The result MUST be `{"mappings": [...]}` with each row shaped per FR-001, deterministically ordered by the stable key `(test_file, test_function, target_package, target_function, assertion source position)`, and byte-identical across repeated requests over the same tree (Constitution Principle I).
+- **FR-014**: The `initialize` capability response MUST advertise `test_mapping: true` with the other five flags unchanged (`discover` and `classify_signals` stay `true`; `streaming`, `doc_coverage`, and `cognitive_complexity` stay `false`); the reserved `-32601` set MUST shrink to exactly `analyze/stream`, `doc_coverage`, `cognitive_complexity`.
+
+**Bookkeeping and quality gates**
+
+- **FR-015**: The materialized OpenSpec specifications that currently assert `test_mapping` answers `-32601` and advertises `test_mapping: false` MUST be updated in the same change (cross-pipeline bookkeeping, mirroring spec 002 FR-031 and spec 003 FR-017).
+- **FR-016**: All protected project quality gates MUST pass — `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage` at the protected 85% thresholds (lines, statements, functions, branches). The implementation plan MUST specify the coverage strategy for the new modules (Constitution Principle IV).
+
+### Key Entities
+
+- **MappingRow**: The eight-key wire record — `test_function`, `test_file`, `assertion_location`, `assertion_type`, `target_function`, `target_package`, `side_effect_type`, `confidence`. First produced by this feature.
+- **TestFunction** (internal, not protocol-visible): an `it` / `test` callback's identity — describe-qualified title, file, line — collected over the test arm.
+- **Pairing** (internal): a (test function, target function) relationship with the producing strategy and its integer confidence.
+- **AssertionSite** (internal): one collected assertion — the `expect` chain or `node:assert` call, its classified kind (or empty string), and its source location.
+- **MatcherTable** (internal, normative data): assertion form → classification kind; every standard vitest/jest matcher and `node:assert` function routed to a kind or explicitly to none, pinned in this feature's data model (the FR-007 routing-table pattern from spec 003).
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: The known-pairs fixture suite passes with 100% exact-match on rows — every fixture pins the full eight-key row including the pairing confidence, so the expected output is exact.
+- **SC-002**: The assertion-coverage fixtures pass — zero-, partial-, and full-assertion-coverage fixtures produce exactly the expected row sets (empty, the asserting subset, and all tests respectively).
+- **SC-003**: The four provenance-pass fixtures pass — one fixture per pass (direct identity, indirect root resolution, helper function bridging, inline call matching), each pinning the resulting `side_effect_type`, plus the generator-target and fallback fixtures (error family, P0-only, effect-less targets).
+- **SC-004**: The pairing-strategy fixtures pass — exact confidences 90 / 70 / 80 / 75, first-match-wins, multi-target ordering, and zero duplicate pairs.
+- **SC-005**: The protocol conformance suite passes — `test_mapping: true` with the other five flags unchanged, the reserved `-32601` set exactly the three remaining names, the shared `-32602` error table, and golden byte-identical repeat responses.
+- **SC-006**: All protected project quality gates pass — `npx biome check src/ tests/`, `npm run build`, and `npx vitest run --coverage` at the protected 85% thresholds (lines, statements, functions, branches).
+
+## Assumptions
+
+1. **Result envelope**: `{"mappings": [...]}` exactly — protocol v1.2.0's established shape. The reference analyzer's later `assertion_detection_confidence` envelope extension is NOT adopted: the platform computes that metric from mapping rows' recognized assertion types, so the empty-string-unclassified convention is what feeds it (the deliberate reason for empty string over the reference's `generic`).
+2. **Assertion-type vocabulary**: four kinds — `equality`, `comparison`, `membership`, `error_check` — plus the empty string for unclassified. Two deliberate divergences from the reference's six-value set: no `generic` (the originating issue pins empty-string-when-unclassified) and no `identity` (Python's `is`-operator bucket has no distinct vitest/jest analog — `toBe` / `Object.is` is documented by both frameworks as strict equality and routes to `equality`).
+3. **Negation semantics**: negation (`.not.` and `not`-prefixed assert functions) preserves the underlying kind; the `comparison` kind denotes ordered relations only. This diverges from the reference's `assert x != y → comparison`, which mapped a distinct Python syntactic form rather than a modifier on an equality check.
+4. **`resolves` / `rejects`**: `.resolves.` preserves the matcher's kind; `.rejects.` routes to `error_check` (the assertion is about the rejection channel).
+5. **Mock-interaction matchers**: with-args forms (`toHaveBeenCalledWith` and siblings) route to `equality` (they assert an exact argument match); bare occurrence and count forms (`toHaveBeenCalled`, `toHaveBeenCalledTimes`, `toHaveReturned`) route to the empty string.
+6. **Pairing strategy priority**: naming conventions → direct calls → import graph (90 / 70, 80, 75), first-match-wins per test — the reference analyzer's design with its confidence pinning. The issue's list order ("naming conventions, import graph, direct calls") is enumeration, not priority: an import binding alone is weaker evidence than a direct call, so direct calls outrank it.
+7. **Import-graph strategy scope**: file-level static imports of target-set functions, restricted to bindings referenced somewhere in the test file outside the import clause; every test in the file not already paired by a higher-priority strategy pairs with each such target. This is the TypeScript-native realization of the reference's broad graph strategy, powers helper-bridged tests, and stays bounded by actual file usage — an unused import pairs nothing.
+8. **Test-function identity**: the describe-qualified title (`"outer > inner > title"`, bare title at top level), mirroring the reference's `ClassName.method_name` disambiguation rule. Non-static titles collect with an empty title rather than being dropped.
+9. **`patterns` scope**: patterns narrow the target (source) arm exactly as `analyze` does; the test arm is the full discovered, exclusion-screened test set — a pattern set that excluded test files would sever the mapping input rather than narrow it.
+10. **The four mapping passes** are provenance passes over the asserted expression, pinned by FR-011 (the issue names them without definitions; the semantics are this spec's informed pinning, grounded in the reference's target-result tracing plus the issue's explicit helper-bridging extension, which the reference had deliberately excluded). Their observable effect: successful provenance prefers the return family (`ReturnValue` → `GeneratorYield` → `AsyncGeneratorYield`) ahead of the standard fallback chain.
+11. **Fallback chains**: value rows without provenance follow the reference's final semantics — `ReturnValue` → first P0 effect → `GeneratorYield` → `AsyncGeneratorYield` → `ReturnValue` fallback (generator-awareness built in from the start; the reference learned this the hard way when mismatched inference silently zeroed contract coverage for generator targets). Error rows follow `ErrorReturn` → `ErrorSignal` → `ErrorReturn` fallback and never require provenance.
+12. **Container-mutation refinement is out of scope**: the reference's later container-state refinement (mapping membership / size / subscript observations of returned containers to `ContainerMutation`) was a separate follow-up change there and is deferred the same way here; this feature's inference covers the return family and the fallback chains only.
+13. **Assertion collection scope**: the paired test's callback subtree, one row per matcher invocation or assert call; hooks and describe-scope statements are excluded (shared scaffolding, not any one test's assertions).
+14. **Assertion-library scope**: vitest/jest `expect` and `node:assert` / `node:assert/strict` only, per the originating issue; chai, should.js, and other libraries are out of scope, and their calls are simply not collected.
+15. **Module layout at plan time**: the issue's proposed `src/quality/` package (`pairing.ts`, `assertions.ts`, `mapping.ts`, `pipeline.ts`) is realized (and may be adjusted) at plan time; this spec pins capabilities and wire contracts, not file paths.
+16. **Cross-pipeline bookkeeping**: the materialized OpenSpec server/protocol specs assert the current dispatch/capability state and MUST be updated in the same change (FR-015); this specification records the impact but does not modify those files.
+17. **Confidence semantics**: a row's `confidence` is the pairing confidence — the strategy-derived integer for the (test, target) pair; every assertion row from one pair shares it. The reference emits no per-assertion confidence, and neither does this feature.
