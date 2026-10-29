@@ -46,6 +46,16 @@ import { type ClassifySignalsResult, serializeSignal } from "./signals/types.js"
  * NOT exist between modules): this module imports the core, and nothing
  * under src/signals/ imports this module back, so the classify_signals
  * flow is acyclic end to end.
+ *
+ * Spec 004 (T005) adds the one widening every mapping stage consumes
+ * (FR-006): an optional `options` parameter whose `includeTestArm` flag
+ * admits the discovered test arm to the bootstrap — program mode's
+ * extender-config `files` root set and the parse-only sources map both
+ * derive from the same pre-read list — while the extraction records stay
+ * narrowed to the in-scope source set, so the target set remains the
+ * identical `analyze` file set. The flag is opt-in: the three method
+ * entries below pass nothing and observe only the inert
+ * `testPaths: []` result field.
  */
 
 /**
@@ -190,6 +200,39 @@ export interface PreparedAnalysis {
    * behavior is unchanged.
    */
   readonly rootPath: string;
+
+  /**
+   * The discovered, exclusion-screened test arm in classifyFiles' sorted
+   * order (spec 004 FR-006): `[]` unless the caller passed
+   * `{ includeTestArm: true }`. Pattern-UNfiltered by contract —
+   * `patterns` narrow the target arm only, so a pattern set naming test
+   * files still yields the full test arm here. Generated and skipped
+   * files are excluded by the screening both arms share. A purely
+   * additive widening: consumers that pass no flag observe only this
+   * inert empty field, and their behavior is unchanged.
+   */
+  readonly testPaths: readonly string[];
+}
+
+/**
+ * The `prepareAnalysis` widening options (spec 004 FR-006; research R2):
+ * the opt-in switch that admits the test arm to the bootstrap. The
+ * mapping pipeline (`test_mapping`, spec 004) is the consumer that sets
+ * it; every other caller passes nothing and observes no behavior change
+ * beyond the inert `testPaths: []` result field.
+ */
+export interface PrepareAnalysisOptions {
+  /**
+   * When `true`, the discovered, exclusion-screened test arm is pre-read
+   * through the same bounded `readBounded` and appended to the bootstrap
+   * input (sorted source arm, then sorted test arm), so the program
+   * mode's extender-config `files` root set and the parse-only sources
+   * map both admit the test files — checker queries can resolve
+   * test-file imports and calls. The extraction records are STILL
+   * narrowed to the in-scope source set: the target set remains the
+   * identical `analyze` file set, record-for-record.
+   */
+  readonly includeTestArm: boolean;
 }
 
 /**
@@ -243,9 +286,13 @@ export interface PreparedAnalysis {
  * normalizes.
  * @param stderr Injected diagnostic sink (Testability principle); defaults
  * to `process.stderr`.
+ * @param options The widening options (spec 004 FR-006); omitted by the
+ * analyze/complexity/classify_signals callers, which observe no behavior
+ * change beyond the inert `testPaths: []` result field.
  * @returns The bootstrapped `ProgramContext`, the extraction records, the
- * in-scope file set (spec 003 FR-016's file-set parity), and the
- * realpath-resolved analysis root.
+ * in-scope file set (spec 003 FR-016's file-set parity), the
+ * realpath-resolved analysis root, and the test arm (`[]` unless
+ * `{ includeTestArm: true }` was passed).
  * @throws InvalidRootPathError when the root does not exist, is not a
  * directory, or cannot be accessed; the server handler maps it to the
  * contract's `-32602` response.
@@ -254,6 +301,7 @@ export async function prepareAnalysis(
   rootPath: string,
   patterns: unknown,
   stderr: Writable = process.stderr,
+  options?: PrepareAnalysisOptions,
 ): Promise<PreparedAnalysis> {
   const realRoot = await resolveRoot(rootPath);
   const candidates = await walkTree(realRoot);
@@ -263,14 +311,23 @@ export async function prepareAnalysis(
   // test/source partition, so taking the one arm is the whole exclusion,
   // with no second copy of the test signals to drift. Generated files
   // were already screened out above; test files and generated files are
-  // never analyzed.
-  const { sourceFiles } = classifyFiles(surviving);
+  // never analyzed. Spec 004's widening (FR-006) captures the other arm
+  // for the opt-in caller: the test arm flows to the bootstrap and back
+  // as `testPaths`, pattern-UNfiltered — patterns narrow the target arm
+  // only.
+  const { sourceFiles, testFiles } = classifyFiles(surviving);
   // FR-001 narrows within the analyzable set, after the structural
   // exclusion: the same normalize-then-test pair every pattern-filtered
   // method applies, over the sorted source list (deterministic order).
   const patternSet = normalizePatterns(patterns);
   const inScope = sourceFiles.filter((relPath) => pathInScope(relPath, patternSet));
-  const preRead = await preReadSources(realRoot, inScope, stderr);
+  const testArm = options?.includeTestArm === true ? testFiles : [];
+  // The bootstrap input is deterministic in both modes: the sorted
+  // source arm, then the sorted test arm. Program mode derives the
+  // extender config's `files` root set from this list (so the test arm
+  // enters the configured program); parse-only mode derives its
+  // root-relative sources map from it identically.
+  const preRead = await preReadSources(realRoot, [...inScope, ...testArm], stderr);
   const context = buildProgramContext(realRoot, preRead, stderr);
   let records: ExtractionRecord[];
   try {
@@ -287,17 +344,25 @@ export async function prepareAnalysis(
   }
   // FR-001/FR-022's scope guarantee over the configured program: the program
   // arm can contain pattern-excluded in-root files — transitive imports the
-  // hermetic host serves on demand (src/program.ts) — and extraction's walk
-  // is root-containment scoped (src/extract.ts), so the record set is
-  // narrowed here to the identical in-scope list the pattern filter
-  // produced. The parse-only arm needs no narrowing: its hermetic view
-  // exposes in-scope sources only, so extraction cannot see beyond scope
-  // there. Both modes' record sets ARE the in-scope set — what FR-022's
-  // same-extraction-set guarantee and spec 003 US3-7's identical-file-set
-  // guarantee both rest on.
+  // hermetic host serves on demand (src/program.ts) — and, under spec 004's
+  // widening, the admitted test arm; extraction's walk is root-containment
+  // scoped (src/extract.ts), so the record set is narrowed here to the
+  // identical in-scope list the pattern filter produced. The parse-only arm
+  // needs no narrowing: its hermetic view exposes in-scope sources only, so
+  // extraction cannot see beyond scope there. Both modes' record sets ARE
+  // the in-scope set — what FR-022's same-extraction-set guarantee, spec
+  // 003 US3-7's identical-file-set guarantee, and spec 004 FR-006's
+  // target-parity guarantee (the widened call reports `analyze`'s records
+  // record-for-record) all rest on.
   const inScopeSet = new Set(inScope);
   records = records.filter((record) => inScopeSet.has(record.relPath));
-  return { context, records, inScopePaths: inScope, rootPath: realRoot };
+  return {
+    context,
+    records,
+    inScopePaths: inScope,
+    rootPath: realRoot,
+    testPaths: testArm,
+  };
 }
 
 /**
