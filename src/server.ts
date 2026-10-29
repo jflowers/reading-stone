@@ -18,6 +18,7 @@ import {
   shutdownResult,
   successResponse,
 } from "./protocol.js";
+import { classifySignals } from "./signals/adapter.js";
 
 export class RpcError extends Error {
   readonly code: number;
@@ -343,6 +344,34 @@ export class Server {
         // never stdout, which is reserved for JSON-RPC responses
         // (FR-017).
         return { functions: await parseCoverage(rootPath, patterns, this.stderr) };
+      } catch (error) {
+        throw mapRootPathError(error) ?? error;
+      }
+    });
+    // `classify_signals` (FR-014/FR-015; research R11; contracts/
+    // classify-signals.md error table): the SAME shared analysis-params
+    // validation as analyze/complexity/coverage, then the T029 adapter
+    // entry — the identical pipeline stages analyze runs, emitting the
+    // raw pair-keyed signal feed — wrapped as `{"signals": [...]}`.
+    // Unlike the core analysis methods, this one is capability-gated from
+    // the platform's side (Gaze calls it when and only when the
+    // initialize flag is true, FR-015), so initializeResult() advertises
+    // `classify_signals: true` in the same protocol-state unit as this
+    // registration — no commit advertises a capability the dispatch table
+    // lacks. The method registers unconditionally: no runtime toggle.
+    dispatch.set("classify_signals", async (params) => {
+      const { rootPath, patterns } = validateAnalysisParams(params);
+      try {
+        // classifySignals (T029) runs the identical prepareAnalysis →
+        // detectEffects → signal-core stages analyze runs (FR-013's
+        // one-pipeline guarantee is structural), so the two methods can
+        // never disagree about which functions or effects exist. Its
+        // result is already the serialized, wire-shaped signal array
+        // (T004), so the sorted-key envelope serializer only re-orders
+        // keys — repeated requests stay byte-identical (SC-005). Skip
+        // diagnostics flow to the server's stderr, never stdout, which
+        // is reserved for JSON-RPC responses (FR-017).
+        return { signals: await classifySignals(rootPath, patterns, this.stderr) };
       } catch (error) {
         throw mapRootPathError(error) ?? error;
       }
