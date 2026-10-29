@@ -709,3 +709,303 @@ describe("collectTestFunctions (bounded-walk guard)", () => {
     );
   });
 });
+
+describe("collectTestFunctions (control-flow interiors)", () => {
+  // T040/T041 (iteration-3 F3; FR-002 as amended; research R3's walk
+  // domain; data-model.md Section 5.1): the walk descends into the
+  // conservative control-flow interiors — `if`/`else` branches,
+  // `for`/`for-of`/`for-in`/`while`/`do-while` loop bodies, and plain
+  // blocks — within the file top level AND describe callback bodies,
+  // collecting the it/test/describe invocations found at
+  // expression-statement position within them (the loop-registration
+  // form vitest itself documents: `for (const c of cases) it(c.label,
+  // fn)`). `switch`, `try`/`catch`/`finally`, and labeled statements stay
+  // OUTSIDE the domain (iteration-3 F2 — the deliberately conservative
+  // enumeration: anything not enumerated is not walked), and nested
+  // function bodies — helpers — are never entered: a helper is a
+  // different scope, not a container.
+
+  it("collects a for-of registered it at top level, non-static title as empty string", async () => {
+    // Line-indexed fixture (each entry's 1-based index IS its line): the
+    // loop-registered test's title is the non-static `c.label`, so the
+    // static-text rule yields `""` — availability first, never dropped
+    // (FR-002).
+    const tests = await collectFromTree({
+      "tests/for-of.test.ts": [
+        'const cases = [{ label: "a" }, { label: "b" }];',
+        "for (const c of cases) {",
+        "  it(c.label, () => {",
+        "    expect(1).toBe(1);",
+        "  });",
+        "}",
+        "",
+      ].join("\n"),
+    });
+    expect(identity(tests)).toEqual([
+      {
+        title: "",
+        qualifiedTitle: "",
+        relPath: "tests/for-of.test.ts",
+        describeTitles: [],
+        line: 3,
+        index: 0,
+        hasCallback: true,
+      },
+    ]);
+  });
+
+  it("collects if-gated tests from both branches", async () => {
+    const tests = await collectFromTree({
+      "tests/gated.test.ts": [
+        "const focused = process.env.FOCUS !== undefined;",
+        "if (focused) {",
+        '  it("gated test", () => {',
+        "    expect(1).toBe(1);",
+        "  });",
+        "} else {",
+        '  it("other branch", () => {});',
+        "}",
+        "",
+      ].join("\n"),
+    });
+    // The walk is static — both branches are walked; the runtime guard is
+    // never evaluated (Constitution V: analyzed source is never run).
+    expect(identity(tests)).toEqual([
+      {
+        title: "gated test",
+        qualifiedTitle: "gated test",
+        relPath: "tests/gated.test.ts",
+        describeTitles: [],
+        line: 3,
+        index: 0,
+        hasCallback: true,
+      },
+      {
+        title: "other branch",
+        qualifiedTitle: "other branch",
+        relPath: "tests/gated.test.ts",
+        describeTitles: [],
+        line: 7,
+        index: 1,
+        hasCallback: true,
+      },
+    ]);
+  });
+
+  it("collects control flow inside describe bodies with qualification", async () => {
+    const tests = await collectFromTree({
+      "tests/nested-control.test.ts": [
+        'describe("suite", () => {',
+        "  for (const c of [1, 2]) {",
+        `    it(\`case \${c}\`, () => {});`,
+        "  }",
+        "  if (process.env.CI === undefined) {",
+        '    it("local only", () => {});',
+        "  }",
+        "});",
+        "",
+      ].join("\n"),
+    });
+    // The describe stack applies unchanged through control-flow interiors:
+    // the substituted template title joins verbatim as the empty segment
+    // (FR-003), the static title qualifies normally.
+    expect(identity(tests)).toEqual([
+      {
+        title: "",
+        qualifiedTitle: "suite > ",
+        relPath: "tests/nested-control.test.ts",
+        describeTitles: ["suite"],
+        line: 3,
+        index: 0,
+        hasCallback: true,
+      },
+      {
+        title: "local only",
+        qualifiedTitle: "suite > local only",
+        relPath: "tests/nested-control.test.ts",
+        describeTitles: ["suite"],
+        line: 6,
+        index: 1,
+        hasCallback: true,
+      },
+    ]);
+  });
+
+  it("does not collect from helper function bodies", async () => {
+    const tests = await collectFromTree({
+      "tests/helper.test.ts": [
+        "function makeCase(label: string): void {",
+        "  it(label, () => {",
+        "    expect(1).toBe(1);",
+        "  });",
+        "}",
+        "const helper = (): void => {",
+        '  it("arrow helper", () => {});',
+        "};",
+        'it("real test", () => {});',
+        "",
+      ].join("\n"),
+    });
+    // A helper is a different scope, never a container (research R3): the
+    // declared function's body and the arrow assigned to a const are both
+    // outside the statement-level walk — only the real top-level test
+    // collects.
+    expect(identity(tests)).toEqual([
+      {
+        title: "real test",
+        qualifiedTitle: "real test",
+        relPath: "tests/helper.test.ts",
+        describeTitles: [],
+        line: 9,
+        index: 0,
+        hasCallback: true,
+      },
+    ]);
+  });
+
+  it("collects from every enumerated loop kind and plain blocks", async () => {
+    const tests = await collectFromTree({
+      "tests/loops.test.ts": [
+        "for (let i = 0; i < 1; i++) {",
+        '  it("classic for", () => {});',
+        "}",
+        "for (const key in { a: 1 }) {",
+        '  it("for-in", () => {});',
+        "}",
+        "while (false) {",
+        '  it("while", () => {});',
+        "}",
+        "do {",
+        '  it("do-while", () => {});',
+        "} while (false);",
+        "{",
+        '  it("plain block", () => {});',
+        "}",
+        "",
+      ].join("\n"),
+    });
+    // All five enumerated interior kinds collect, in source order; the
+    // statically-false guards are irrelevant — the walk never evaluates
+    // conditions (Constitution V).
+    expect(identity(tests)).toEqual([
+      {
+        title: "classic for",
+        qualifiedTitle: "classic for",
+        relPath: "tests/loops.test.ts",
+        describeTitles: [],
+        line: 2,
+        index: 0,
+        hasCallback: true,
+      },
+      {
+        title: "for-in",
+        qualifiedTitle: "for-in",
+        relPath: "tests/loops.test.ts",
+        describeTitles: [],
+        line: 5,
+        index: 1,
+        hasCallback: true,
+      },
+      {
+        title: "while",
+        qualifiedTitle: "while",
+        relPath: "tests/loops.test.ts",
+        describeTitles: [],
+        line: 8,
+        index: 2,
+        hasCallback: true,
+      },
+      {
+        title: "do-while",
+        qualifiedTitle: "do-while",
+        relPath: "tests/loops.test.ts",
+        describeTitles: [],
+        line: 11,
+        index: 3,
+        hasCallback: true,
+      },
+      {
+        title: "plain block",
+        qualifiedTitle: "plain block",
+        relPath: "tests/loops.test.ts",
+        describeTitles: [],
+        line: 14,
+        index: 4,
+        hasCallback: true,
+      },
+    ]);
+  });
+
+  it("stays outside switch, try/catch/finally, and labeled interiors", async () => {
+    const tests = await collectFromTree({
+      "tests/excluded.test.ts": [
+        "switch (process.platform) {",
+        '  case "darwin":',
+        '    it("darwin only", () => {});',
+        "    break;",
+        "}",
+        "try {",
+        '  it("in try", () => {});',
+        "} catch {",
+        '  it("in catch", () => {});',
+        "} finally {",
+        '  it("in finally", () => {});',
+        "}",
+        "label: {",
+        '  it("labeled", () => {});',
+        "}",
+        'it("after", () => {});',
+        "",
+      ].join("\n"),
+    });
+    // Iteration-3 F2: `switch`, `try`/`catch`/`finally`, and labeled
+    // statements are OUTSIDE the walk domain — the enumeration is
+    // deliberately conservative, so their interiors contribute nothing
+    // even at expression-statement position. Only the plain top-level
+    // test collects.
+    expect(identity(tests)).toEqual([
+      {
+        title: "after",
+        qualifiedTitle: "after",
+        relPath: "tests/excluded.test.ts",
+        describeTitles: [],
+        line: 16,
+        index: 0,
+        hasCallback: true,
+      },
+    ]);
+  });
+
+  it("collects control-flow interiors through program mode identically", async () => {
+    // Both bootstrap modes share the one walk (research R5's parity), so
+    // the broadened domain holds in checker mode too — the loop-registered
+    // test is served by the live compiler and collected identically.
+    const tests = await collectFromTree(
+      {
+        "src/cases.ts": 'export const cases = ["a", "b"];\n',
+        "tests/cases.test.ts": [
+          'import { cases } from "../src/cases.js";',
+          "",
+          "for (const label of cases) {",
+          "  it(label, () => {",
+          "    expect(label.length).toBeGreaterThan(0);",
+          "  });",
+          "}",
+          "",
+        ].join("\n"),
+      },
+      "program",
+    );
+    expect(identity(tests)).toEqual([
+      {
+        title: "",
+        qualifiedTitle: "",
+        relPath: "tests/cases.test.ts",
+        describeTitles: [],
+        line: 4,
+        index: 0,
+        hasCallback: true,
+      },
+    ]);
+  });
+});

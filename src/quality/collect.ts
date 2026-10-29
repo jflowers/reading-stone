@@ -35,15 +35,25 @@
 //   callbacks, including expression-bodied describe callbacks
 //   (`describe("a", () => it("b", fn))`). `bench` and the four hooks are
 //   excluded by callee root.
+// - The walk descends into control-flow interiors (T040/T041;
+//   iteration-3 F3): `if`/`else` branches, `for`/`for-of`/`for-in`/
+//   `while`/`do-while` loop bodies, and plain blocks — within the file
+//   top level and describe callback bodies alike — collecting the
+//   invocations found at expression-statement position within them
+//   (loop-registered tests: `for (const c of cases) it(c.label, fn)`).
+//   `switch`, `try`/`catch`/`finally`, and labeled statements stay
+//   OUTSIDE the domain (iteration-3 F2 — the deliberately conservative
+//   enumeration), and nested function bodies — helpers — are never
+//   entered: a helper is a different scope, not a container.
 // - Output is sorted by `(relPath, collection index)` — a stable,
 //   deterministic input to pairing (Constitution I).
 //
 // Bounded walk (iteration-2 review fix F2; plan.md Scale/Scope): the
 // collection recursion is depth-bounded by the shared
 // `MAPPING_WALK_DEPTH_BUDGET` — the extract.ts `AST_DEPTH_BUDGET` shape —
-// so a pathological describe nest degrades to a per-file skip with
-// exactly one diagnostic (the `extractFromFile` discipline), never a
-// request crash (Constitution V). The walk does NOT inherit
+// so a pathological describe or control-flow nest degrades to a per-file
+// skip with exactly one diagnostic (the `extractFromFile` discipline),
+// never a request crash (Constitution V). The walk does NOT inherit
 // prepareAnalysis's depth budget: that one guards the extraction walk
 // only, and this walk runs outside it.
 
@@ -53,17 +63,25 @@ import {
   type ArrowFunction,
   type Block,
   type FunctionExpression,
+  type IfStatement,
   isArrowFunction,
   isBlock,
   isCallExpression,
+  isDoStatement,
   isExpressionStatement,
+  isForInStatement,
+  isForOfStatement,
+  isForStatement,
   isFunctionExpression,
   isIdentifier,
+  isIfStatement,
   isNoSubstitutionTemplateLiteral,
   isPropertyAccessExpression,
   isStringLiteral,
+  isWhileStatement,
   type Node,
   type SourceFile,
+  type Statement,
 } from "typescript/unstable/ast";
 import { MAPPING_WALK_DEPTH_BUDGET } from "../internal.js";
 import type { ProgramContext } from "../program.js";
@@ -246,13 +264,102 @@ function isCallbackForm(node: Node): node is FunctionExpression | ArrowFunction 
 }
 
 /**
- * Walks one container callback's body: a block body statement by
- * statement, an expression-bodied arrow as the single contained invocation
+ * Walks one statement list of the broadened collection domain (T041): the
+ * file top level, a describe callback's block body, or a control-flow
+ * interior. Each statement flows through `walkStatement`.
+ *
+ * @param statements The statement list to walk.
+ * @param describeTitles The enclosing describe titles, outermost first.
+ * @param depth The nesting depth of this statement list.
+ * @param walk The per-invocation continuation (`processInvocation`).
+ */
+function walkStatementList(
+  statements: readonly Statement[],
+  describeTitles: readonly string[],
+  depth: number,
+  walk: (expression: Node, describeTitles: readonly string[], depth: number) => void,
+): void {
+  for (const statement of statements) {
+    walkStatement(statement, describeTitles, depth, walk);
+  }
+}
+
+/**
+ * Walks one statement of the broadened domain (T041): expression
+ * statements yield their expression to the walk continuation;
+ * `if`/`else` branches, `for`/`for-of`/`for-in`/`while`/`do-while` loop
+ * bodies, and plain blocks recurse one level deeper — each control-flow
+ * nesting level counts toward the shared `MAPPING_WALK_DEPTH_BUDGET`, so
+ * the broadened walk stays inside the depth guard. `switch`, `try`/
+ * `catch`/`finally`, labeled statements, and every other statement kind
+ * (declarations, returns, throws) stay OUTSIDE the walk domain
+ * (iteration-3 review gate F2: the enumeration is deliberately
+ * conservative — anything not enumerated is not walked), and nested
+ * function bodies — helpers — are never entered: a helper is a different
+ * scope, not a container.
+ *
+ * @param statement The statement to walk.
+ * @param describeTitles The enclosing describe titles, outermost first.
+ * @param depth The nesting depth of this statement.
+ * @param walk The per-invocation continuation (`processInvocation`).
+ */
+function walkStatement(
+  statement: Statement,
+  describeTitles: readonly string[],
+  depth: number,
+  walk: (expression: Node, describeTitles: readonly string[], depth: number) => void,
+): void {
+  if (depth > MAPPING_WALK_DEPTH_BUDGET) {
+    // The statement walk owns the same bound `processInvocation` checks:
+    // deep control-flow nesting must trip the per-file skip even when no
+    // invocation sits at the bottom to raise it there.
+    throw new MappingWalkDepthExceeded();
+  }
+  if (isExpressionStatement(statement)) {
+    walk(statement.expression, describeTitles, depth);
+    return;
+  }
+  if (isBlock(statement)) {
+    walkStatementList(statement.statements, describeTitles, depth + 1, walk);
+    return;
+  }
+  if (isIfStatement(statement)) {
+    const { thenStatement, elseStatement } = statement as IfStatement;
+    walkStatement(thenStatement, describeTitles, depth + 1, walk);
+    if (elseStatement !== undefined) {
+      walkStatement(elseStatement, describeTitles, depth + 1, walk);
+    }
+    return;
+  }
+  if (
+    isForStatement(statement) ||
+    isForOfStatement(statement) ||
+    isForInStatement(statement) ||
+    isWhileStatement(statement) ||
+    isDoStatement(statement)
+  ) {
+    // The five iteration kinds share one body property; the `for-in`
+    // shape extends StatementBase directly rather than
+    // IterationStatementBase, so the union's common access stays `statement`.
+    walkStatement(
+      (statement as { statement: Statement }).statement,
+      describeTitles,
+      depth + 1,
+      walk,
+    );
+    return;
+  }
+}
+
+/**
+ * Walks one container callback's body: a block body through the shared
+ * statement walk (control-flow interiors included, T041), an
+ * expression-bodied arrow as the single contained invocation
  * (`describe("a", () => it("b", fn))` — the tight-suite form). Tests are
  * never containers; only describe callbacks flow through here. The walk
  * callback receives the container's describe titles and the CONTINUATION
- * depth (one deeper than the describe's own level) so the budget guard in
- * `processInvocation` counts every recursion level.
+ * depth (one deeper than the describe's own level) so the budget guard
+ * counts every recursion level.
  *
  * @param callback The describe callback whose body walks.
  * @param describeTitles The titles including this describe's own.
@@ -267,11 +374,7 @@ function walkContainerBody(
 ): void {
   const body = callback.body;
   if (isBlock(body)) {
-    for (const statement of (body as Block).statements) {
-      if (isExpressionStatement(statement)) {
-        walk(statement.expression, describeTitles, depth);
-      }
-    }
+    walkStatementList((body as Block).statements, describeTitles, depth, walk);
     return;
   }
   walk(body, describeTitles, depth);
@@ -284,9 +387,11 @@ function walkContainerBody(
  * Both `ProgramContext` modes collect identically — the walk is purely
  * lexical over the parsed sources, exactly as extraction is (research R5's
  * both-modes parity). The statement-level walk domain is the data model's:
- * `it`/`test`/`describe` invocations are statements, and describe callbacks
- * are the only containers (hooks, benches, and non-invocation statements
- * contribute nothing by construction).
+ * `it`/`test`/`describe` invocations are statements, describe callbacks
+ * are the only containers, and the enumerated control-flow interiors
+ * (T041) are walked wherever they appear — top level or container body —
+ * while hooks, benches, non-invocation statements, and the
+ * non-enumerated statement kinds contribute nothing by construction.
  *
  * The walk is depth-bounded (F2; plan.md Scale/Scope): a file whose
  * describe nesting passes the shared `MAPPING_WALK_DEPTH_BUDGET` skips
@@ -322,8 +427,9 @@ export function collectTestFunctions(
   // recurses through a describe container, or stops (hooks, benches, and
   // unrecognized roots are excluded by root). Defined inside the entry so
   // the per-file counter and the injected output list close over nothing
-  // else. `depth` is the describe-nesting level (0 at the file top
-  // level), the budget guard's measure.
+  // else. `depth` is the nesting level (0 at the file top level) —
+  // describe callbacks and control-flow interiors each add one (T041) —
+  // the budget guard's measure.
   function processInvocation(
     expression: Node,
     relPath: string,
@@ -335,8 +441,9 @@ export function collectTestFunctions(
   ): void {
     if (depth > MAPPING_WALK_DEPTH_BUDGET) {
       // F2: the mapping walks run outside extract.ts's AST_DEPTH_BUDGET,
-      // so this walk owns its own bound — a pathological describe nest
-      // degrades to the per-file skip, never a request crash.
+      // so this walk owns its own bound — a pathological describe or
+      // control-flow nest degrades to the per-file skip, never a request
+      // crash.
       throw new MappingWalkDepthExceeded();
     }
     if (!isCallExpression(expression)) {
@@ -400,19 +507,24 @@ export function collectTestFunctions(
     // whole collection, so sibling files keep their tests.
     const fileTests: TestFunction[] = [];
     try {
-      for (const statement of sourceFile.statements) {
-        if (isExpressionStatement(statement)) {
+      // The file top level is the root statement list of the broadened
+      // walk (T041): expression statements AND the enumerated
+      // control-flow interiors flow through the same dispatch.
+      walkStatementList(
+        sourceFile.statements,
+        [],
+        0,
+        (expression, describeTitles, depth) =>
           processInvocation(
-            statement.expression,
+            expression,
             relPath,
             sourceFile,
-            [],
+            describeTitles,
             index,
             fileTests,
-            0,
-          );
-        }
-      }
+            depth,
+          ),
+      );
     } catch (error) {
       // Only the depth sentinel and a materialization RangeError are
       // diagnosed skips; anything else escapes (a crash is never a
