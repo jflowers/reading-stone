@@ -23,6 +23,10 @@
 //   every same-named target pairs in the analyze record order
 //   (compareFileLineName); the exact tier shadows the case-insensitive tier
 //   per test; unpaired tests produce no pairs — never confidence-0 rows.
+//   Within one test's emitted pairs, wire-indistinguishable same-file
+//   same-name targets collapse to the first record in analyze record order
+//   (T036's FR-005-amended first-wins dedup; the dedup domain is the test
+//   function, so same-titled siblings each keep their pairs).
 // - The `Pairing` record: test, target, strategy, confidence.
 //
 // Hand-built records follow the adapter suite's localized-cast convention:
@@ -308,5 +312,69 @@ describe("pairTests (naming strategy)", () => {
   it("returns no pairs for an empty test list", () => {
     const target = recordOf("add", "src/math.ts", 1);
     expect(pairTests([], indexOver([target]))).toEqual([]);
+  });
+});
+
+describe("pairTests (same-file-same-name pair-key dedup)", () => {
+  // T036 — the iteration-2 review-fix suite (F1; FR-005 amended; data-model
+  // Section 6 amended): two distinct records sharing one file and one
+  // declared name (same-named methods of different classes, same-named
+  // declarations in different scopes) are wire-indistinguishable targets —
+  // identical pair key once the test side is constant — so only the FIRST
+  // in analyze record order survives (first-wins, the byNode node-key
+  // discipline). The collapse is a documented conservative imprecision:
+  // the later same-named record emits no pairs and no rows. Same-named
+  // records in different files stay distinct (the "pairs every same-named
+  // target in the analyze record order" case above pins that half).
+  it("collapses same-file same-name targets to the first record in analyze record order", () => {
+    // Declaration order spells the later line first; the record order
+    // (file, line, name) puts line 3 before line 9, so the FIRST record —
+    // line 3 — owns the pair and the line-9 record collapses.
+    const later = recordOf("render", "src/ui.ts", 9);
+    const first = recordOf("render", "src/ui.ts", 3);
+    const pairs = pairTests([testOf("render")], indexOver([later, first]));
+    expect(pairIdentity(pairs)).toEqual([
+      {
+        title: "render",
+        name: "render",
+        relPath: "src/ui.ts",
+        line: 3,
+        strategy: "naming",
+        confidence: 90,
+      },
+    ]);
+  });
+
+  it("collapses same-file same-name targets in the case-insensitive tier too", () => {
+    // The dedup is strategy-tier-agnostic: the fold tier's record-ordered
+    // emission flows through the same per-test pair-key collapse.
+    const later = recordOf("Render", "src/ui.ts", 9);
+    const first = recordOf("Render", "src/ui.ts", 3);
+    const pairs = pairTests([testOf("render")], indexOver([later, first]));
+    expect(pairIdentity(pairs)).toEqual([
+      {
+        title: "render",
+        name: "Render",
+        relPath: "src/ui.ts",
+        line: 3,
+        strategy: "naming",
+        confidence: 70,
+      },
+    ]);
+  });
+
+  it("dedups per test function — same-titled sibling tests each keep their pairs", () => {
+    // Edge case 2 unchanged (FR-005 amended): two same-titled sibling
+    // tests inside one describe are distinct test functions sharing one
+    // test_function; the dedup domain is the test function's own
+    // emission, never the wire tuple, so each sibling keeps its pair —
+    // the rows disambiguate downstream through assertion_location.
+    const target = recordOf("render", "src/ui.ts", 1);
+    const first = testOf("render", { line: 2, index: 0 });
+    const second = testOf("render", { line: 5, index: 1 });
+    const pairs = pairTests([first, second], indexOver([target]));
+    expect(pairs).toHaveLength(2);
+    expect(pairs[0]?.test).toBe(first);
+    expect(pairs[1]?.test).toBe(second);
   });
 });

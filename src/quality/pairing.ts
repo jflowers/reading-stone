@@ -47,6 +47,15 @@ import type { TestFunction } from "./collect.js";
 export type PairingStrategy = "naming" | "calls" | "imports";
 
 /**
+ * The closed confidence vocabulary (data-model.md Section 5.3): one fixed
+ * integer per strategy tier — naming exact `90`, naming case-insensitive
+ * `70`, direct calls `80`, import graph `75`. A literal union, not
+ * `number`, so the pin is compile-time enforced and an out-of-vocabulary
+ * confidence cannot typecheck (iteration-2 review fix F6).
+ */
+export type PairingConfidence = 90 | 70 | 80 | 75;
+
+/**
  * One established test-to-target pair (data-model.md Section 5.3): the
  * test and target are reference-identity carries of the collector's and
  * the pipeline's own objects — not copies — so downstream stages
@@ -59,8 +68,8 @@ export interface Pairing {
   readonly target: ExtractionRecord;
   /** The strategy that established the pair. */
   readonly strategy: PairingStrategy;
-  /** The strategy's fixed confidence — an integer in [0, 100]. */
-  readonly confidence: number;
+  /** The strategy's fixed confidence — the closed union Section 5.3 pins. */
+  readonly confidence: PairingConfidence;
 }
 
 /**
@@ -268,11 +277,52 @@ function namingPairs(
 }
 
 /**
+ * The per-test pair-key first-wins dedup (FR-005 amended; iteration-2
+ * review fix F1): within ONE test function's emitted pairs, the wire
+ * pair key `(test_function, test_file, target_package, target_function)`
+ * is unique. The test side is constant within one test's pairs, and the
+ * row's `target_package` is derived from the target's file — a pure
+ * function of `relPath` — so the key reduces here to
+ * `(target relPath, target name)`: two distinct records sharing one file
+ * and one declared name (same-named methods of different classes) are
+ * wire-indistinguishable targets, and only the FIRST in the strategy's
+ * record-ordered emission survives — the `byNode` first-wins discipline.
+ * The collapse is a documented conservative imprecision: later
+ * same-named records in the same file emit no pairs and no rows.
+ *
+ * The dedup domain is deliberately the test function, never the bare
+ * wire tuple: same-titled sibling tests inside one describe (spec edge
+ * case 2) share `test_function` but are distinct test functions, each
+ * keeping its own pairs (their rows disambiguate downstream through
+ * `assertion_location`). Strategy-agnostic by construction — whatever
+ * the winning strategy emitted gets deduped — so the US2 calls/imports
+ * tiers inherit the rule without re-plumbing.
+ *
+ * @param testPairs One test's emitted pairs, in record order.
+ * @returns The deduplicated pairs — order and first-wins preserved.
+ */
+function dedupeByPairKey(testPairs: readonly Pairing[]): readonly Pairing[] {
+  const seen = new Set<string>();
+  const kept: Pairing[] = [];
+  for (const pair of testPairs) {
+    const key = `${pair.target.relPath}\0${pair.target.name}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    kept.push(pair);
+  }
+  return kept;
+}
+
+/**
  * Pairs the collected test functions with their target records
  * (FR-004/FR-005): per test, the strategies evaluate in fixed priority
  * order — naming → calls → imports (US2's T025 extends the loop with
  * the latter two) — first-match-wins: evaluation stops at the first
  * strategy with any match, and only that strategy's pairs are emitted.
+ * Each test's winning emission flows through the per-test pair-key
+ * first-wins dedup (`dedupeByPairKey`, FR-005's amended soundness pin).
  *
  * US1's surface is the naming strategy alone; the loop structure and
  * the per-test independence it establishes are the seams US2 slots
@@ -283,7 +333,8 @@ function namingPairs(
  * @param tests The collected test functions (the collector's sorted output).
  * @param index The pairing-support target index for the same run.
  * @returns The pairs: per test in input order, each test's matches in
- * analyze record order `(file, line, name)`.
+ * analyze record order `(file, line, name)`, wire-indistinguishable
+ * same-file-same-name targets collapsed to the first record.
  */
 export function pairTests(
   tests: readonly TestFunction[],
@@ -295,12 +346,13 @@ export function pairTests(
   // owns no other per-call state).
   const folded = buildFoldedNameIndex(index);
   for (const test of tests) {
-    const named = namingPairs(test, index, folded);
+    const named = dedupeByPairKey(namingPairs(test, index, folded));
     if (named.length > 0) {
       pairs.push(...named);
     }
     // US2's calls (80) and imports (75) strategies evaluate here, in
-    // priority order after a naming miss, first-match-wins (T025).
+    // priority order after a naming miss, first-match-wins (T025) —
+    // each tier's emission flows through the same per-test dedup.
   }
   return pairs;
 }

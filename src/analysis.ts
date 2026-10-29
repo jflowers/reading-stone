@@ -347,12 +347,16 @@ export async function prepareAnalysis(
   // hermetic host serves on demand (src/program.ts) — and, under spec 004's
   // widening, the admitted test arm; extraction's walk is root-containment
   // scoped (src/extract.ts), so the record set is narrowed here to the
-  // identical in-scope list the pattern filter produced. The parse-only arm
-  // needs no narrowing: its hermetic view exposes in-scope sources only, so
-  // extraction cannot see beyond scope there. Both modes' record sets ARE
-  // the in-scope set — what FR-022's same-extraction-set guarantee, spec
-  // 003 US3-7's identical-file-set guarantee, and spec 004 FR-006's
-  // target-parity guarantee (the widened call reports `analyze`'s records
+  // identical in-scope list the pattern filter produced. The narrowing
+  // filter below is UNCONDITIONAL — the FR-006 parity invariant in both
+  // modes: the parse-only arm needs it just as much, because the widened
+  // test arm is admitted there too and its files are equally subject to
+  // the pattern filter's in-scope narrowing (F4's review fix: the old
+  // "needs no narrowing" claim described the pre-widening parse-only
+  // view, not the landed one). Both modes' record sets ARE the in-scope
+  // set — what FR-022's same-extraction-set guarantee, spec 003 US3-7's
+  // identical-file-set guarantee, and spec 004 FR-006's target-parity
+  // guarantee (the widened call reports `analyze`'s records
   // record-for-record) all rest on.
   const inScopeSet = new Set(inScope);
   records = records.filter((record) => inScopeSet.has(record.relPath));

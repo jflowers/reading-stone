@@ -37,8 +37,18 @@
 //   excluded by callee root.
 // - Output is sorted by `(relPath, collection index)` — a stable,
 //   deterministic input to pairing (Constitution I).
+//
+// Bounded walk (iteration-2 review fix F2; plan.md Scale/Scope): the
+// collection recursion is depth-bounded by the shared
+// `MAPPING_WALK_DEPTH_BUDGET` — the extract.ts `AST_DEPTH_BUDGET` shape —
+// so a pathological describe nest degrades to a per-file skip with
+// exactly one diagnostic (the `extractFromFile` discipline), never a
+// request crash (Constitution V). The walk does NOT inherit
+// prepareAnalysis's depth budget: that one guards the extraction walk
+// only, and this walk runs outside it.
 
 import { join } from "node:path";
+import type { Writable } from "node:stream";
 import {
   type ArrowFunction,
   type Block,
@@ -55,6 +65,7 @@ import {
   type Node,
   type SourceFile,
 } from "typescript/unstable/ast";
+import { MAPPING_WALK_DEPTH_BUDGET } from "../internal.js";
 import type { ProgramContext } from "../program.js";
 
 /** One collected vitest/jest test function (data-model.md Section 5.1). */
@@ -91,6 +102,20 @@ const TEST_ROOTS: ReadonlySet<string> = new Set(["it", "test"]);
 
 /** The callee-root root that makes an invocation a describe container. */
 const DESCRIBE_ROOT = "describe";
+
+/**
+ * The collection walk's depth sentinel (F2): raised when the describe
+ * nesting depth passes the shared `MAPPING_WALK_DEPTH_BUDGET`, caught by
+ * the per-file loop — never escapes this module (the extract.ts
+ * `AstDepthExceeded` discipline). `RangeError` from lazy node
+ * materialization is caught at the same site and treated identically:
+ * both mean "pathological file, skip it whole."
+ */
+class MappingWalkDepthExceeded extends Error {
+  constructor() {
+    super("ast depth exceeds budget");
+  }
+}
 
 /**
  * Resolves each test path's parsed source in either bootstrap mode.
@@ -224,23 +249,32 @@ function isCallbackForm(node: Node): node is FunctionExpression | ArrowFunction 
  * Walks one container callback's body: a block body statement by
  * statement, an expression-bodied arrow as the single contained invocation
  * (`describe("a", () => it("b", fn))` — the tight-suite form). Tests are
- * never containers; only describe callbacks flow through here.
+ * never containers; only describe callbacks flow through here. The walk
+ * callback receives the container's describe titles and the CONTINUATION
+ * depth (one deeper than the describe's own level) so the budget guard in
+ * `processInvocation` counts every recursion level.
+ *
+ * @param callback The describe callback whose body walks.
+ * @param describeTitles The titles including this describe's own.
+ * @param depth The continuation depth for the body's invocations.
+ * @param walk The per-invocation continuation (`processInvocation`).
  */
 function walkContainerBody(
   callback: FunctionExpression | ArrowFunction,
   describeTitles: readonly string[],
-  walk: (expression: Node, describeTitles: readonly string[]) => void,
+  depth: number,
+  walk: (expression: Node, describeTitles: readonly string[], depth: number) => void,
 ): void {
   const body = callback.body;
   if (isBlock(body)) {
     for (const statement of (body as Block).statements) {
       if (isExpressionStatement(statement)) {
-        walk(statement.expression, describeTitles);
+        walk(statement.expression, describeTitles, depth);
       }
     }
     return;
   }
-  walk(body, describeTitles);
+  walk(body, describeTitles, depth);
 }
 
 /**
@@ -254,6 +288,14 @@ function walkContainerBody(
  * are the only containers (hooks, benches, and non-invocation statements
  * contribute nothing by construction).
  *
+ * The walk is depth-bounded (F2; plan.md Scale/Scope): a file whose
+ * describe nesting passes the shared `MAPPING_WALK_DEPTH_BUDGET` skips
+ * whole — its tests are discarded and exactly one diagnostic is written
+ * to `stderr` — while every other file collects normally (the
+ * `extractFromFile` per-file-skip discipline; a `RangeError` from lazy
+ * node materialization is treated identically: pathological input
+ * degrades to a skip, never a crash — Constitution V).
+ *
  * @param testPaths The discovered, exclusion-screened test arm —
  * root-relative POSIX paths in classifyFiles' sorted order (pattern
  * scoping never narrows this arm; FR-006).
@@ -262,6 +304,8 @@ function walkContainerBody(
  * @param rootPath Realpath-resolved absolute analysis root — the
  * program-mode source-name base (the buildCallerIndex threading
  * precedent: the root is passed explicitly, never re-derived).
+ * @param stderr The diagnostic sink for depth-budget skips (the server's
+ * stderr; never stdout — protocol fidelity).
  * @returns The collected test functions, sorted by `(relPath, collection
  * index)` — a stable, deterministic input to pairing.
  */
@@ -269,6 +313,7 @@ export function collectTestFunctions(
   testPaths: readonly string[],
   context: ProgramContext,
   rootPath: string,
+  stderr: Writable = process.stderr,
 ): TestFunction[] {
   const collected: TestFunction[] = [];
 
@@ -276,14 +321,24 @@ export function collectTestFunctions(
   // statement-level call by its callee root and either collects a test,
   // recurses through a describe container, or stops (hooks, benches, and
   // unrecognized roots are excluded by root). Defined inside the entry so
-  // the per-file counter closes over nothing but the output list.
+  // the per-file counter and the injected output list close over nothing
+  // else. `depth` is the describe-nesting level (0 at the file top
+  // level), the budget guard's measure.
   function processInvocation(
     expression: Node,
     relPath: string,
     sourceFile: SourceFile,
     describeTitles: readonly string[],
     index: { count: number },
+    output: TestFunction[],
+    depth: number,
   ): void {
+    if (depth > MAPPING_WALK_DEPTH_BUDGET) {
+      // F2: the mapping walks run outside extract.ts's AST_DEPTH_BUDGET,
+      // so this walk owns its own bound — a pathological describe nest
+      // degrades to the per-file skip, never a request crash.
+      throw new MappingWalkDepthExceeded();
+    }
     if (!isCallExpression(expression)) {
       return;
     }
@@ -293,7 +348,7 @@ export function collectTestFunctions(
     }
     if (TEST_ROOTS.has(root)) {
       const title = staticTitle(expression.arguments[0]);
-      collected.push({
+      output.push({
         title,
         qualifiedTitle: [...describeTitles, title].join(" > "),
         relPath,
@@ -311,14 +366,20 @@ export function collectTestFunctions(
       const callback = callbackOf(expression.arguments);
       if (callback !== null && isCallbackForm(callback)) {
         const title = staticTitle(expression.arguments[0]);
-        walkContainerBody(callback, [...describeTitles, title], (inner) =>
-          processInvocation(
-            inner,
-            relPath,
-            sourceFile,
-            describeTitles.length === 0 ? [title] : [...describeTitles, title],
-            index,
-          ),
+        walkContainerBody(
+          callback,
+          [...describeTitles, title],
+          depth + 1,
+          (inner, innerTitles, innerDepth) =>
+            processInvocation(
+              inner,
+              relPath,
+              sourceFile,
+              innerTitles,
+              index,
+              output,
+              innerDepth,
+            ),
         );
       }
       return;
@@ -334,11 +395,35 @@ export function collectTestFunctions(
     rootPath,
   )) {
     const index = { count: 0 };
-    for (const statement of sourceFile.statements) {
-      if (isExpressionStatement(statement)) {
-        processInvocation(statement.expression, relPath, sourceFile, [], index);
+    // Per-file buffer (F2): one pathological file discards only its own
+    // tests — the extractFromFile discipline — instead of aborting the
+    // whole collection, so sibling files keep their tests.
+    const fileTests: TestFunction[] = [];
+    try {
+      for (const statement of sourceFile.statements) {
+        if (isExpressionStatement(statement)) {
+          processInvocation(
+            statement.expression,
+            relPath,
+            sourceFile,
+            [],
+            index,
+            fileTests,
+            0,
+          );
+        }
       }
+    } catch (error) {
+      // Only the depth sentinel and a materialization RangeError are
+      // diagnosed skips; anything else escapes (a crash is never a
+      // silent skip — the buildProgramContext rethrow discipline).
+      if (!(error instanceof MappingWalkDepthExceeded || error instanceof RangeError)) {
+        throw error;
+      }
+      stderr.write(`reading-stone: skipping ${relPath}: ast depth exceeds budget\n`);
+      continue;
     }
+    collected.push(...fileTests);
   }
 
   // The structural output sort: (relPath, collection index), UTF-16

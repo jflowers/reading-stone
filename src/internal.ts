@@ -77,3 +77,22 @@ export function relativeUnderBase(base: string, candidate: string): string | nul
   }
   return rel.split(sep).join("/");
 }
+
+/**
+ * The mapping-stage AST walk depth budget (spec 004 plan.md's Scale/Scope
+ * pin; the `extract.ts` `AST_DEPTH_BUDGET` shape — fixed, not
+ * caller-configurable): far beyond real-world suite nesting, low enough
+ * that the recursive test-arm walks (collection, assertion detection,
+ * and the strategy/provenance walks to come) cannot exhaust the native
+ * stack on adversarial input. Iteration-2 review fix F2: the mapping
+ * pipeline does NOT inherit `prepareAnalysis`'s depth budget — extract's
+ * `AST_DEPTH_BUDGET` guards the extraction walk only — so every
+ * mapping-stage walk owns a bound, and this is the shared one.
+ *
+ * Deliberately independent of extract's own module-private constant:
+ * each guards a different walk with a different per-frame cost, and
+ * coupling them would let one walk's bound change the other's behavior;
+ * the shared SHAPE (fixed bound, sentinel, per-unit skip, one
+ * diagnostic), not the shared constant, is the contract.
+ */
+export const MAPPING_WALK_DEPTH_BUDGET = 2000;
