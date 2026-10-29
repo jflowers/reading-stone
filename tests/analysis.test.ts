@@ -59,16 +59,17 @@
 // degradation, and byte-identical repeats (SC-005). Two halves, one seam:
 // the composition-seam suites drive the exact stage order research R10
 // pins for T025's wiring (detectEffects → buildRecordEvidence →
-// classifyPairs) over real trees and are green today — T024 landed the
-// fan-out core, so only analyze()'s insertion of it is missing — while
-// the analyze-wiring suite drives analyze() itself and is RED-FIRST by
-// design: its cases fail on the missing classification field until T025
-// lands (the same intended red the flipped wire-shape cases in the
-// detector suites carry). Unlike the scope fixtures, the classification
-// trees DO carry tsconfig.json — the quickstart tree verbatim from
-// quickstart.md Section 1 (the profile's interface and caller-count
-// signals need program mode); Section 8's parse-only variant reuses the
-// same sources without it.
+// classifyPairs) over real trees, and the analyze-wiring suite drives
+// analyze() itself — both green since T025 inserted the signal core
+// between detection and assembly; the analyze-wiring cases were written
+// red-first against the then-missing classification field (the same
+// intended red the flipped wire-shape cases in the detector suites
+// carried) and turned green when T025 landed, without touching their
+// assertions. Unlike the scope fixtures, the classification
+// trees DO carry tsconfig.json — the quickstart tree from
+// tests/helpers/quickstart.ts (quickstart.md Section 1 verbatim; the
+// profile's interface and caller-count signals need program mode);
+// Section 8's parse-only variant reuses the same sources without it.
 //
 // T028 EXTENSION (spec 003; US2 tests; FR-013/FR-011; data-model.md
 // Sections 8-9; contracts/analyze-classification.md Section 3; quickstart
@@ -80,11 +81,12 @@
 // sum-invariant, comparing against what analyze reported: FR-013's
 // one-pipeline guarantee made observable at the consumer's join, plus the
 // parse-only feed shrink from 11 signals to 9 (quickstart Section 8).
-// RED-FIRST: the classify_signals entry does not exist until T029 lands
-// it, so those suites fail on a named loader error while every earlier
-// suite stays green — the entry is loaded dynamically precisely so the
-// missing export cannot fail this file's module resolution and mask the
-// baseline above.
+// The classify_signals entry is loaded dynamically inside those suites:
+// during the red phase (before T029 landed the entry) that confined the
+// missing export's named error to this section instead of failing the
+// whole file's module resolution and masking the green baseline above;
+// the load now stands as the same named guard should the export ever
+// disappear.
 //
 // The scope fixtures are tsconfig-less, so the pipeline bootstraps
 // parse-only mode (FR-004) — the scope behavior under test (walk,
@@ -119,11 +121,17 @@ import {
   registerCleanup,
 } from "./helpers/fixtures.js";
 import {
+  QUICKSTART_FEED,
+  QUICKSTART_TSCONFIG,
+  writeQuickstartTree,
+} from "./helpers/quickstart.js";
+import {
   expectWireInvariants,
   extractFunctions,
   recordFor,
   type WireClassification,
   type WireRecord,
+  type WireSignal,
 } from "./helpers/wire.js";
 
 // Fixture trees and scratch directories register their cleanup with the
@@ -718,81 +726,16 @@ describe("prepareAnalysis: extraction-failure context release", () => {
 // R13; quickstart.md Sections 1, 3, 5, 8;
 // contracts/analyze-classification.md). The suites below pin the analyze
 // entry's classification wiring in two halves: composition-seam suites
-// (green — T024 landed the fan-out core) and an analyze-wiring suite
-// (RED-FIRST — analyze() attaches nothing until T025 inserts the seam).
+// and an analyze-wiring suite, both green since T025 inserted the signal
+// core between detection and assembly (the analyze-wiring half was
+// written red-first against the then-missing classification field).
 // ---------------------------------------------------------------------------
 
-// The quickstart tree (quickstart.md Section 1), verbatim — the canonical
-// controlled-signal profile fixture: one signal category per function,
-// deliberately minimal, WITH a tsconfig because the profile's interface
-// and caller-count signals need program mode. The interface in print.ts
-// is module-local so the +6 exported-receiver component does not fire;
-// handle's `Handle` prefix is deliberately routed away from StdoutWrite
-// (the routing gate), leaving the interface signal alone at the
-// contractual boundary. Section 8's parse-only variant reuses the same
-// sources without the tsconfig.
-const QUICKSTART_TSCONFIG = `{
-  "compilerOptions": {
-    "strict": true
-  }
-}`;
-
-const QUICKSTART_SOURCES: Readonly<Record<string, string>> = {
-  "src/calc.ts": `function getTotal(input: number): number {
-  return input * 2;
-}
-`,
-  "src/noise.ts": `/**
- * Logs the message for debugging.
- */
-function logMessage(message: string, logger: { info(m: string): void }): void {
-  logger.info(message);
-}
-`,
-  "src/banner.ts": `/**
- * Logs the banner to stdout.
- */
-function writeBanner(banner: string): void {
-  console.log(banner);
-}
-`,
-  "src/quiet.ts": `function tweak(counter: { n: number }): void {
-  counter.n = counter.n + 1;
-}
-`,
-  "src/print.ts": `interface Handler {
-  handle(event: string): void;
-}
-
-class PrintHandler implements Handler {
-  handle(event: string): void {
-    console.log(event);
-  }
-}
-`,
-  "src/util.ts": `export function formatLabel(value: string): string {
-  return \`[\${value}]\`;
-}
-`,
-  "src/main1.ts": `import { formatLabel } from "./util";
-
-export function main1(): string {
-  return formatLabel("one");
-}
-`,
-  "src/main2.ts": `import { formatLabel } from "./util";
-
-export function main2(): string {
-  return formatLabel("two");
-}
-`,
-};
-
-function quickstartFiles(withTsconfig: boolean): Record<string, string> {
-  return withTsconfig
-    ? { ...QUICKSTART_SOURCES, "tsconfig.json": QUICKSTART_TSCONFIG }
-    : { ...QUICKSTART_SOURCES };
-}
+// The quickstart tree — both tsconfig variants — and the 11-row expected
+// feed live in tests/helpers/quickstart.ts: the one canonical copy this
+// pipeline suite and the dispatch suite (tests/server.test.ts) both
+// assert against, extracted from the former per-suite mirrors by the
+// review council's fixture-duplication finding (dispatch f4e5896a).
 
 // One classified run through the composition seam — the exact stage order
 // research R10 pins for T025's analyze() wiring (the adapter header's
@@ -863,7 +806,9 @@ function signalRows(
 // classification contract pins. Effect `description` wording is
 // implementation-defined and stays out of the projection (the wire
 // helper's assertion discipline); the classification is passed through
-// verbatim so the analyze-wiring cases fail on `undefined` until T025.
+// verbatim so a wiring regression that drops it fails the analyze-wiring
+// cases on `undefined` — the exact red those cases were written to catch
+// before T025 landed the field.
 interface ProfileEffect {
   readonly type: string;
   readonly classification: WireClassification | undefined;
@@ -1033,7 +978,7 @@ describe("classification seam: quickstart controlled-signal profile (003 FR-012/
   let cleanup: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
-    const tree = await createFixtureTree(quickstartFiles(true));
+    const tree = await writeQuickstartTree(true);
     cleanup = tree.cleanup;
     run = await classifiedTree(tree.root, "program");
   }, 60_000);
@@ -1310,7 +1255,7 @@ describe("classification seam: parse-only degradation — precision, never avail
     // bootstraps parse-only (FR-004), the checker-dependent interface
     // and caller_count signals are absent, and every effect is still
     // classified — degradation reduces precision, never availability.
-    const tree = await createFixtureTree(quickstartFiles(false));
+    const tree = await writeQuickstartTree(false);
     cleanup = tree.cleanup;
     run = await classifiedTree(tree.root, "parse-only");
   }, 30_000);
@@ -1357,20 +1302,20 @@ describe("classification seam: detection-ambiguity markers coexist with classifi
   });
 });
 
-describe("analyze wiring: classified effects on the wire (003 FR-012/FR-013; SC-001/SC-004/SC-005) — RED-FIRST until T025", () => {
-  // analyze() does not attach classifications until T025 inserts the
-  // signal core between detection and assembly (research R10), so every
-  // case in this suite currently fails on the missing field — the
-  // intended red observation tasks.md's test-first discipline requires.
-  // The paired implementation turns them green without touching these
-  // assertions.
+describe("analyze wiring: classified effects on the wire (003 FR-012/FR-013; SC-001/SC-004/SC-005)", () => {
+  // analyze() attaches classifications through the signal core T025
+  // inserted between detection and assembly (research R10). The suite was
+  // written red-first against the then-missing field — the observation
+  // tasks.md's test-first discipline requires — and turned green when
+  // T025 landed, without touching these assertions; a wiring regression
+  // that drops the field fails them on `undefined` again.
   let root = "";
   let viaAnalyze: readonly Record<string, unknown>[] = [];
   let viaSeam: ClassifiedRun = { functions: [], signals: [] };
   let cleanup: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
-    const tree = await createFixtureTree(quickstartFiles(true));
+    const tree = await writeQuickstartTree(true);
     cleanup = tree.cleanup;
     root = tree.root;
     viaAnalyze = await analyze(root, undefined, memorySink().stream);
@@ -1393,7 +1338,7 @@ describe("analyze wiring: classified effects on the wire (003 FR-012/FR-013; SC-
     // FR-013's one-shared-pipeline guarantee in its strongest local
     // form: the method's serialized response equals the classified
     // composition run over the same tree, byte for byte — analyze()
-    // differs from the seam by nothing but the wiring T025 inserts.
+    // differs from the seam by nothing but the wiring T025 inserted.
     expect(JSON.stringify(viaAnalyze)).toBe(JSON.stringify(viaSeam.functions));
   });
 
@@ -1413,7 +1358,7 @@ describe("analyze wiring: classified effects on the wire (003 FR-012/FR-013; SC-
   it("parse-only: analyze still classifies every effect, with the degraded profile (SC-004 both modes; quickstart Section 8)", {
     timeout: 30_000,
   }, async () => {
-    const tree = await createFixtureTree(quickstartFiles(false));
+    const tree = await writeQuickstartTree(false);
     registerCleanup(tree.cleanup);
     const result = await analyze(tree.root, undefined, memorySink().stream);
     const functions = extractFunctions(result);
@@ -1431,11 +1376,12 @@ describe("analyze wiring: classified effects on the wire (003 FR-012/FR-013; SC-
 // reports must equal the classification derived from the classify_signals
 // feed via the FR-011 sum-invariant — and the parse-only feed shrinks
 // from 11 to 9 rows with the checker-dependent interface and caller_count
-// rows absent. RED-FIRST until T029 lands the classifySignals entry: every
-// suite below fails on the loader's named error, confined to this section
-// by the dynamic import (a static named import of the missing export would
-// fail the whole file's module resolution and mask the green baseline
-// above).
+// rows absent. The classifySignals entry is loaded dynamically below:
+// during the red phase (before T029 landed the entry) that confined the
+// loader's named error to this section instead of failing the whole
+// file's module resolution and masking the green baseline above; the
+// load now stands as the same named guard should the export ever
+// disappear.
 // ---------------------------------------------------------------------------
 
 // The classify_signals entry's signature, pinned per T029 and research
@@ -1450,11 +1396,12 @@ type ClassifySignalsEntry = (
 ) => Promise<readonly Signal[]>;
 
 // Loads the classify_signals entry from src/analysis.js, failing loud
-// with a named error while T029 is outstanding. Dynamic on purpose:
-// the missing export is this suite's intended red, and confining it here
-// is what keeps every earlier suite in this file green — the test-first
-// discipline tasks.md US2 pins (tests written first, observed to FAIL,
-// then turned green by implementation without touching the assertions).
+// with a named error if the export is missing. Dynamic on purpose: the
+// red phase before T029 landed read exactly this failure, confined to
+// this section rather than failing the whole file's module resolution —
+// the test-first discipline tasks.md US2 pins (tests written first,
+// observed to FAIL, then turned green by implementation without
+// touching the assertions).
 async function loadClassifySignals(): Promise<ClassifySignalsEntry> {
   const analysisModule = (await import("../src/analysis.js")) as {
     classifySignals?: ClassifySignalsEntry;
@@ -1462,23 +1409,10 @@ async function loadClassifySignals(): Promise<ClassifySignalsEntry> {
   const entry = analysisModule.classifySignals;
   if (typeof entry !== "function") {
     throw new Error(
-      "src/analysis.js does not export classifySignals yet — T029 lands the classify_signals entry; this suite is RED-FIRST by design",
+      "src/analysis.js does not export classifySignals — the classify_signals entry (landed with T029) is missing or was renamed",
     );
   }
   return entry;
-}
-
-// One serialized feed row, projected to the five contract-pinned fields
-// (quickstart Section 4's shape) — `reasoning` wording is
-// implementation-defined and stays out, the same projection discipline
-// tests/helpers/wire.ts applies and tests/server.test.ts's signal pin
-// mirrors at the dispatch surface.
-interface WireSignalRow {
-  readonly function: string;
-  readonly package: string;
-  readonly side_effect_type: string;
-  readonly source: string;
-  readonly weight: number;
 }
 
 // Validates and projects the classify_signals entry's result: an array of
@@ -1487,13 +1421,13 @@ interface WireSignalRow {
 // malformed row is surfaced as the explicit shape violation it is, never
 // a soft empty feed the consistency derivation below would pass on
 // vacuously.
-function signalFeed(result: unknown): readonly WireSignalRow[] {
+function signalFeed(result: unknown): readonly WireSignal[] {
   if (!Array.isArray(result)) {
     throw new Error(
       'classify_signals returned a non-array — T029 pins the serialized Signal[]; the {"signals": [...]} wrapper is the server handler\'s (FR-014)',
     );
   }
-  return result.map((row): WireSignalRow => {
+  return result.map((row): WireSignal => {
     if (typeof row !== "object" || row === null) {
       throw new Error(
         `classify_signals feed row is not an object: ${JSON.stringify(row)}`,
@@ -1525,11 +1459,11 @@ function signalFeed(result: unknown): readonly WireSignalRow[] {
 // One cross-method run over a tree: analyze's serialized records (the
 // label side) and the classify_signals feed (the evidence side), both
 // driven exactly as the two server handlers drive them. The entry loads
-// first so the RED-FIRST failure is the named loader error, never a
+// first so a missing export fails as the named loader error, never a
 // half-analyzed tree.
 interface CrossMethodRun {
   readonly functions: readonly WireRecord[];
-  readonly feed: readonly WireSignalRow[];
+  readonly feed: readonly WireSignal[];
 }
 
 async function crossMethodRun(rootPath: string): Promise<CrossMethodRun> {
@@ -1616,7 +1550,7 @@ interface ConsistencySummary {
  */
 function expectCrossMethodConsistency(
   functions: readonly WireRecord[],
-  feed: readonly WireSignalRow[],
+  feed: readonly WireSignal[],
 ): ConsistencySummary {
   const sums = new Map<string, number>();
   for (const row of feed) {
@@ -1672,107 +1606,10 @@ function expectCrossMethodConsistency(
   return { pairs: reportedPairs.size, pairsWithSignals };
 }
 
-// The quickstart feed (quickstart.md Section 4) — the exact 11 rows in
-// the FR-014 (package, function, side_effect_type, source) codepoint
-// order, every weight re-derivable from the Section 5 arithmetic: tweak
-// contributes no row (its PointerArgMutation pair matches no extractor —
-// the no-signal P0 floor). Mirrored from tests/server.test.ts's dispatch
-// pin and this file's signalRows assertions on purpose: each surface
-// holds its own copy of the canonical fixture (the established mirror
-// discipline), so either drifts against quickstart.md, never silently
-// against another test.
-const QUICKSTART_FEED: readonly WireSignalRow[] = [
-  // src.banner — writeBanner's StdoutWrite pair is the tree's one
-  // mixed-polarity set: naming `Write` +10, docstring `Logs` −15, and
-  // exactly one synthesized contradiction row (source order within the
-  // pair is codepoint order: contradiction < docstring <
-  // naming_convention).
-  {
-    function: "writeBanner",
-    package: "src.banner",
-    side_effect_type: "StdoutWrite",
-    source: "contradiction",
-    weight: -20,
-  },
-  {
-    function: "writeBanner",
-    package: "src.banner",
-    side_effect_type: "StdoutWrite",
-    source: "docstring",
-    weight: -15,
-  },
-  {
-    function: "writeBanner",
-    package: "src.banner",
-    side_effect_type: "StdoutWrite",
-    source: "naming_convention",
-    weight: 10,
-  },
-  // src.calc — the only agreeing naming row in the tree.
-  {
-    function: "getTotal",
-    package: "src.calc",
-    side_effect_type: "ReturnValue",
-    source: "naming_convention",
-    weight: 10,
-  },
-  // src.main1, src.main2 — the two exported call sites (visibility +8).
-  {
-    function: "main1",
-    package: "src.main1",
-    side_effect_type: "ReturnValue",
-    source: "visibility",
-    weight: 8,
-  },
-  {
-    function: "main2",
-    package: "src.main2",
-    side_effect_type: "ReturnValue",
-    source: "visibility",
-    weight: 8,
-  },
-  // src.noise — the tree's one fully-discordant pair (docstring `logs`
-  // −15 + naming `log` −10, single polarity, no contradiction row).
-  {
-    function: "logMessage",
-    package: "src.noise",
-    side_effect_type: "LogWrite",
-    source: "docstring",
-    weight: -15,
-  },
-  {
-    function: "logMessage",
-    package: "src.noise",
-    side_effect_type: "LogWrite",
-    source: "naming_convention",
-    weight: -10,
-  },
-  // src.print — handle's one checker-dependent row, the row parse-only
-  // drops.
-  {
-    function: "handle",
-    package: "src.print",
-    side_effect_type: "StdoutWrite",
-    source: "interface",
-    weight: 30,
-  },
-  // src.util — formatLabel's two rows, one checker-dependent
-  // (caller_count), one syntactic (visibility).
-  {
-    function: "formatLabel",
-    package: "src.util",
-    side_effect_type: "ReturnValue",
-    source: "caller_count",
-    weight: 10,
-  },
-  {
-    function: "formatLabel",
-    package: "src.util",
-    side_effect_type: "ReturnValue",
-    source: "visibility",
-    weight: 8,
-  },
-];
+// The quickstart program-mode feed — quickstart Section 4's exact 11 rows
+// — is QUICKSTART_FEED in tests/helpers/quickstart.ts, the canonical copy
+// this suite and the dispatch suite (tests/server.test.ts) both pin (the
+// fixture-duplication consolidation, dispatch f4e5896a).
 
 // The parse-only feed (quickstart Section 8): the same 11 rows minus the
 // two checker-dependent ones — handle's interface row and formatLabel's
@@ -1781,20 +1618,20 @@ const QUICKSTART_FEED: readonly WireSignalRow[] = [
 // QUICKSTART_PROFILE_PARSE_ONLY uses), so asserting equality against this
 // array pins three things at once: the count (9), the absent sources, and
 // that every surviving row is identical to its program-mode self.
-const QUICKSTART_FEED_PARSE_ONLY: readonly WireSignalRow[] = QUICKSTART_FEED.filter(
+const QUICKSTART_FEED_PARSE_ONLY: readonly WireSignal[] = QUICKSTART_FEED.filter(
   (row) => row.source !== "interface" && row.source !== "caller_count",
 );
 
-describe("cross-method consistency: quickstart tree in program mode (003 FR-013/FR-011; quickstart Sections 4-5) — RED-FIRST until T029", () => {
+describe("cross-method consistency: quickstart tree in program mode (003 FR-013/FR-011; quickstart Sections 4-5)", () => {
   // Shared across the suite (the house pattern): one quickstart tree, one
-  // cross-method run. In the RED state the loader throws inside beforeAll,
-  // `run` stays bound to the empty default, and every test fails on the
-  // same named error — afterAll still cleans the tree.
+  // cross-method run. A loader failure inside beforeAll would leave `run`
+  // bound to the empty default and fail every test on the same named
+  // error — afterAll still cleans the tree.
   let run: CrossMethodRun = { functions: [], feed: [] };
   let cleanup: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
-    const tree = await createFixtureTree(quickstartFiles(true));
+    const tree = await writeQuickstartTree(true);
     cleanup = tree.cleanup;
     run = await crossMethodRun(tree.root);
   }, 60_000);
@@ -1820,7 +1657,7 @@ describe("cross-method consistency: quickstart tree in program mode (003 FR-013/
   });
 });
 
-describe("cross-method consistency: quickstart parse-only shrink — 11 signals to 9 (003 FR-013; quickstart Section 8) — RED-FIRST until T029", () => {
+describe("cross-method consistency: quickstart parse-only shrink — 11 signals to 9 (003 FR-013; quickstart Section 8)", () => {
   let run: CrossMethodRun = { functions: [], feed: [] };
   let cleanup: (() => Promise<void>) | undefined;
 
@@ -1829,7 +1666,7 @@ describe("cross-method consistency: quickstart parse-only shrink — 11 signals 
     // entry bootstraps parse-only exactly as analyze does (FR-004), and
     // the checker-dependent interface and caller_count rows drop while
     // every syntactic row survives verbatim.
-    const tree = await createFixtureTree(quickstartFiles(false));
+    const tree = await writeQuickstartTree(false);
     cleanup = tree.cleanup;
     run = await crossMethodRun(tree.root);
   }, 60_000);
@@ -1852,7 +1689,7 @@ describe("cross-method consistency: quickstart parse-only shrink — 11 signals 
   });
 });
 
-describe("cross-method consistency: clamp, tier, and multi-pair profiles (003 FR-013/FR-011) — RED-FIRST until T029", () => {
+describe("cross-method consistency: clamp, tier, and multi-pair profiles (003 FR-013/FR-011)", () => {
   it("a stacked pair whose raw score is 136 clamps to the reported 100 (program mode; FR-009)", {
     timeout: 60_000,
   }, async () => {

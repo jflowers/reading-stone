@@ -6,7 +6,8 @@
 // detector-rules suites: the analyze-entry driver, the record lookup, the
 // contract-pinned effect projections, and the FR-018 through FR-020 wire
 // invariants, plus spec 003's classification amendment: every analyze
-// effect classified (FR-012). The stderr sink itself lives in
+// effect classified (FR-012) and the classify_signals feed row projection
+// (FR-001). The stderr sink itself lives in
 // tests/helpers/fixtures.ts (the suite-wide shared helper every test file
 // imports) and is re-exported here so the detector-rules suites keep a
 // single import surface.
@@ -53,6 +54,27 @@ export interface WireRecord {
   readonly file: string;
   readonly line: number;
   readonly side_effects: readonly WireEffect[];
+}
+
+/**
+ * One serialized classify_signals row (003 FR-001) — the identity fields
+ * plus the integer weight. `reasoning` is deliberately absent: its
+ * wording is implementation-defined (spec 003 assumption 8), so feed
+ * assertions project rows to these five contract-pinned fields (quickstart
+ * Section 4's jq shape) and compare with toEqual, the same assertion
+ * discipline the effect projections above pin implementation-defined
+ * description text away with. Shared by the pipeline suite's feed
+ * validator (tests/analysis.test.ts), the dispatch suite's result
+ * projection (tests/server.test.ts), and the canonical quickstart fixture
+ * (tests/helpers/quickstart.ts) — the consolidation of the two former
+ * per-suite copies (dispatch f4e5896a).
+ */
+export interface WireSignal {
+  readonly function: string;
+  readonly package: string;
+  readonly side_effect_type: string;
+  readonly source: string;
+  readonly weight: number;
 }
 
 /**
