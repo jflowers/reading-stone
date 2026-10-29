@@ -23,9 +23,12 @@
 //   every same-named target pairs in the analyze record order
 //   (compareFileLineName); the exact tier shadows the case-insensitive tier
 //   per test; unpaired tests produce no pairs — never confidence-0 rows.
-//   Within one test's emitted pairs, wire-indistinguishable same-file
-//   same-name targets collapse to the first record in analyze record order
-//   (T036's FR-005-amended first-wins dedup; the dedup domain is the test
+//   Within one test's emitted pairs, wire-indistinguishable targets
+//   collapse to the first record in analyze record order (T036's
+//   FR-005-amended first-wins dedup, keyed on the derived wire identity
+//   `(derivePackage(relPath), name)` — same-file AND colliding-package
+//   same-named records alike, the iteration-3 F1 amendment; the dedup
+//   domain is the test
 //   function, so same-titled siblings each keep their pairs).
 // - The `Pairing` record: test, target, strategy, confidence.
 //
@@ -324,8 +327,11 @@ describe("pairTests (same-file-same-name pair-key dedup)", () => {
   // in analyze record order survives (first-wins, the byNode node-key
   // discipline). The collapse is a documented conservative imprecision:
   // the later same-named record emits no pairs and no rows. Same-named
-  // records in different files stay distinct (the "pairs every same-named
-  // target in the analyze record order" case above pins that half).
+  // records in different files whose paths derive GENUINELY different
+  // packages stay distinct (the "pairs every same-named target in the
+  // analyze record order" case above pins that half); same-named records
+  // in colliding-package files collapse like the same-file case (the
+  // iteration-3 F1 variant-a fixture below pins that half).
   it("collapses same-file same-name targets to the first record in analyze record order", () => {
     // Declaration order spells the later line first; the record order
     // (file, line, name) puts line 3 before line 9, so the FIRST record —
@@ -359,6 +365,30 @@ describe("pairTests (same-file-same-name pair-key dedup)", () => {
         line: 3,
         strategy: "naming",
         confidence: 70,
+      },
+    ]);
+  });
+
+  it("collapses same-named targets in colliding-package files to the first record in analyze record order", () => {
+    // Iteration-3 F1 variant a (FR-005 amended; data-model Section 6
+    // amended): derivePackage is NOT injective over files — src/pkg.ts
+    // and src/pkg/index.ts both derive "src.pkg" (the file-vs-index
+    // flattening) — so same-named records in those different files are
+    // wire-indistinguishable exactly like the same-file case. The
+    // analyze record order (file, line, name) puts "src/pkg.ts" first
+    // ("." sorts before "/" in UTF-16 code-unit order), so its record
+    // owns the pair and the nested index record collapses.
+    const nested = recordOf("util", "src/pkg/index.ts", 1);
+    const flat = recordOf("util", "src/pkg.ts", 5);
+    const pairs = pairTests([testOf("util")], indexOver([nested, flat]));
+    expect(pairIdentity(pairs)).toEqual([
+      {
+        title: "util",
+        name: "util",
+        relPath: "src/pkg.ts",
+        line: 5,
+        strategy: "naming",
+        confidence: 90,
       },
     ]);
   });
