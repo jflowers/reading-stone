@@ -475,9 +475,10 @@ detection keeps the detector untouched (its FR-019-era contract — no
 classification — is superseded at the wiring layer, exactly where
 FR-012 places the change) and keeps `assembleFunctionRecords` /
 `serializeFunctionRecord` unchanged. The FR-011 sum-invariant is the
-cross-method consistency check: for every pair, `50 + tierBoost −
-Σ(all emitted signals for the pair)` equals the reported confidence —
-asserted in tests.
+cross-method consistency check: for every pair, `50 + tierBoost +
+Σ(all emitted signals for the pair, the contradiction row included as
+a negative-weight entry)` equals the reported confidence — asserted
+in tests.
 
 **Alternatives considered**:
 - *Detector computes classifications during detection*: rejected —

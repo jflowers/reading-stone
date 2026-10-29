@@ -246,10 +246,11 @@ Note the polarity mechanics: `logMessage` is all-negative (no
 contradiction); `writeBanner` mixes the positive naming signal with the
 negative docstring signal (contradiction fires, exactly once);
 `handle`'s `Handle` prefix is routed away from StdoutWrite so it emits
-no naming signal at all. Each confidence equals `50 + tierBoost −
-Σ(emitted signal weights for the pair)` — the FR-011 sum-invariant a
-Gaze consumer relies on; the conformance suite asserts it for every
-pair.
+no naming signal at all. Each confidence equals `50 + tierBoost +
+Σ(emitted signal weights for the pair)` — the contradiction row
+included in the sum as a negative-weight entry — the FR-011
+sum-invariant a Gaze consumer relies on; the conformance suite asserts
+it for every pair.
 
 ### 6. Determinism check (SC-005)
 
