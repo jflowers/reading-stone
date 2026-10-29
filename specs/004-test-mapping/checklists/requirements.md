@@ -56,5 +56,5 @@ All items pass. Notes on the judgment calls behind three of them:
 No [NEEDS CLARIFICATION] markers were emitted: the originating issue's autonomy
 instruction asked for informed defaults over questions, and every open point (pass
 semantics, pairing priority, envelope shape, patterns scope, title identity) is
-resolved with a documented, reference-grounded assumption (spec Assumptions 1-17)
+resolved with a documented, reference-grounded assumption (spec Assumptions 1-18)
 rather than a blocking question.

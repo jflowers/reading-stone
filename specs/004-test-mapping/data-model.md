@@ -10,7 +10,7 @@ transcribes it verbatim into `src/quality/matchers.ts` and a
 conformance suite diffs the module against this section (the
 routing-table anti-drift pattern).
 
-Sources: [spec.md](spec.md) (FR-001 through FR-016, assumptions 1–17),
+Sources: [spec.md](spec.md) (FR-001 through FR-016, assumptions 1–18),
 [research.md](research.md) (R1–R12), the wire precedent of
 `src/signals/types.ts`, the serializer precedent of `src/models.ts`,
 the taxonomy (`src/taxonomy.ts`), and the reference analyzer's
@@ -252,7 +252,11 @@ hooks are excluded by root; non-static titles collect as `""`. The
 walk domain is the suite's static structure — statement positions at
 the file top level and inside describe callback bodies, plus the
 control-flow interiors there (if/else, loops, plain blocks: `for (const
-c of cases) it(c.label, ...)` and `if (cond) it(...)` collect) — and
+c of cases) it(c.label, ...)` and `if (cond) it(...)` collect; `switch`,
+`try`/`catch`/`finally`, and labeled statements are OUTSIDE the walk
+domain — the deliberately narrow, conservative control-flow
+enumeration, so a registration reachable only through them does not
+collect) — and
 never arbitrary nested function expressions (an `it` reachable only
 through a helper call is outside the suite's static structure and does
 not collect). The walk is depth-bounded (plan.md Scale/Scope): a
@@ -337,25 +341,32 @@ Within the naming strategy, the exact tier shadows the
 case-insensitive tier per test (a test matching one target exactly and
 another case-insensitively emits only the exact pair — research R4).
 
-**Pair ordering and dedup** (FR-005): when a strategy matches multiple
-targets, each distinct `(target_package, target_function)` pairs,
-ordered by the analyze record order `(file, line, name)`
+**Pair ordering and dedup** (FR-005, amended): when a strategy matches
+multiple targets, each distinct `(target_package, target_function)`
+pairs, ordered by the analyze record order `(file, line, name)`
 (`compareFileLineName`). Within one test function's emitted pairs the
 wire pair key `(test_function, test_file, target_package,
-target_function)` is unique: two distinct records that share one file
-and one declared name — same-named methods of different classes in one
-file — are wire-indistinguishable targets (identical `target_package`
-from the same file, identical `target_function` from the name), and the
-pair set keeps only the first of them in record order — first-wins, the
-`byNode` node-key discipline — collapsing the later same-named record
-as a documented conservative imprecision (its pairs and rows are not
-emitted; distinct test functions dedup independently). Cross-strategy
-and cross-package duplicates remain structurally impossible: per-test
-first-match-wins emits one strategy's pairs only, and `derivePackage`
-is injective over files, so records in different files never share a
-pair key. Wire tuples narrower than the pair key legitimately collide
-and are not uniqueness violations: same-named targets across different
-packages collide on `(test_function, test_file, target_function)` and
+target_function)` is unique, and the dedup keys on the derived wire
+identity `(derivePackage(relPath), name)` — NOT on `(relPath, name)`:
+`derivePackage` is not injective over files (same-stem different
+extensions `util.js`/`util.cjs` derive `util`; a dot in a stem and a
+nested directory `a.b.ts`/`a/b.ts` derive `a.b`; a file and its
+directory index `pkg.ts`/`pkg/index.ts` derive `pkg`). Two distinct
+records that share one file and one declared name — same-named methods
+of different classes in one file — OR that sit in different files whose
+paths derive the same package while sharing the declared name, are
+wire-indistinguishable targets (identical `target_package` from the
+collision, identical `target_function` from the name), and the pair set
+keeps only the first of them in record order — first-wins, the `byNode`
+node-key discipline — collapsing the later record as a documented
+conservative imprecision (its pairs and rows are not emitted; distinct
+test functions dedup independently). Cross-strategy duplicates remain
+structurally impossible: per-test first-match-wins emits one strategy's
+pairs only. Records whose paths derive genuinely different packages
+never share a pair key. Wire tuples narrower than the pair key
+legitimately collide
+and are not uniqueness violations: same-named targets across genuinely
+different packages collide on `(test_function, test_file, target_function)` and
 are disambiguated by `target_package` in the pair key; same-titled
 sibling tests inside one `describe` (spec edge case 2) collide on
 `test_function` itself — they are distinct test functions, each keeping
