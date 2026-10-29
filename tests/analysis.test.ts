@@ -74,7 +74,7 @@
 // Sections 8-9; contracts/analyze-classification.md Section 3; quickstart
 // Sections 4, 5, 8): the suites at the very bottom of this file drive
 // BOTH method entries over the same trees — analyze() for the reported
-// labels, the classify_signals entry (T029 in src/signals/adapter.ts) for
+// labels, the classify_signals entry (T029 in src/analysis.ts) for
 // the raw feed — and derive every (function record, canonical effect
 // type) pair's {label, confidence} from the feed through the FR-011
 // sum-invariant, comparing against what analyze reported: FR-013's
@@ -1448,20 +1448,20 @@ type ClassifySignalsEntry = (
   stderr: Writable,
 ) => Promise<readonly Record<string, unknown>[]>;
 
-// Loads the classify_signals entry from src/signals/adapter.js, failing
-// loud with a named error while T029 is outstanding. Dynamic on purpose:
+// Loads the classify_signals entry from src/analysis.js, failing loud
+// with a named error while T029 is outstanding. Dynamic on purpose:
 // the missing export is this suite's intended red, and confining it here
 // is what keeps every earlier suite in this file green — the test-first
 // discipline tasks.md US2 pins (tests written first, observed to FAIL,
 // then turned green by implementation without touching the assertions).
 async function loadClassifySignals(): Promise<ClassifySignalsEntry> {
-  const adapterModule = (await import("../src/signals/adapter.js")) as {
+  const analysisModule = (await import("../src/analysis.js")) as {
     classifySignals?: ClassifySignalsEntry;
   };
-  const entry = adapterModule.classifySignals;
+  const entry = analysisModule.classifySignals;
   if (typeof entry !== "function") {
     throw new Error(
-      "src/signals/adapter.js does not export classifySignals yet — T029 lands the classify_signals entry; this suite is RED-FIRST by design",
+      "src/analysis.js does not export classifySignals yet — T029 lands the classify_signals entry; this suite is RED-FIRST by design",
     );
   }
   return entry;

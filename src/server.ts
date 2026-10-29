@@ -1,6 +1,6 @@
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { analyze } from "./analysis.js";
+import { analyze, classifySignals } from "./analysis.js";
 import { computeComplexity } from "./complexity.js";
 import { parseCoverage } from "./coverage.js";
 import { discover, InvalidRootPathError } from "./discovery.js";
@@ -18,7 +18,6 @@ import {
   shutdownResult,
   successResponse,
 } from "./protocol.js";
-import { classifySignals } from "./signals/adapter.js";
 
 export class RpcError extends Error {
   readonly code: number;
@@ -350,8 +349,8 @@ export class Server {
     });
     // `classify_signals` (FR-014/FR-015; research R11; contracts/
     // classify-signals.md error table): the SAME shared analysis-params
-    // validation as analyze/complexity/coverage, then the T029 adapter
-    // entry — the identical pipeline stages analyze runs, emitting the
+    // validation as analyze/complexity/coverage, then the T029 entry —
+    // the identical pipeline stages analyze runs, emitting the
     // raw pair-keyed signal feed — wrapped as `{"signals": [...]}`.
     // Unlike the core analysis methods, this one is capability-gated from
     // the platform's side (Gaze calls it when and only when the

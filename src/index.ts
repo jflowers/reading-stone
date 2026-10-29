@@ -28,6 +28,7 @@ export type {
 } from "./analysis.js";
 export {
   analyze,
+  classifySignals,
   normalizePatterns,
   pathInScope,
 } from "./analysis.js";
@@ -50,10 +51,7 @@ export {
   serializeFunctionRecord,
 } from "./models.js";
 export type { ProgramContext } from "./program.js";
-export {
-  classifyPairs,
-  classifySignals,
-} from "./signals/adapter.js";
+export { classifyPairs } from "./signals/adapter.js";
 export { callerSignal } from "./signals/caller.js";
 export type { RecordEvidence } from "./signals/evidence.js";
 export { interfaceSignal } from "./signals/interface.js";

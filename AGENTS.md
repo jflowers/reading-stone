@@ -101,14 +101,14 @@ reading-stone/
 │   ├── internal.ts          # Shared internal primitives: (file, line, name) order, lexical path containment
 │   ├── safeio.ts            # Bounded safe file reader with skip diagnostics
 │   ├── discovery.ts         # Project walking, file classification, framework detection, discover()
-│   ├── analysis.ts          # Pattern rules + shared prepareAnalysis pipeline; analyze() response assembly emitting classification records via the signal pipeline
+│   ├── analysis.ts          # Pattern rules + shared prepareAnalysis pipeline; analyze() and classifySignals() method entries (assembly and signal-feed serialization)
 │   ├── program.ts           # TypeScript analysis context (program mode with type checker; parse-only fallback)
 │   ├── extract.ts           # Table-driven function extraction (ExtractionRecord set)
 │   ├── detector.ts          # Side-effect detection rules + FunctionRecord assembly
 │   ├── complexity.ts        # Cyclomatic complexity engine (ComplexityEntry)
 │   ├── coverage.ts          # Istanbul coverage-final.json artifact parser (CoverageEntry)
 │   └── signals/             # Classification signal pipeline (classify_signals method + analyze wiring)
-│       ├── adapter.ts       # Pair fan-out core, contradiction synthesis, confidence formula, classifySignals()
+│       ├── adapter.ts       # Pair fan-out core, contradiction synthesis, confidence formula (classifyPairs)
 │       ├── caller-index.ts  # Import-graph caller index (distinct-module counts via the type checker)
 │       ├── caller.ts        # caller_count bucket rule (+5 / +10 / +15 by distinct calling modules)
 │       ├── evidence.ts      # RecordEvidence snapshot (exportedness, JSDoc, interface membership, callers)
