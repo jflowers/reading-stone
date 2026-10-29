@@ -12,11 +12,11 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 | `initialize` | Implemented |
 | `shutdown` | Implemented |
 | `discover` | Implemented (params `{root_path}`; result `{source_files, test_files, framework}`) |
-| `analyze` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — FunctionRecords with `side_effects` arrays) |
+| `analyze` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — FunctionRecords with `side_effects` arrays, every effect carrying `classification: {label, confidence}`) |
 | `analyze/stream` | Not implemented (`-32601`) |
 | `complexity` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — ComplexityEntry records) |
 | `coverage` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — CoverageEntry records) |
-| `classify_signals` | Not implemented (`-32601`) |
+| `classify_signals` | Implemented (params `{root_path, patterns}`; result `{"signals": [...]}` — the raw classification signal feed) |
 | `test_mapping` | Not implemented (`-32601`) |
 | `doc_coverage` | Not implemented (`-32601`) |
 | `cognitive_complexity` | Not implemented (`-32601`) |
@@ -24,16 +24,54 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 `discover` is implemented and advertised via `capabilities.discover: true`.
 `analyze`, `complexity`, and `coverage` are implemented as core protocol
 methods — not gated behind a capability flag — and share one params surface:
-`root_path` plus an optional `patterns` array of path-prefix strings. The
-remaining capability flags (`test_mapping`, `classify_signals`, `streaming`,
-`doc_coverage`, `cognitive_complexity`) are `false` at handshake; their
-methods are the roadmap — see `openspec/changes/`.
+`root_path` plus an optional `patterns` array of path-prefix strings.
+`classify_signals` is implemented and advertised via
+`capabilities.classify_signals: true`; Gaze calls it only when that flag is
+true, with the same params surface. The remaining capability flags
+(`test_mapping`, `streaming`, `doc_coverage`, `cognitive_complexity`) are
+`false` at handshake; their methods are the roadmap — see
+`openspec/changes/`.
 
 The side effects `analyze` reports are governed by the disposition table:
 for each of the 48 canonical taxonomy types it records the tier, the
 disposition (how completely Reading Stone detects it), the TypeScript
 constructs detected, and the rationale for `N/A` rows — see
 [docs/effect-disposition.md](docs/effect-disposition.md).
+
+## Classification
+
+Every effect in an `analyze` response carries a
+`classification: {label, confidence}` computed by a deterministic signal
+pipeline that runs per (function, effect-type) pair. Six signal sources
+produce the evidence — five extractors plus one synthesized penalty:
+
+- `interface` — the function satisfies a declared interface member (+30)
+- `visibility` — exported function (+8), exported return type (+6), exported
+  receiver (+6), clamped at +20
+- `caller_count` — 1, 2–3, or 4+ distinct modules calling the function
+  (+5/+10/+15; zero callers emits no signal)
+- `naming_convention` — contractual or incidental name prefixes (±10), plus
+  an `Err`-prefixed name on a `SentinelError` effect (+30)
+- `docstring` — JSDoc `@returns`/`@throws` tags (+15), indirect prose verbs
+  (+5), incidental verbs (−15)
+- `contradiction` — synthesized (−20) when a pair's evidence mixes positive
+  and negative weights
+
+Confidence is `50 + tier_boost + Σ(signal weights) − 20` when a
+contradiction is present (`tier_boost`: +25 for P0, +10 for P1, +0 for
+P2–P4), clamped to [0, 100]. Labels derive from the clamped confidence:
+`contractual` ≥ 80, `ambiguous` [50, 80), `incidental` < 50. An effect with
+no matching signals is never dropped — it classifies at the ambiguous floor
+(50 + tier_boost).
+
+The `classify_signals` method returns the raw feed behind those
+classifications: one signal per matched (function, effect-type, source)
+triple — `function`, `package`, `side_effect_type`, `source`, integer
+`weight`, and a short `reasoning` — deterministically ordered by
+`(package, function, side_effect_type, source)`. Both methods share one
+pipeline: summing a pair's emitted signal weights (the contradiction row
+included) back into `50 + tier_boost` reproduces the confidence `analyze`
+reports.
 
 ## Installation
 
@@ -68,7 +106,7 @@ analyzers:
 ```text
 reading-stone/
 ├── src/
-│   ├── index.ts          # Package surface (VERSION + taxonomy/model re-exports)
+│   ├── index.ts          # Package surface (VERSION + taxonomy/model/signal re-exports)
 │   ├── main.ts           # Entry point (reading-stone --stdio)
 │   ├── server.ts         # JSON-RPC server (stdin/stdout)
 │   ├── protocol.ts       # Request/response types
@@ -81,7 +119,18 @@ reading-stone/
 │   ├── extract.ts        # Table-driven function extraction (ExtractionRecord set)
 │   ├── detector.ts       # Side-effect detection rules + FunctionRecord assembly
 │   ├── complexity.ts     # Cyclomatic complexity engine (ComplexityEntry)
-│   └── coverage.ts       # Istanbul coverage-final.json artifact parser (CoverageEntry)
+│   ├── coverage.ts       # Istanbul coverage-final.json artifact parser (CoverageEntry)
+│   └── signals/          # Classification signal pipeline (classify_signals + analyze wiring)
+│       ├── adapter.ts       # Pair fan-out, contradiction synthesis, confidence formula, classifySignals()
+│       ├── caller-index.ts  # Import-graph caller index (distinct-module counts via the type checker)
+│       ├── caller.ts        # caller_count bucket rule (+5/+10/+15)
+│       ├── evidence.ts      # RecordEvidence snapshot (exportedness, JSDoc, interface, callers)
+│       ├── interface.ts     # interface signal (+30)
+│       ├── jsdoc.ts         # docstring signal (+15 tags / +5 indirect / -15 incidental)
+│       ├── naming.ts        # naming_convention signal (prefix rules + Err sentinel case)
+│       ├── routing.ts       # Effect-type routing table (48 types → agreeing vocabulary)
+│       ├── types.ts         # Signal wire record + serializer (closed source set)
+│       └── visibility.ts    # visibility signal (exported components, clamp +20)
 ├── tests/
 ├── docs/
 │   └── effect-disposition.md  # 48-type disposition table (tier, disposition, TypeScript mapping, rationale)
@@ -106,7 +155,8 @@ fixed transport bounds (not configurable in v1):
   `<root>/coverage/coverage-final.json`. When that artifact is absent,
   unreadable, or invalid, `coverage` returns `{"functions": []}` and never
   errors (FR-025). It never runs the project's tests.
-- **Per-request pipeline cost** — each `analyze` or `complexity` request
+- **Per-request pipeline cost** — each `analyze`, `complexity`, or
+  `classify_signals` request
   boots a fresh TypeScript compiler context (tree walk, pre-read,
   bootstrap, extraction) and disposes it before responding; no pipeline
   state is reused across requests. `coverage` reads a pre-existing
