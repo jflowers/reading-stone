@@ -66,7 +66,7 @@ keeps TypeScript identifiers identical to the wire names, the
 |---|---|---|
 | `test_function` | `string` | The describe-qualified title (Section 5.1); possibly empty (non-static titles) |
 | `test_file` | `string` | Root-relative POSIX path of the test file |
-| `assertion_location` | `string` | `"<relPath>:<line>"` — the expect/assert call's 1-based line; no column component |
+| `assertion_location` | `string` | `"<relPath>:<line>"` — 1-based line of the assertion's anchor (the outermost wrapper of the matcher/assert invocation, `await` spellings included); no column component |
 | `assertion_type` | `string` | Exactly one of `equality`, `comparison`, `membership`, `error_check`, `""` — never `generic`, never `null` |
 | `target_function` | `string` | The target record's declared name |
 | `target_package` | `string` | `derivePackage(targetRecord.relPath)` — the dotted module path |
@@ -248,15 +248,25 @@ unwrapping intermediate calls (`it.each(table)(title, fn)`) — is an
 identifier `it`/`test` or a property chain rooted at one (modifier set
 open); the callback is the last function-expression argument; describe
 callbacks are containers (title-stack walk); `bench` and the four
-hooks are excluded by root; non-static titles collect as `""`.
+hooks are excluded by root; non-static titles collect as `""`. The
+walk domain is the suite's static structure — statement positions at
+the file top level and inside describe callback bodies, plus the
+control-flow interiors there (if/else, loops, plain blocks: `for (const
+c of cases) it(c.label, ...)` and `if (cond) it(...)` collect) — and
+never arbitrary nested function expressions (an `it` reachable only
+through a helper call is outside the suite's static structure and does
+not collect). The walk is depth-bounded (plan.md Scale/Scope): a
+pathological nesting depth past the mapping-walk budget skips the whole
+file with exactly one skip diagnostic — the `extractFromFile`
+discipline, never a request crash.
 
 ### 5.2 `AssertionSite` (src/quality/assertions.ts)
 
 | Field | Type | Notes |
 |---|---|---|
 | `kind` | `AssertionKind` | The classified kind or `""` (Section 4) |
-| `line` | `number` | 1-based line of the `expect(` / assert call — the `assertion_location` anchor |
-| `character` | `number` | 0-based column of the call — the row-order tie-break |
+| `line` | `number` | 1-based line of the assertion's anchor — the outermost wrapper of the matcher/assert invocation (`await` and parenthesized wrappers unwrapped upward), so every matcher invocation on one shared chain reports the SAME anchor (US1-1; the row's `assertion_location` line, no column on the wire) |
+| `character` | `number` | 0-based character of that same outermost anchor — the row-order tie-break |
 | `assertedExpression` | `Node \| null` | The provenance subject: `expect(...)`'s first argument, or the assert call's first argument; `null` when absent |
 | `argumentSubtree` | `Node` | Pass 4's scan domain, pinned precisely: for expect chains, the invoked matcher invocation's `CallExpression` (its subtree spans both the `expect(...)` call's arguments and the matcher's own arguments — `expect(list).toContain(target(item))` scans `list` and `target(item)` alike); for `node:assert` forms, the assert call's full argument list |
 | `expectChain` | `boolean` | `true` for expect-rooted forms, `false` for node:assert |
@@ -330,19 +340,28 @@ another case-insensitively emits only the exact pair — research R4).
 **Pair ordering and dedup** (FR-005): when a strategy matches multiple
 targets, each distinct `(target_package, target_function)` pairs,
 ordered by the analyze record order `(file, line, name)`
-(`compareFileLineName`). Pairing is idempotent per (test function,
-target record): no duplicate `(test_function, test_file,
-target_package, target_function)` pair exists (the reference
-analyzer's landed key) — per-test first-match-wins plus
-record-ordered distinct-target emission make duplicates structurally
-impossible. Wire tuples narrower than the pair key legitimately
-collide and are not uniqueness violations: same-named targets across
-different packages collide on `(test_function, test_file,
-target_function)` and are disambiguated by `target_package` in the
-pair key; same-titled sibling tests inside one `describe` (spec edge
-case 2) collide on `test_function` itself and their rows are
-disambiguated by `assertion_location`. A test matched by no strategy
-produces no pairs and no rows — never confidence-0 rows (US1-3).
+(`compareFileLineName`). Within one test function's emitted pairs the
+wire pair key `(test_function, test_file, target_package,
+target_function)` is unique: two distinct records that share one file
+and one declared name — same-named methods of different classes in one
+file — are wire-indistinguishable targets (identical `target_package`
+from the same file, identical `target_function` from the name), and the
+pair set keeps only the first of them in record order — first-wins, the
+`byNode` node-key discipline — collapsing the later same-named record
+as a documented conservative imprecision (its pairs and rows are not
+emitted; distinct test functions dedup independently). Cross-strategy
+and cross-package duplicates remain structurally impossible: per-test
+first-match-wins emits one strategy's pairs only, and `derivePackage`
+is injective over files, so records in different files never share a
+pair key. Wire tuples narrower than the pair key legitimately collide
+and are not uniqueness violations: same-named targets across different
+packages collide on `(test_function, test_file, target_function)` and
+are disambiguated by `target_package` in the pair key; same-titled
+sibling tests inside one `describe` (spec edge case 2) collide on
+`test_function` itself — they are distinct test functions, each keeping
+its own pairs, and their rows are disambiguated by
+`assertion_location`. A test matched by no strategy produces no pairs
+and no rows — never confidence-0 rows (US1-3).
 
 **Arm scoping** (FR-006): targets are the pattern-filtered,
 exclusion-screened source arm (the identical `analyze` file set);
@@ -443,7 +462,10 @@ chain), preserving byte-identical repeat responses (Constitution I).
 
 **Location formats**: `assertion_location` is
 `"<relPath>:<line>"` — root-relative POSIX path, 1-based line of the
-`expect(` / assert call, no column (US1-1). `test_file` is the
+assertion expression's outermost wrapper (the matcher/assert invocation
+with `await` and parenthesized wrappers unwrapped upward — every
+matcher invocation on one shared chain reports the chain's single
+anchor), no column (US1-1). `test_file` is the
 root-relative POSIX path. Both derive from the same discovery
 spellings every other method reports.
 

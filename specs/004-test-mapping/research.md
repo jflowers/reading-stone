@@ -188,7 +188,18 @@ deterministic function of the static text). `bench` callbacks, and the
 root matching (their callee roots are `bench`/`beforeEach`/…, never
 `it`/`test`). Collection order is source order; the collector's output
 is sorted by `(relPath, collection index)` — a stable, deterministic
-input to pairing.
+input to pairing. The walk domain (amended, iteration-2 consented fix):
+statement positions at the file top level and inside describe callback
+bodies, PLUS their control-flow interiors — `if`/`else`, `for` /
+`for-of` / `for-in` / `while` / `do-while`, and plain blocks — so
+loop-generated (`for (const c of cases) it(c.label, ...)`) and
+conditional (`if (cond) it(...)`) registrations collect; arbitrary
+nested function expressions are never entered (an `it` reachable only
+through a helper call is outside the suite's static structure — the
+documented boundary between suite structure and arbitrary code). The
+walk is depth-bounded (plan.md Scale/Scope): past the mapping-walk
+budget the whole file skips with exactly one diagnostic — the
+`extractFromFile` discipline, never a request crash (Constitution V).
 
 **Rationale**: The syntax-driven rule matches the spec's edge case 11
 (vitest and jest share the `it`/`test`/`describe`/`expect` surface;
@@ -263,16 +274,24 @@ FR-004/US2-7). Per strategy:
    by a higher-priority strategy pairs with each such referenced
    target at 75, in record order.
 
-Pair dedup: no duplicate `(test_function, test_file, target_package,
-target_function)` pair exists — the reference analyzer's landed key.
-The per-test first-match-wins evaluation makes duplicate strategy
-emissions structurally impossible, and within a strategy the
-record-ordered emission over distinct `(package, name)` targets is
-duplicate-free by construction (FR-005). Wire tuples narrower than the
-pair key legitimately collide: same-named targets across different
-packages are distinct pairs (disambiguated by `target_package`), and
-same-titled sibling tests inside one `describe` share the identical
-`test_function` — their rows disambiguate through
+Pair dedup (amended, iteration-2 consented fix): within one test
+function's emitted pairs, no duplicate `(test_function, test_file,
+target_package, target_function)` pair exists. The per-test
+first-match-wins evaluation makes duplicate strategy emissions
+structurally impossible, and within a strategy the record-ordered
+emission over distinct `(package, name)` targets is duplicate-free by
+construction. The residual unsoundness the original pin missed — two
+distinct records sharing one file and one declared name (same-named
+methods of different classes in one file) are wire-indistinguishable
+targets with identical pair keys — resolves by first-wins in analyze
+record order `(file, line, name)`, the `byNode` node-key discipline:
+the pair set keeps the FIRST record's pair and collapses the later
+same-named record as a documented conservative imprecision (FR-005).
+Wire tuples narrower than the pair key legitimately collide: same-named
+targets across different packages are distinct pairs (disambiguated by
+`target_package`), and same-titled sibling tests inside one `describe`
+share the identical `test_function` — they are distinct test functions
+that each keep their own pairs, and their rows disambiguate through
 `assertion_location`. Unmatched tests produce no pairs and therefore
 no rows (US1-3 — never confidence-0 rows).
 

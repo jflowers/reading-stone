@@ -109,9 +109,21 @@ case 1); 85% coverage thresholds, `biome check`, strict `tsc`, and
 **Scale/Scope**: Arbitrary untrusted TypeScript/JavaScript projects; row
 cardinality bounded by Σ(paired test functions × collected assertions);
 target set bounded by the in-scope extraction records; test arm bounded
-by the discovered, exclusion-screened test files; resource bounds
-inherited from the `prepareAnalysis` pipeline (16 MiB file cap, AST
-depth budget, bounded compiler host).
+by the discovered, exclusion-screened test files; resource bounds: the
+16 MiB `readBounded` file cap and the bounded hermetic compiler host ARE
+inherited from the `prepareAnalysis` pipeline (the test arm is pre-read
+through the same bounded reader and admitted through the same host), but
+the AST depth budget is NOT — `extract.ts`'s `AST_DEPTH_BUDGET` guards
+the extraction walk only, and every mapping-stage walk runs outside it.
+Each mapping-stage walk (test-function collection, assertion detection,
+and the Phase 4–6 strategy and provenance walks) MUST therefore carry
+its own bounded-walk guard: an explicit depth budget in the `extract.ts`
+shape (fixed, not caller-configurable) with per-unit skip on exhaustion
+plus a `RangeError` guard, so a pathological test file degrades to a
+skip diagnostic and never crashes the whole request (Constitution V; the
+landed collection and assertion walks carry the guard from the
+review-fix round, and the Phase 4–6 tasks fold the same requirement into
+their walks).
 
 ## Constitution Check
 
