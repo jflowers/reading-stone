@@ -70,6 +70,22 @@
 // signals need program mode); Section 8's parse-only variant reuses the
 // same sources without it.
 //
+// T028 EXTENSION (spec 003; US2 tests; FR-013/FR-011; data-model.md
+// Sections 8-9; contracts/analyze-classification.md Section 3; quickstart
+// Sections 4, 5, 8): the suites at the very bottom of this file drive
+// BOTH method entries over the same trees — analyze() for the reported
+// labels, the classify_signals entry (T029 in src/signals/adapter.ts) for
+// the raw feed — and derive every (function record, canonical effect
+// type) pair's {label, confidence} from the feed through the FR-011
+// sum-invariant, comparing against what analyze reported: FR-013's
+// one-pipeline guarantee made observable at the consumer's join, plus the
+// parse-only feed shrink from 11 signals to 9 (quickstart Section 8).
+// RED-FIRST: the classify_signals entry does not exist until T029 lands
+// it, so those suites fail on a named loader error while every earlier
+// suite stays green — the entry is loaded dynamically precisely so the
+// missing export cannot fail this file's module resolution and mask the
+// baseline above.
+//
 // The scope fixtures are tsconfig-less, so the pipeline bootstraps
 // parse-only mode (FR-004) — the scope behavior under test (walk,
 // screening, test-file exclusion, pattern filter) is decided before the
@@ -81,6 +97,7 @@
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import type { Writable } from "node:stream";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   analyze,
@@ -94,6 +111,7 @@ import { serializeFunctionRecord } from "../src/models.js";
 import { classifyPairs } from "../src/signals/adapter.js";
 import { buildRecordEvidence } from "../src/signals/evidence.js";
 import type { Signal } from "../src/signals/types.js";
+import { type SideEffectType, TIER_MAP, type Tier } from "../src/taxonomy.js";
 import {
   createFixtureTree,
   drainCleanups,
@@ -1400,5 +1418,626 @@ describe("analyze wiring: classified effects on the wire (003 FR-012/FR-013; SC-
     const functions = extractFunctions(result);
     expectWireInvariants(functions);
     expect(profileOf(functions)).toEqual(QUICKSTART_PROFILE_PARSE_ONLY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T028 (spec 003; US2 tests; FR-013/FR-011; data-model.md Sections 8-9;
+// contracts/analyze-classification.md Section 3; research R10; quickstart
+// Sections 4, 5, 8). The cross-method consistency suite: for every
+// (function record, canonical effect type) pair over fixture trees (the
+// quickstart tree canonical, both modes), the {label, confidence} analyze
+// reports must equal the classification derived from the classify_signals
+// feed via the FR-011 sum-invariant — and the parse-only feed shrinks
+// from 11 to 9 rows with the checker-dependent interface and caller_count
+// rows absent. RED-FIRST until T029 lands the classifySignals entry: every
+// suite below fails on the loader's named error, confined to this section
+// by the dynamic import (a static named import of the missing export would
+// fail the whole file's module resolution and mask the green baseline
+// above).
+// ---------------------------------------------------------------------------
+
+// The classify_signals entry's signature, pinned per T029 and research
+// R10/R11: the identical param surface as analyze() (root, raw patterns,
+// injected stderr) returning the serialized Signal[] — the
+// {"signals": [...]} wrapper is the server handler's job (FR-014), never
+// this entry's.
+type ClassifySignalsEntry = (
+  rootPath: string,
+  patterns: unknown,
+  stderr: Writable,
+) => Promise<readonly Record<string, unknown>[]>;
+
+// Loads the classify_signals entry from src/signals/adapter.js, failing
+// loud with a named error while T029 is outstanding. Dynamic on purpose:
+// the missing export is this suite's intended red, and confining it here
+// is what keeps every earlier suite in this file green — the test-first
+// discipline tasks.md US2 pins (tests written first, observed to FAIL,
+// then turned green by implementation without touching the assertions).
+async function loadClassifySignals(): Promise<ClassifySignalsEntry> {
+  const adapterModule = (await import("../src/signals/adapter.js")) as {
+    classifySignals?: ClassifySignalsEntry;
+  };
+  const entry = adapterModule.classifySignals;
+  if (typeof entry !== "function") {
+    throw new Error(
+      "src/signals/adapter.js does not export classifySignals yet — T029 lands the classify_signals entry; this suite is RED-FIRST by design",
+    );
+  }
+  return entry;
+}
+
+// One serialized feed row, projected to the five contract-pinned fields
+// (quickstart Section 4's shape) — `reasoning` wording is
+// implementation-defined and stays out, the same projection discipline
+// tests/helpers/wire.ts applies and tests/server.test.ts's signal pin
+// mirrors at the dispatch surface.
+interface WireSignalRow {
+  readonly function: string;
+  readonly package: string;
+  readonly side_effect_type: string;
+  readonly source: string;
+  readonly weight: number;
+}
+
+// Validates and projects the classify_signals entry's result: an array of
+// serialized rows whose five pinned fields carry the FR-001 types.
+// Anything else fails loud here — an error result, a wrapped result, or a
+// malformed row is surfaced as the explicit shape violation it is, never
+// a soft empty feed the consistency derivation below would pass on
+// vacuously.
+function signalFeed(result: unknown): readonly WireSignalRow[] {
+  if (!Array.isArray(result)) {
+    throw new Error(
+      'classify_signals returned a non-array — T029 pins the serialized Signal[]; the {"signals": [...]} wrapper is the server handler\'s (FR-014)',
+    );
+  }
+  return result.map((row): WireSignalRow => {
+    if (typeof row !== "object" || row === null) {
+      throw new Error(
+        `classify_signals feed row is not an object: ${JSON.stringify(row)}`,
+      );
+    }
+    const fields = row as Record<string, unknown>;
+    for (const field of ["function", "package", "side_effect_type", "source"]) {
+      if (typeof fields[field] !== "string") {
+        throw new Error(
+          `classify_signals feed row field "${field}" is not a string: ${JSON.stringify(row)}`,
+        );
+      }
+    }
+    if (typeof fields.weight !== "number" || !Number.isInteger(fields.weight)) {
+      throw new Error(
+        `classify_signals feed row weight is not an integer: ${JSON.stringify(row)}`,
+      );
+    }
+    return {
+      function: fields.function as string,
+      package: fields.package as string,
+      side_effect_type: fields.side_effect_type as string,
+      source: fields.source as string,
+      weight: fields.weight as number,
+    };
+  });
+}
+
+// One cross-method run over a tree: analyze's serialized records (the
+// label side) and the classify_signals feed (the evidence side), both
+// driven exactly as the two server handlers drive them. The entry loads
+// first so the RED-FIRST failure is the named loader error, never a
+// half-analyzed tree.
+interface CrossMethodRun {
+  readonly functions: readonly WireRecord[];
+  readonly feed: readonly WireSignalRow[];
+}
+
+async function crossMethodRun(rootPath: string): Promise<CrossMethodRun> {
+  const classifySignals = await loadClassifySignals();
+  const analyzed = await analyze(rootPath, undefined, memorySink().stream);
+  const feed = await classifySignals(rootPath, undefined, memorySink().stream);
+  return { functions: extractFunctions(analyzed), feed: signalFeed(feed) };
+}
+
+// The pair identity a feed row and an analyze effect share (FR-001): the
+// dotted package, the unqualified function name, and the canonical effect
+// type — exactly the join a Gaze consumer performs between
+// classify_signals rows and analyze effects. The NUL separator cannot
+// occur in any of the three fields, so the join is unambiguous. This
+// assumes (package, function) identifies one record per tree — the wire
+// identity data-model.md Section 2 itself assumes; no fixture in this
+// suite violates it.
+function pairKey(pkg: string, fn: string, effectType: string): string {
+  return `${pkg}\u0000${fn}\u0000${effectType}`;
+}
+
+// The tier boosts as the consumer's pinned second copy (data-model.md
+// Section 4): P0 → +25, P1 → +10, P2/P3/P4 → +0. The tier itself is read
+// from the taxonomy's TIER_MAP — the single tier authority (FR-009) — so
+// this copy holds only the arithmetic, the independent-second-copy
+// discipline tests/signals/adapter.test.ts documents for its own table.
+const TIER_BOOST: Readonly<Record<Tier, number>> = {
+  P0: 25,
+  P1: 10,
+  P2: 0,
+  P3: 0,
+  P4: 0,
+};
+
+// FR-010's label bands as the consumer's pinned copy: contractual ≥ 80,
+// ambiguous [50, 80), incidental < 50 — inclusive at 80, exclusive at 50.
+function labelForConfidence(confidence: number): WireClassification["label"] {
+  if (confidence >= 80) {
+    return "contractual";
+  }
+  return confidence >= 50 ? "ambiguous" : "incidental";
+}
+
+// What the consistency derivation covered, so each test can pin its
+// non-vacuity: the distinct (record, canonical effect type) pairs
+// analyzed, and how many of them carried feed rows.
+interface ConsistencySummary {
+  readonly pairs: number;
+  readonly pairsWithSignals: number;
+}
+
+/**
+ * Asserts the FR-011 sum-invariant as the cross-method consumer check
+ * (FR-013; data-model.md Sections 8-9; contracts/analyze-classification.md
+ * Section 3): for every (function record, canonical effect type) pair
+ * analyze reports, summing ALL feed rows attributed to the pair — the
+ * contradiction row included, exactly the join Gaze's ComputeScore
+ * performs on the feed — and adding the base 50 and the taxonomy tier
+ * boost must reproduce the reported confidence, and the FR-010 bands must
+ * reproduce the reported label.
+ *
+ * The `−Σ` spellings in data-model.md Section 8, quickstart.md Section
+ * 5's closing note, and research R10 are editing artifacts of the
+ * formula's `−(contradiction ? 20 : 0)` term; the normative arithmetic is
+ * data-model Section 4's formula and quickstart Section 5's walkthrough
+ * table (`50+25+10 = 85`) — the adjudication tests/signals/adapter.test.ts
+ * documents for its own sum-invariant helper. This helper pins the same
+ * invariant one level up: across the two method entries (analyze's
+ * serialized response vs the classify_signals feed), not within one
+ * adapter result.
+ *
+ * The reverse direction is asserted too (FR-013's one-pipeline guarantee
+ * — the methods can never disagree about which functions or effects
+ * exist): every feed row's pair must be one analyze reports. A pair
+ * analyze reports with no feed rows is the no-signal floor
+ * (50 + tierBoost), never an inconsistency; a feed row for a pair analyze
+ * does not report is an orphan and fails loud, named.
+ *
+ * @param functions analyze's serialized function records.
+ * @param feed the classify_signals feed, projected to the five pinned
+ * fields.
+ * @returns The derivation's coverage counts, for the caller's
+ * non-vacuity pins.
+ */
+function expectCrossMethodConsistency(
+  functions: readonly WireRecord[],
+  feed: readonly WireSignalRow[],
+): ConsistencySummary {
+  const sums = new Map<string, number>();
+  for (const row of feed) {
+    const key = pairKey(row.package, row.function, row.side_effect_type);
+    sums.set(key, (sums.get(key) ?? 0) + row.weight);
+  }
+  const reportedPairs = new Set<string>();
+  let pairsWithSignals = 0;
+  for (const record of functions) {
+    for (const effect of record.side_effects) {
+      const classification = effect.classification;
+      if (classification === undefined) {
+        throw new Error(
+          `effect of type "${effect.type}" on record "${record.name}" (${record.file}) carries no classification — SC-004 is a precondition of the derivation`,
+        );
+      }
+      const key = pairKey(record.package, record.name, effect.type);
+      const sum = sums.get(key) ?? 0;
+      const tier = TIER_MAP[effect.type as SideEffectType];
+      if (tier === undefined) {
+        throw new Error(
+          `effect type "${effect.type}" on record "${record.name}" is not in the taxonomy — the tier lookup failed`,
+        );
+      }
+      // clamp(0, 100, 50 + tierBoost + Σ(all emitted weights for the
+      // pair, the contradiction row included)) — the FR-011 invariant.
+      const derived = Math.max(0, Math.min(100, 50 + TIER_BOOST[tier] + sum));
+      const derivedLabel = labelForConfidence(derived);
+      if (
+        classification.confidence !== derived ||
+        classification.label !== derivedLabel
+      ) {
+        throw new Error(
+          `pair (${record.package}, ${record.name}, ${effect.type}): analyze reported ${JSON.stringify(classification)}, but the feed derives confidence ${derived} (${derivedLabel}) — weight sum ${sum} + base 50 + tierBoost ${TIER_BOOST[tier]} (FR-011 sum-invariant violated)`,
+        );
+      }
+      // Same-type instances share one pair; count it once, on first sight.
+      if (!reportedPairs.has(key)) {
+        reportedPairs.add(key);
+        if (sums.has(key)) {
+          pairsWithSignals += 1;
+        }
+      }
+    }
+  }
+  const orphans = [...sums.keys()].filter((key) => !reportedPairs.has(key));
+  if (orphans.length > 0) {
+    const readable = orphans.map((key) => key.split("\u0000").join(" / "));
+    throw new Error(
+      `the feed carries rows for pairs analyze does not report (FR-013 one-pipeline violation): ${readable.join("; ")}`,
+    );
+  }
+  return { pairs: reportedPairs.size, pairsWithSignals };
+}
+
+// The quickstart feed (quickstart.md Section 4) — the exact 11 rows in
+// the FR-014 (package, function, side_effect_type, source) codepoint
+// order, every weight re-derivable from the Section 5 arithmetic: tweak
+// contributes no row (its PointerArgMutation pair matches no extractor —
+// the no-signal P0 floor). Mirrored from tests/server.test.ts's dispatch
+// pin and this file's signalRows assertions on purpose: each surface
+// holds its own copy of the canonical fixture (the established mirror
+// discipline), so either drifts against quickstart.md, never silently
+// against another test.
+const QUICKSTART_FEED: readonly WireSignalRow[] = [
+  // src.banner — writeBanner's StdoutWrite pair is the tree's one
+  // mixed-polarity set: naming `Write` +10, docstring `Logs` −15, and
+  // exactly one synthesized contradiction row (source order within the
+  // pair is codepoint order: contradiction < docstring <
+  // naming_convention).
+  {
+    function: "writeBanner",
+    package: "src.banner",
+    side_effect_type: "StdoutWrite",
+    source: "contradiction",
+    weight: -20,
+  },
+  {
+    function: "writeBanner",
+    package: "src.banner",
+    side_effect_type: "StdoutWrite",
+    source: "docstring",
+    weight: -15,
+  },
+  {
+    function: "writeBanner",
+    package: "src.banner",
+    side_effect_type: "StdoutWrite",
+    source: "naming_convention",
+    weight: 10,
+  },
+  // src.calc — the only agreeing naming row in the tree.
+  {
+    function: "getTotal",
+    package: "src.calc",
+    side_effect_type: "ReturnValue",
+    source: "naming_convention",
+    weight: 10,
+  },
+  // src.main1, src.main2 — the two exported call sites (visibility +8).
+  {
+    function: "main1",
+    package: "src.main1",
+    side_effect_type: "ReturnValue",
+    source: "visibility",
+    weight: 8,
+  },
+  {
+    function: "main2",
+    package: "src.main2",
+    side_effect_type: "ReturnValue",
+    source: "visibility",
+    weight: 8,
+  },
+  // src.noise — the tree's one fully-discordant pair (docstring `logs`
+  // −15 + naming `log` −10, single polarity, no contradiction row).
+  {
+    function: "logMessage",
+    package: "src.noise",
+    side_effect_type: "LogWrite",
+    source: "docstring",
+    weight: -15,
+  },
+  {
+    function: "logMessage",
+    package: "src.noise",
+    side_effect_type: "LogWrite",
+    source: "naming_convention",
+    weight: -10,
+  },
+  // src.print — handle's one checker-dependent row, the row parse-only
+  // drops.
+  {
+    function: "handle",
+    package: "src.print",
+    side_effect_type: "StdoutWrite",
+    source: "interface",
+    weight: 30,
+  },
+  // src.util — formatLabel's two rows, one checker-dependent
+  // (caller_count), one syntactic (visibility).
+  {
+    function: "formatLabel",
+    package: "src.util",
+    side_effect_type: "ReturnValue",
+    source: "caller_count",
+    weight: 10,
+  },
+  {
+    function: "formatLabel",
+    package: "src.util",
+    side_effect_type: "ReturnValue",
+    source: "visibility",
+    weight: 8,
+  },
+];
+
+// The parse-only feed (quickstart Section 8): the same 11 rows minus the
+// two checker-dependent ones — handle's interface row and formatLabel's
+// caller_count row — leaving exactly 9. Derived by filtering the
+// program-mode pin (the derive-don't-duplicate discipline
+// QUICKSTART_PROFILE_PARSE_ONLY uses), so asserting equality against this
+// array pins three things at once: the count (9), the absent sources, and
+// that every surviving row is identical to its program-mode self.
+const QUICKSTART_FEED_PARSE_ONLY: readonly WireSignalRow[] = QUICKSTART_FEED.filter(
+  (row) => row.source !== "interface" && row.source !== "caller_count",
+);
+
+describe("cross-method consistency: quickstart tree in program mode (003 FR-013/FR-011; quickstart Sections 4-5) — RED-FIRST until T029", () => {
+  // Shared across the suite (the house pattern): one quickstart tree, one
+  // cross-method run. In the RED state the loader throws inside beforeAll,
+  // `run` stays bound to the empty default, and every test fails on the
+  // same named error — afterAll still cleans the tree.
+  let run: CrossMethodRun = { functions: [], feed: [] };
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(quickstartFiles(true));
+    cleanup = tree.cleanup;
+    run = await crossMethodRun(tree.root);
+  }, 60_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it("classify_signals answers the exact 11-signal quickstart feed (quickstart Section 4; FR-014 order)", () => {
+    // The two checker-dependent rows (handle's interface +30,
+    // formatLabel's caller_count +10) double as the mode guard: a silent
+    // parse-only fallback fails here with 9 ≠ 11, never vacuously.
+    expect(run.feed).toEqual(QUICKSTART_FEED);
+  });
+
+  it("every reported {label, confidence} derives from the feed through the sum-invariant (FR-011; data-model Sections 8-9; contract Section 3)", () => {
+    expectWireInvariants(run.functions);
+    const summary = expectCrossMethodConsistency(run.functions, run.feed);
+    // Eight records, one canonical effect type each; tweak's
+    // PointerArgMutation pair is the tree's no-signal floor.
+    expect(summary.pairs).toBe(8);
+    expect(summary.pairsWithSignals).toBe(7);
+  });
+});
+
+describe("cross-method consistency: quickstart parse-only shrink — 11 signals to 9 (003 FR-013; quickstart Section 8) — RED-FIRST until T029", () => {
+  let run: CrossMethodRun = { functions: [], feed: [] };
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    // The same quickstart sources minus the tsconfig: the classify_signals
+    // entry bootstraps parse-only exactly as analyze does (FR-004), and
+    // the checker-dependent interface and caller_count rows drop while
+    // every syntactic row survives verbatim.
+    const tree = await createFixtureTree(quickstartFiles(false));
+    cleanup = tree.cleanup;
+    run = await crossMethodRun(tree.root);
+  }, 60_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it("without the tsconfig, classify_signals answers exactly the 9 checker-independent rows (quickstart Section 8)", () => {
+    expect(run.feed).toEqual(QUICKSTART_FEED_PARSE_ONLY);
+  });
+
+  it("every reported {label, confidence} still derives from the shrunken feed (FR-011; SC-004 both modes)", () => {
+    expectWireInvariants(run.functions);
+    const summary = expectCrossMethodConsistency(run.functions, run.feed);
+    // Same eight pairs; handle's pair joins tweak's on the no-signal floor
+    // (80 → 50), formatLabel keeps its visibility row (93 → 83).
+    expect(summary.pairs).toBe(8);
+    expect(summary.pairsWithSignals).toBe(6);
+  });
+});
+
+describe("cross-method consistency: clamp, tier, and multi-pair profiles (003 FR-013/FR-011) — RED-FIRST until T029", () => {
+  it("a stacked pair whose raw score is 136 clamps to the reported 100 (program mode; FR-009)", {
+    timeout: 60_000,
+  }, async () => {
+    // The T017 clamp tree, verbatim: buildTag stacks caller_count +15
+    // (four distinct calling modules), interface +30, naming `Build` +10,
+    // and visibility +6 (the exported-receiver component) on a P0 pair —
+    // the consumer-side derivation computes 50 + 25 + 61 = 136 and must
+    // clamp to exactly 100, the confidence analyze reports. The four use*
+    // modules add one visibility +8 row each (exported, P0, no other
+    // signal — `use` matches no closed prefix), and the orphan check
+    // makes the feed's completeness structural: a row whose pair analyze
+    // does not report fails loud.
+    const caller = (name: string, value: string): string =>
+      `import { ShaperImpl } from "./api";
+
+export function ${name}(): string {
+  const shaper = new ShaperImpl();
+  return shaper.buildTag(${value});
+}
+`;
+    const root = await makeTree({
+      "tsconfig.json": QUICKSTART_TSCONFIG,
+      "src/api.ts": `export interface Shaper {
+  buildTag(value: number): string;
+}
+export class ShaperImpl implements Shaper {
+  buildTag(value: number): string {
+    return \`<\${value}>\`;
+  }
+}
+`,
+      "src/use-a.ts": caller("useA", "1"),
+      "src/use-b.ts": caller("useB", "2"),
+      "src/use-c.ts": caller("useC", "3"),
+      "src/use-d.ts": caller("useD", "4"),
+    });
+    const run = await crossMethodRun(root);
+    expect(run.feed).toEqual([
+      {
+        function: "buildTag",
+        package: "src.api",
+        side_effect_type: "ReturnValue",
+        source: "caller_count",
+        weight: 15,
+      },
+      {
+        function: "buildTag",
+        package: "src.api",
+        side_effect_type: "ReturnValue",
+        source: "interface",
+        weight: 30,
+      },
+      {
+        function: "buildTag",
+        package: "src.api",
+        side_effect_type: "ReturnValue",
+        source: "naming_convention",
+        weight: 10,
+      },
+      {
+        function: "buildTag",
+        package: "src.api",
+        side_effect_type: "ReturnValue",
+        source: "visibility",
+        weight: 6,
+      },
+      {
+        function: "useA",
+        package: "src.use-a",
+        side_effect_type: "ReturnValue",
+        source: "visibility",
+        weight: 8,
+      },
+      {
+        function: "useB",
+        package: "src.use-b",
+        side_effect_type: "ReturnValue",
+        source: "visibility",
+        weight: 8,
+      },
+      {
+        function: "useC",
+        package: "src.use-c",
+        side_effect_type: "ReturnValue",
+        source: "visibility",
+        weight: 8,
+      },
+      {
+        function: "useD",
+        package: "src.use-d",
+        side_effect_type: "ReturnValue",
+        source: "visibility",
+        weight: 8,
+      },
+    ]);
+    const summary = expectCrossMethodConsistency(run.functions, run.feed);
+    expect(summary.pairs).toBe(5);
+    expect(summary.pairsWithSignals).toBe(5);
+    const buildTag = recordFor(run.functions, "buildTag", "src/api.ts");
+    expect(buildTag.side_effects[0]?.classification).toEqual({
+      label: "contractual",
+      confidence: 100,
+    });
+  });
+
+  it("one record with two effect types and one with same-type instances derive per pair (parse-only; FR-007/FR-008)", {
+    timeout: 60_000,
+  }, async () => {
+    // Two derivation hazards in one tree: logMessage carries TWO
+    // canonical effect types at different tiers with different signal
+    // sets — the `log` prefix routes to LogWrite only (the FR-007 gate),
+    // so its naming row belongs to one pair and not the other — and
+    // getSign carries two SAME-type instances (one pair, one shared
+    // classification; FR-008's instance-invisible fan-out, the dual.ts
+    // fixture green since T017). Every involved rule is syntactic, so
+    // parse-only suffices; the tree exercises the derivation, not the
+    // mode.
+    const root = await makeTree({
+      "mixed.ts": `let total = 0;
+function logMessage(message: string, logger: { info(m: string): void }): void {
+  total = total + 1;
+  logger.info(message);
+}
+function getSign(value: number): number {
+  if (value > 0) {
+    return 1;
+  }
+  return 0 - value;
+}
+`,
+    });
+    const run = await crossMethodRun(root);
+    expect(run.feed).toEqual([
+      {
+        function: "getSign",
+        package: "mixed",
+        side_effect_type: "ReturnValue",
+        source: "naming_convention",
+        weight: 10,
+      },
+      {
+        function: "logMessage",
+        package: "mixed",
+        side_effect_type: "LogWrite",
+        source: "naming_convention",
+        weight: -10,
+      },
+    ]);
+    expectWireInvariants(run.functions);
+    expect(profileOf(run.functions)).toEqual([
+      {
+        name: "logMessage",
+        file: "mixed.ts",
+        effects: [
+          // 50 + 10 (P1) — the mutation pair has no agreeing vocabulary
+          // for `logMessage`'s name, so it derives from zero feed rows.
+          {
+            type: "GlobalMutation",
+            classification: { label: "ambiguous", confidence: 60 },
+          },
+          // 50 + 0 (P2) + naming `log` −10 = 40.
+          {
+            type: "LogWrite",
+            classification: { label: "incidental", confidence: 40 },
+          },
+        ],
+      },
+      {
+        name: "getSign",
+        file: "mixed.ts",
+        effects: [
+          // 50 + 25 (P0) + naming `Get` +10 = 85 — twice: two instances,
+          // one pair, identical classification.
+          {
+            type: "ReturnValue",
+            classification: { label: "contractual", confidence: 85 },
+          },
+          {
+            type: "ReturnValue",
+            classification: { label: "contractual", confidence: 85 },
+          },
+        ],
+      },
+    ]);
+    const summary = expectCrossMethodConsistency(run.functions, run.feed);
+    expect(summary.pairs).toBe(3);
+    expect(summary.pairsWithSignals).toBe(2);
   });
 });
