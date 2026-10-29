@@ -821,6 +821,7 @@ async function classifiedTree(
       prepared.context,
       prepared.records,
       prepared.inScopePaths,
+      prepared.rootPath,
     );
     const classified = classifyPairs(prepared.records, effects, evidence);
     const assembled = assembleFunctionRecords(prepared.records, classified.effects);

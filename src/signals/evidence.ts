@@ -247,6 +247,9 @@ export interface RecordEvidence {
  * @param inScopePaths The pattern-filtered, test-excluded source list from
  * `PreparedAnalysis.inScopePaths` — the identical file set the caller index
  * filters call sites by (US3-7's parity).
+ * @param rootPath The realpath-resolved analysis root from
+ * `PreparedAnalysis.rootPath` — the base the caller index relativizes
+ * call-site file names against.
  * @returns Every record mapped to its evidence snapshot, keyed by the
  * record reference.
  */
@@ -254,12 +257,13 @@ export function buildRecordEvidence(
   context: ProgramContext,
   records: readonly ExtractionRecord[],
   inScopePaths: readonly string[],
+  rootPath: string,
 ): ReadonlyMap<ExtractionRecord, RecordEvidence> {
   // The caller index is built once per snapshot while the context is live
   // (research R7's lifetime rule) — before any record loop that might
   // hand its results to a consumer that disposes. Parse-only yields the
   // empty index inside.
-  const callerIndex = buildCallerIndex(context, records, inScopePaths);
+  const callerIndex = buildCallerIndex(context, records, inScopePaths, rootPath);
   // The checker-resolved components' gate: null in parse-only mode, where
   // each carries its degradation value (false/0) below.
   const checker = context.mode === "program" ? context.checker : null;

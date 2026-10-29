@@ -60,8 +60,9 @@ import { visibilitySignal } from "./visibility.js";
  * in one order, while the program-mode context is still live:
  *
  * 1. `detectEffects(records, context)` — the detector's per-record map.
- * 2. `buildRecordEvidence(context, records, inScopePaths)` — the evidence
- *    snapshots, caller index included, taken before any context disposal.
+ * 2. `buildRecordEvidence(context, records, inScopePaths, rootPath)` — the
+ *    evidence snapshots, caller index included, taken before any context
+ *    disposal.
  * 3. `classifyPairs(records, effects, evidence)` — this module's core.
  * 4. `assembleFunctionRecords` + `serializeFunctionRecord` (`analyze`) /
  *    feed serialization (`classifySignals`) — each entry's own assembly,

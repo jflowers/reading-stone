@@ -180,6 +180,16 @@ export interface PreparedAnalysis {
    * and their behavior is unchanged.
    */
   readonly inScopePaths: readonly string[];
+
+  /**
+   * The realpath-resolved absolute analysis root — `resolveRoot`'s output
+   * (FR-010's resolved form, never the raw request spelling). The base the
+   * caller index relativizes call-site file names against, threaded here so
+   * `buildCallerIndex` never re-derives it from record file names. A purely
+   * additive widening: consumers that do not need it ignore it, and their
+   * behavior is unchanged.
+   */
+  readonly rootPath: string;
 }
 
 /**
@@ -233,8 +243,9 @@ export interface PreparedAnalysis {
  * normalizes.
  * @param stderr Injected diagnostic sink (Testability principle); defaults
  * to `process.stderr`.
- * @returns The bootstrapped `ProgramContext`, the extraction records,
- * and the in-scope file set (spec 003 FR-016's file-set parity).
+ * @returns The bootstrapped `ProgramContext`, the extraction records, the
+ * in-scope file set (spec 003 FR-016's file-set parity), and the
+ * realpath-resolved analysis root.
  * @throws InvalidRootPathError when the root does not exist, is not a
  * directory, or cannot be accessed; the server handler maps it to the
  * contract's `-32602` response.
@@ -286,7 +297,7 @@ export async function prepareAnalysis(
   // guarantee both rest on.
   const inScopeSet = new Set(inScope);
   records = records.filter((record) => inScopeSet.has(record.relPath));
-  return { context, records, inScopePaths: inScope };
+  return { context, records, inScopePaths: inScope, rootPath: realRoot };
 }
 
 /**
@@ -352,6 +363,7 @@ export async function analyze(
       prepared.context,
       prepared.records,
       prepared.inScopePaths,
+      prepared.rootPath,
     );
     const classified = classifyPairs(prepared.records, effects, evidence);
     const assembled = assembleFunctionRecords(prepared.records, classified.effects);
@@ -436,6 +448,7 @@ export async function classifySignals(
       prepared.context,
       prepared.records,
       prepared.inScopePaths,
+      prepared.rootPath,
     );
     const classified = classifyPairs(prepared.records, effects, evidence);
     return classified.signals.map(serializeSignal);

@@ -295,6 +295,7 @@ async function runEvidence(
       prepared.context,
       prepared.records,
       prepared.inScopePaths,
+      prepared.rootPath,
     );
     return { records: prepared.records, evidence };
   } finally {

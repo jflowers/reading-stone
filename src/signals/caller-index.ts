@@ -109,9 +109,8 @@ export type CallerIndex = ReadonlyMap<ExtractionRecord, number>;
  * record (see the module header for the query-node selection and the
  * qualifying-call-site rules); in parse-only mode the result is the empty
  * index — research R7's documented degradation boundary. An empty record
- * list yields the empty index in either mode (there is nothing to count and
- * no record to derive the analysis root from), even against a live
- * program-mode context.
+ * list yields the empty index in either mode (there is nothing to count),
+ * even against a live program-mode context.
  *
  * @param context The bootstrapped analysis context — must still be live in
  * program mode (checker calls round-trip to the native compiler server).
@@ -120,6 +119,10 @@ export type CallerIndex = ReadonlyMap<ExtractionRecord, number>;
  * @param inScopePaths The pattern-filtered, test-excluded source list from
  * `PreparedAnalysis.inScopePaths` (T006) — the identical file set `analyze`
  * reports over, so US3-7's parity is structural.
+ * @param rootPath The realpath-resolved analysis root from
+ * `PreparedAnalysis.rootPath` — the base call-site file names are
+ * relativized against, threaded from the pipeline rather than re-derived
+ * from record file names.
  * @returns The per-record distinct-module count map — one entry per record
  * in program mode, empty in parse-only mode.
  */
@@ -127,25 +130,19 @@ export function buildCallerIndex(
   context: ProgramContext,
   records: readonly ExtractionRecord[],
   inScopePaths: readonly string[],
+  rootPath: string,
 ): CallerIndex {
   // Parse-only is the documented no-checker boundary: an empty index, so no
   // `caller_count` signal can be emitted downstream.
   if (context.mode !== "program") {
     return new Map();
   }
-  const [firstRecord] = records;
-  if (firstRecord === undefined) {
-    // The empty-record case: nothing to count and no record to derive the
-    // analysis root from — the empty index, even with a live checker.
-    return new Map();
-  }
   const inScopeSet = new Set(inScopePaths);
-  const realRoot = deriveAnalysisRoot(firstRecord);
   const index = new Map<ExtractionRecord, number>();
   for (const record of records) {
     index.set(
       record,
-      distinctCallerModuleCount(context.checker, record, realRoot, inScopeSet),
+      distinctCallerModuleCount(context.checker, record, rootPath, inScopeSet),
     );
   }
   return index;
@@ -158,8 +155,9 @@ export function buildCallerIndex(
  *
  * @param checker The live program-mode type checker.
  * @param record The function-like to count callers of.
- * @param realRoot The analysis root derived from the record set (see
- * `deriveAnalysisRoot`).
+ * @param rootPath The realpath-resolved analysis root from
+ * `PreparedAnalysis.rootPath`, threaded through `buildRecordEvidence` —
+ * the base call-site file names are relativized against.
  * @param inScopeSet The in-scope root-relative paths, as a membership set.
  * @returns The number of distinct in-scope modules with at least one
  * qualifying call site (module-level sites included, self-recursion
@@ -168,7 +166,7 @@ export function buildCallerIndex(
 function distinctCallerModuleCount(
   checker: Checker,
   record: ExtractionRecord,
-  realRoot: string,
+  rootPath: string,
   inScopeSet: ReadonlySet<string>,
 ): number {
   const usages = checker.getSignatureUsage(queryDeclarationFor(record));
@@ -187,7 +185,7 @@ function distinctCallerModuleCount(
       continue;
     }
     const callRelPath = relativeUnderBase(
-      realRoot,
+      rootPath,
       toPosixSeparators(callNode.getSourceFile().fileName),
     );
     // US3-7's parity filter: only call sites in the identical in-scope file
@@ -243,37 +241,6 @@ function queryDeclarationFor(record: ExtractionRecord): Node {
 }
 
 /**
- * Derives the analysis root from a record's source file (research R12's
- * pipeline hands `buildCallerIndex` no root of its own): the record's
- * absolute `fileName` is the hermetic host's `join(realRoot, relPath)`
- * spelling served verbatim, so stripping the root-relative suffix recovers
- * the root exactly — the same spelling every other in-root program file's
- * `fileName` uses, which is what makes `relativeUnderBase` exact on the
- * call-site files below.
- *
- * The suffix relation holds by construction (extraction computed each
- * `relPath` as `relativeUnderBase(realRoot, fileName)` for the same
- * `fileName`), so the throw is a fail-loud guard against compiler-surface
- * drift — the models.ts serializer posture — never a reachable path on the
- * verified surface.
- *
- * @param record Any record from the set being indexed.
- * @returns The absolute analysis root in POSIX separators.
- * @throws Error when the record's file name does not end with its
- * root-relative path — an impossible state on the real pipeline.
- */
-function deriveAnalysisRoot(record: ExtractionRecord): string {
-  const fileName = toPosixSeparators(record.node.getSourceFile().fileName);
-  const suffix = `/${record.relPath}`;
-  if (!fileName.endsWith(suffix)) {
-    throw new Error(
-      `caller index cannot relativize "${fileName}" against "${record.relPath}"`,
-    );
-  }
-  return fileName.slice(0, fileName.length - suffix.length);
-}
-
-/**
  * Positional containment (US3-6): whether `inner`'s span lies inside
  * `outer`'s — both nodes from the same source file (callers gate on the
  * file first, since positions are file-local). `getStart`/`getEnd` use the
@@ -290,9 +257,9 @@ function isPositionInside(inner: Node, outer: Node): boolean {
 
 /**
  * Normalizes a path's separators to `/` (a no-op on POSIX, where the
- * analysis pipeline and CI run): keeps the suffix test in
- * `deriveAnalysisRoot` and the `relativeUnderBase` input in one spelling
- * discipline regardless of the platform the server spells file names for.
+ * analysis pipeline and CI run): keeps the `relativeUnderBase` input in
+ * one spelling discipline regardless of the platform the server spells
+ * file names for.
  *
  * @param path The path to normalize.
  * @returns The same path with platform separators as `/`.

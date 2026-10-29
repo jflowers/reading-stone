@@ -123,6 +123,7 @@ async function runEvidence(
       prepared.context,
       prepared.records,
       prepared.inScopePaths,
+      prepared.rootPath,
     );
     return { records: prepared.records, evidence };
   } finally {
@@ -1115,16 +1116,19 @@ describe("record keying, wiring, and single computation", () => {
         prepared.context,
         prepared.records,
         prepared.inScopePaths,
+        prepared.rootPath,
       );
       const first = buildRecordEvidence(
         prepared.context,
         prepared.records,
         prepared.inScopePaths,
+        prepared.rootPath,
       );
       const second = buildRecordEvidence(
         prepared.context,
         prepared.records,
         prepared.inScopePaths,
+        prepared.rootPath,
       );
       expect(first.size).toBe(prepared.records.length);
       for (const record of prepared.records) {
@@ -1163,7 +1167,12 @@ describe("record keying, wiring, and single computation", () => {
     try {
       expect(prepared.context.mode).toBe("program");
       expect(prepared.records.length).toBeGreaterThan(0);
-      const evidence = buildRecordEvidence(prepared.context, [], prepared.inScopePaths);
+      const evidence = buildRecordEvidence(
+        prepared.context,
+        [],
+        prepared.inScopePaths,
+        prepared.rootPath,
+      );
       expect(evidence.size).toBe(0);
     } finally {
       if (prepared.context.mode === "program") {
