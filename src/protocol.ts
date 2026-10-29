@@ -87,7 +87,10 @@ export function initializeResult(): InitializeResult {
     protocol_version: PROTOCOL_VERSION,
     capabilities: {
       discover: true,
-      test_mapping: false,
+      // test_mapping flipped true with the src/server.ts dispatch
+      // registration in one protocol-state unit (T020, FR-014): no
+      // commit advertises a capability the dispatch table lacks.
+      test_mapping: true,
       classify_signals: true,
       streaming: false,
       doc_coverage: false,

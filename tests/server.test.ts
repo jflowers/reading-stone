@@ -6,7 +6,7 @@ import { initializeResult } from "../src/protocol.js";
 import { type Handler, RpcError, Server } from "../src/server.js";
 import { createFixtureTree, type FixtureTree } from "./helpers/fixtures.js";
 import { QUICKSTART_FEED, quickstartFiles } from "./helpers/quickstart.js";
-import type { WireSignal } from "./helpers/wire.js";
+import type { WireMapping, WireSignal } from "./helpers/wire.js";
 
 interface Sink {
   stream: Writable;
@@ -493,9 +493,10 @@ describe("server: analyze", () => {
   // `initializeResult()` (tautologically green if the function drifts);
   // tests/protocol.test.ts pins the unit output — this literal pin makes a
   // capability flip visible through the server wire too. The pinned state
-  // now includes spec 003's classify_signals flip (FR-015; T030 lands it
-  // true), so this pin stays red with the 003 server suite until then —
-  // the flip's visibility working exactly as designed.
+  // includes spec 003's classify_signals flip (FR-015; T030) and spec 004's
+  // test_mapping flip (FR-014; T020 lands registration and flag as one
+  // protocol-state unit), so this pin stays red with the 004 server suite
+  // until T020 — the flip's visibility working exactly as designed.
   it("leaves the initialize capability response unchanged", async () => {
     const { responses } = await drive([INIT]);
     expect(responses[0]?.result).toEqual({
@@ -505,7 +506,7 @@ describe("server: analyze", () => {
       protocol_version: "1.2.0",
       capabilities: {
         discover: true,
-        test_mapping: false,
+        test_mapping: true,
         classify_signals: true,
         streaming: false,
         doc_coverage: false,
@@ -1223,7 +1224,269 @@ describe("server: classify_signals", () => {
     const result = responses[0]?.result as Record<string, unknown> | undefined;
     expect(result?.capabilities).toEqual({
       discover: true,
-      test_mapping: false,
+      test_mapping: true,
+      classify_signals: true,
+      streaming: false,
+      doc_coverage: false,
+      cognitive_complexity: false,
+    });
+  });
+});
+
+// The test_mapping result's wire rows, projected to the eight pinned
+// fields (004 FR-001; contracts/test-mapping.md Section 6) — WireMapping
+// from tests/helpers/wire.js, shared with the pipeline suite. The result
+// object must carry exactly one key — `mappings` — so an error response or
+// a malformed result fails loud here, never a soft empty match: during the
+// red phase (before T020 registered the handler) this surfaced the -32601
+// answers as the explicit absence of a result rather than a vacuous pass,
+// and any future error answer still fails the same way.
+function resultMappings(response: Record<string, unknown>): readonly WireMapping[] {
+  const result = (response.result ?? {}) as Record<string, unknown>;
+  expect(Object.keys(result).sort()).toEqual(["mappings"]);
+  expect(Array.isArray(result.mappings)).toBe(true);
+  return (result.mappings as readonly Record<string, unknown>[]).map(
+    (row): WireMapping => ({
+      test_function: row.test_function as string,
+      test_file: row.test_file as string,
+      assertion_location: row.assertion_location as string,
+      assertion_type: row.assertion_type as string,
+      target_function: row.target_function as string,
+      target_package: row.target_package as string,
+      side_effect_type: row.side_effect_type as string,
+      confidence: row.confidence as number,
+    }),
+  );
+}
+
+describe("server: test_mapping", () => {
+  const activeFixtures: FixtureTree[] = [];
+  const lockedDirectories: string[] = [];
+
+  // Creates a fixture tree registered for afterEach cleanup; returns the
+  // tree's root path to use as the test_mapping request's root_path.
+  async function fixtureTree(files: Readonly<Record<string, string>>): Promise<string> {
+    const tree = await createFixtureTree(files);
+    activeFixtures.push(tree);
+    return tree.root;
+  }
+
+  afterEach(async () => {
+    // Recursive cleanup cannot descend into a chmod-000 directory, so every
+    // locked directory is unlocked before its fixture tree is removed.
+    for (const directory of lockedDirectories.splice(0)) {
+      await chmod(directory, 0o755);
+    }
+    await Promise.all(activeFixtures.splice(0).map((tree) => tree.cleanup()));
+  });
+
+  // The canned US1 tree: a tsconfig (program mode — the mapping pipeline
+  // boots and disposes a fresh compiler context exactly as the analysis
+  // handlers do), one production target, one naming-paired test with a
+  // single expect. The expected row is contracts/test-mapping.md
+  // Section 3's example shape over this tree — every field auditable in
+  // place (SC-001's exact-row discipline). The multi-strategy quickstart
+  // tree (75/90/90/80) is US2's golden (T024); US1's dispatch conformance
+  // pins the naming-strategy surface.
+  const TSCONFIG = '{"compilerOptions": {"strict": true, "target": "ES2022"}}';
+  const MAPPING_SOURCES: Readonly<Record<string, string>> = {
+    "tsconfig.json": TSCONFIG,
+    "src/math.ts":
+      "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+    "tests/math.test.ts": [
+      'import { add } from "../src/math.js";', // 1
+      "", // 2
+      'describe("math", () => {', // 3
+      '  it("add", () => {', // 4
+      "    expect(add(1, 2)).toBe(3);", // 5
+      "  });", // 6
+      "});", // 7
+    ].join("\n"),
+  };
+  const EXPECTED_MAPPINGS: readonly WireMapping[] = [
+    {
+      test_function: "math > add",
+      test_file: "tests/math.test.ts",
+      assertion_location: "tests/math.test.ts:5",
+      assertion_type: "equality",
+      target_function: "add",
+      target_package: "src.math",
+      side_effect_type: "ReturnValue",
+      confidence: 90,
+    },
+  ];
+
+  it("round-trips a valid test_mapping request with the exact row set", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await fixtureTree(MAPPING_SOURCES);
+    const { responses, stderr } = await drive([
+      request(60, "test_mapping", { root_path: root }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(60);
+    expect(resultMappings(responses[0] ?? {})).toEqual(EXPECTED_MAPPINGS);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["absent params", undefined],
+    ["null params", null],
+    ["array params", []],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(61, "test_mapping", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must be an object",
+    );
+    expect(responses[0]?.id).toBe(61);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["missing root_path", {}],
+    ["non-string root_path", { root_path: 42 }],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(62, "test_mapping", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: root_path must be a string",
+    );
+    expect(responses[0]?.id).toBe(62);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["non-array patterns", { root_path: "/abs/project", patterns: "src/**/*.ts" }],
+    ["number patterns", { root_path: "/abs/project", patterns: 42 }],
+    [
+      "patterns array with a non-string element",
+      { root_path: "/abs/project", patterns: ["src", 7] },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(63, "test_mapping", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: patterns must be an array of strings",
+    );
+    expect(responses[0]?.id).toBe(63);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["an extra key beside root_path", { root_path: "/abs/project", extra: true }],
+    [
+      "an extra key beside root_path and patterns",
+      { root_path: "/abs/project", patterns: ["src/**"], extra: true },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(64, "test_mapping", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must contain only root_path and patterns",
+    );
+    expect(responses[0]?.id).toBe(64);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a nonexistent root_path with -32602", async () => {
+    const root = await fixtureTree({});
+    const missing = join(root, "does-not-exist");
+    const { responses, stderr } = await drive([
+      request(65, "test_mapping", { root_path: missing }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${missing}`,
+    );
+    expect(responses[0]?.id).toBe(65);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a non-directory root_path with -32602", async () => {
+    const root = await fixtureTree({ "not-a-dir.ts": "export {};\n" });
+    const file = join(root, "not-a-dir.ts");
+    const { responses, stderr } = await drive([
+      request(66, "test_mapping", { root_path: file }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${file}`,
+    );
+    expect(responses[0]?.id).toBe(66);
+    expect(stderr).toBe("");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "rejects an inaccessible root_path with -32602",
+    async () => {
+      const root = await fixtureTree({
+        "locked/nested/a.ts": "export const a = 1;\n",
+      });
+      const locked = join(root, "locked");
+      const nested = join(locked, "nested");
+      await chmod(locked, 0o000);
+      lockedDirectories.push(locked);
+      const { responses, stderr } = await drive([
+        request(67, "test_mapping", { root_path: nested }),
+      ]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+      expect(errorBody(responses[0] ?? {}).message).toBe(
+        `Invalid params: root_path is not a directory: ${nested}`,
+      );
+      expect(responses[0]?.id).toBe(67);
+      expect(stderr).toBe("");
+    },
+  );
+
+  it("answers a repeated request with byte-identical response lines", {
+    timeout: 60_000,
+  }, async () => {
+    // SC-005 / Constitution I: two full pipeline runs over the same tree
+    // produce identical response bytes — no timestamps, no
+    // environment-dependent data.
+    const root = await fixtureTree(MAPPING_SOURCES);
+    const line = request(68, "test_mapping", { root_path: root });
+    const { responses, rawLines, stderr } = await drive([line, line]);
+    expect(responses).toHaveLength(2);
+    expect(rawLines).toHaveLength(2);
+    expect(rawLines[0]).toBe(rawLines[1]);
+    expect(responses[0]?.id).toBe(68);
+    expect(resultMappings(responses[0] ?? {})).toEqual(EXPECTED_MAPPINGS);
+    expect(stderr).toBe("");
+  });
+
+  it("answers a pattern set matching nothing with an empty mappings array", {
+    timeout: 60_000,
+  }, async () => {
+    // FR-013 / US1-8: a `patterns` set matching no TARGET file is
+    // a success — `{"mappings": []}` — never an error (the test arm is
+    // never narrowed, but with no targets there are no pairs).
+    const root = await fixtureTree(MAPPING_SOURCES);
+    const { responses, stderr } = await drive([
+      request(69, "test_mapping", { root_path: root, patterns: ["nope"] }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(69);
+    expect(resultMappings(responses[0] ?? {})).toEqual([]);
+    expect(stderr).toBe("");
+  });
+
+  // SC-005 / FR-014: test_mapping is capability-gated from the platform's
+  // side (Gaze calls it when and only when the flag is true), so the
+  // initialize handshake must advertise it. The literal pin — not
+  // `initializeResult()`, which would be tautologically green — makes a
+  // flag drift visible through the server wire, mirroring the analyze
+  // block's FR-028 pin and the classify_signals pin above;
+  // tests/protocol.test.ts (T014) pins the unit output the same way.
+  it("advertises test_mapping in the initialize capability response", async () => {
+    const { responses } = await drive([INIT]);
+    const result = responses[0]?.result as Record<string, unknown> | undefined;
+    expect(result?.capabilities).toEqual({
+      discover: true,
+      test_mapping: true,
       classify_signals: true,
       streaming: false,
       doc_coverage: false,
@@ -1318,11 +1581,14 @@ describe("server: dispatch", () => {
   // — red until T029 registered the handler — and is dropped for the same
   // reason, leaving the FR-028 terminal set.
   // `classify_signals` is pinned the same way by the "server:
-  // classify_signals" block below — red until T029/T030 landed the method
+  // classify_signals" block above — red until T029/T030 landed the method
   // (adapter entry, then registration with the capability flip) — and is
-  // dropped for the same reason, shrinking the reserved set to FR-015's
-  // terminal four.
-  it.each(["test_mapping", "analyze/stream", "doc_coverage", "cognitive_complexity"])(
+  // dropped for the same reason.
+  // `test_mapping` is pinned the same way by the "server: test_mapping"
+  // block above — red until T020 landed registration with the capability
+  // flip as one protocol-state unit — and is dropped for the same reason,
+  // shrinking the reserved set to spec 004 FR-014's terminal three.
+  it.each(["analyze/stream", "doc_coverage", "cognitive_complexity"])(
     "answers reserved method %s with -32601",
     async (method) => {
       const { responses } = await drive([request(6, method)]);

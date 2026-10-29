@@ -18,6 +18,8 @@ import {
   shutdownResult,
   successResponse,
 } from "./protocol.js";
+import { testMapping } from "./quality/pipeline.js";
+import type { TestMappingResult } from "./quality/types.js";
 import type { ClassifySignalsResult } from "./signals/types.js";
 
 export class RpcError extends Error {
@@ -378,6 +380,45 @@ export class Server {
         const result: ClassifySignalsResult = {
           signals: await classifySignals(rootPath, patterns, this.stderr),
         };
+        return result;
+      } catch (error) {
+        throw mapRootPathError(error) ?? error;
+      }
+    });
+    // `test_mapping` (FR-013/FR-014; research R9; contracts/
+    // test-mapping.md Sections 1–5): the SAME shared analysis-params
+    // validation as analyze/complexity/coverage/classify_signals — one
+    // validator, one error table, never a copy — then the T019 entry:
+    // the mapping pipeline over the one shared analysis walk, wrapped
+    // as the one-key `{"mappings": [...]}` result. Like
+    // classify_signals, the method is capability-gated from the
+    // platform's side (Gaze calls it when and only when the initialize
+    // flag is true, FR-014), so initializeResult() advertises
+    // `test_mapping: true` in the same protocol-state unit as this
+    // registration — no commit advertises a capability the dispatch
+    // table lacks. The method registers unconditionally: no runtime
+    // toggle.
+    dispatch.set("test_mapping", async (params) => {
+      const { rootPath, patterns } = validateAnalysisParams(params);
+      try {
+        // testMapping (T019) runs the identical prepareAnalysis →
+        // detectEffects stages analyze runs (FR-013's one-pipeline
+        // guarantee is structural), so analyze and test_mapping can
+        // never disagree about which functions or effects exist — the
+        // rows ride the same effect sets, sorted by FR-013's stable key
+        // inside the entry, so repeated requests stay byte-identical
+        // (SC-005). The result is typed as TestMappingResult — the
+        // entry returns it whole (the pipeline assembles the one-key
+        // object itself; classifySignals returns the bare array, its
+        // handler wraps) — so the `{"mappings": [...]}` wire shape is
+        // compile-time enforced end to end. Skip diagnostics flow to
+        // the server's stderr, never stdout, which is reserved for
+        // JSON-RPC responses (spec 001 FR-017).
+        const result: TestMappingResult = await testMapping(
+          rootPath,
+          patterns,
+          this.stderr,
+        );
         return result;
       } catch (error) {
         throw mapRootPathError(error) ?? error;
