@@ -142,9 +142,9 @@ The system SHALL answer `shutdown` with a success result `{}` and then resolve t
 
 ### Requirement: Dispatch table scope
 
-The system SHALL register only `initialize`, `shutdown`, `discover`, `analyze`, `complexity`, `coverage`, and `classify_signals` as built-in dispatch handlers. Any other method SHALL return `-32601`; the reserved analysis method names are `test_mapping`, `analyze/stream`, `doc_coverage`, and `cognitive_complexity`. The dispatch table SHALL be overridable via the `Server` constructor for testing (see `Injectable dispatch table`).
+The system SHALL register only `initialize`, `shutdown`, `discover`, `analyze`, `complexity`, `coverage`, `classify_signals`, and `test_mapping` as built-in dispatch handlers. Any other method SHALL return `-32601`; the reserved analysis method names are `analyze/stream`, `doc_coverage`, and `cognitive_complexity`. The dispatch table SHALL be overridable via the `Server` constructor for testing (see `Injectable dispatch table`).
 
 #### Scenario: Reserved methods are not implemented
 
-- **WHEN** a request for `test_mapping`, `analyze/stream`, `doc_coverage`, or `cognitive_complexity` is written
+- **WHEN** a request for `analyze/stream`, `doc_coverage`, or `cognitive_complexity` is written
 - **THEN** the system responds with `-32601`

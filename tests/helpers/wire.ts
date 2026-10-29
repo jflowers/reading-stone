@@ -78,6 +78,25 @@ export interface WireSignal {
 }
 
 /**
+ * One serialized test_mapping row (004 FR-001) — the eight contract-pinned
+ * fields (contracts/test-mapping.md Section 6). Unlike WireSignal there is
+ * nothing implementation-defined to project away: every field is
+ * contract-pinned, so this shape IS the wire row, and dispatch-suite
+ * projections through it (tests/server.test.ts's test_mapping block) fail
+ * loud on a malformed or error result rather than soft-matching empty.
+ */
+export interface WireMapping {
+  readonly test_function: string;
+  readonly test_file: string;
+  readonly assertion_location: string;
+  readonly assertion_type: string;
+  readonly target_function: string;
+  readonly target_package: string;
+  readonly side_effect_type: string;
+  readonly confidence: number;
+}
+
+/**
  * Narrows the analyze entry's result through its two documented shapes: the
  * serialized FunctionRecord[] payload or an object with a functions array.
  * Anything else is a malformed result — fail loud, never a soft zero.
