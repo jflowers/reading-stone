@@ -269,11 +269,12 @@ erDiagram
 ```
 
 - **Sum-invariant (FR-011, normative)**: for every pair,
-  `confidence = clamp(0, 100, 50 + tierBoost − Σ(all emitted signal
+  `confidence = clamp(0, 100, 50 + tierBoost + Σ(all emitted signal
   weights for the pair))` — where the emitted set includes the
-  contradiction row. A consumer summing all signals Gaze matches to the
-  effect reproduces the reported confidence exactly. Duplicate wire rows
-  would break this; pair keying forbids them.
+  contradiction row as a negative-weight entry. A consumer summing all
+  signals Gaze matches to the effect reproduces the reported confidence
+  exactly. Duplicate wire rows would break this; pair keying forbids
+  them.
 - **Consistency (FR-013)**: `analyze` classifications and
   `classify_signals` signals are computed by one shared pipeline over
   one shared `prepareAnalysis` file set; the labels are derivable from

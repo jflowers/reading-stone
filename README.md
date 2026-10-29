@@ -64,6 +64,12 @@ P2–P4), clamped to [0, 100]. Labels derive from the clamped confidence:
 no matching signals is never dropped — it classifies at the ambiguous floor
 (50 + tier_boost).
 
+Without a usable `tsconfig.json` (parse-only mode), the three
+checker-dependent components — the `interface` signal, the `caller_count`
+signal, and the exported-return-type (+6) component of `visibility` — are
+absent, so classifications drift toward `ambiguous`; every effect is still
+classified (degradation reduces precision, never availability).
+
 The `classify_signals` method returns the raw feed behind those
 classifications: one signal per matched (function, effect-type, source)
 triple — `function`, `package`, `side_effect_type`, `source`, integer
@@ -183,6 +189,7 @@ When input is malformed, Reading Stone emits a one-line diagnostic to
 
 ## License
 
-Apache 2.0 -- see [LICENSE](LICENSE). The JSON-RPC protocol layer is ported
-from [snake-eyes](https://github.com/zero-dot-force/snake-eyes) (zero-dot-force,
+Apache 2.0 -- see [LICENSE](LICENSE). The JSON-RPC protocol layer and the
+classification signal pipeline design are ported from
+[snake-eyes](https://github.com/zero-dot-force/snake-eyes) (zero-dot-force,
 Apache 2.0); see [NOTICE](NOTICE) for attribution.
