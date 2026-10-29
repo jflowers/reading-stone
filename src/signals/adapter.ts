@@ -1,12 +1,15 @@
+import type { Writable } from "node:stream";
+import { prepareAnalysis } from "../analysis.js";
+import { detectEffects } from "../detector.js";
 import type { ExtractionRecord } from "../extract.js";
 import { type Classification, derivePackage, type Effect } from "../models.js";
 import { type SideEffectType, TIER_MAP, type Tier } from "../taxonomy.js";
 import { callerSignal } from "./caller.js";
-import type { RecordEvidence } from "./evidence.js";
+import { buildRecordEvidence, type RecordEvidence } from "./evidence.js";
 import { interfaceSignal } from "./interface.js";
 import { docstringSignal } from "./jsdoc.js";
 import { namingSignal } from "./naming.js";
-import type { Signal } from "./types.js";
+import { type Signal, serializeSignal } from "./types.js";
 import { visibilitySignal } from "./visibility.js";
 
 /**
@@ -48,19 +51,34 @@ import { visibilitySignal } from "./visibility.js";
  * order carry no tie-break rule and what keeps a Gaze consumer's
  * pair-matching join unambiguous.
  *
- * Composition contract (research R10; research R12's seam): the adapter is
- * a pure function of (records, effects, evidence) — no `ProgramContext`,
- * no I/O, no checker (the imports above are one value import per extractor
- * plus `TIER_MAP` and `derivePackage`, which is the structural proof). The
- * wiring belongs to its two consumers, in one order, while the program-mode
- * context is still live:
+ * Composition contract (research R10; research R12's seam): the module has
+ * two halves. The CORE — `classifyBundle` and `classifyPairs` below — is a
+ * pure function of (records, effects, evidence): no `ProgramContext`, no
+ * I/O, no checker (one value import per extractor plus `TIER_MAP` and
+ * `derivePackage` are its structural proof, and the exhaustively
+ * hand-built snapshots of tests/signals/adapter.test.ts are what that
+ * purity buys). The WIRING belongs to the two method entries that consume
+ * the core, in one order, while the program-mode context is still live:
  *
  * 1. `detectEffects(records, context)` — the detector's per-record map.
  * 2. `buildRecordEvidence(context, records, inScopePaths)` — the evidence
  *    snapshots, caller index included, taken before any context disposal.
- * 3. `classifyPairs(records, effects, evidence)` — this module.
- * 4. `assembleFunctionRecords` (`analyze`) / feed serialization
- *    (`classify_signals`) — each consumer's own assembly.
+ * 3. `classifyPairs(records, effects, evidence)` — this module's core.
+ * 4. `assembleFunctionRecords` + `serializeFunctionRecord` (`analyze`,
+ *    src/analysis.ts) / feed serialization (`classifySignals`, this
+ *    module) — each entry's own assembly.
+ *
+ * The classify_signals half: `classifySignals` (T029, below) is the second
+ * method entry — the `classify_signals` handler's payload source, running
+ * `analyze`'s stages identically and owning the same context-dispose
+ * lifetime. Its imports are the wiring's, not the core's. Research R10
+ * pins both entries' homes — analyze's handler in src/analysis.ts, this
+ * entry beside the core it composes — which makes the two modules mutual
+ * importers (`analyze` rides `classifyPairs`; this entry rides
+ * `prepareAnalysis`). The cycle is call-time only: both directions are
+ * function declarations consumed inside function bodies, never at module
+ * evaluation, so ESM's hoisted live bindings keep it safe whichever
+ * module loads first.
  *
  * Immutability (convention pack AP-004): classified effects are REBUILT as
  * new values (`{ ...effect, classification }`), every field preserved —
@@ -368,4 +386,81 @@ export function classifyPairs(
   // strict total order with no tie-break rule.
   feed.sort(compareSignals);
   return { signals: feed, effects: classified };
+}
+
+/**
+ * The `classify_signals` method's entry (FR-014; research R10, R11): the
+ * serialized `Signal[]` payload — the raw evidence behind `analyze`'s
+ * classifications, one row per rule that matched per (function record,
+ * canonical effect type) pair — in FR-014's `(package, function,
+ * side_effect_type, source)` total order, each row already wire-shaped
+ * through `serializeSignal` (validated fields, omit-unset-optionals
+ * `reasoning`). The returned array — not a `{"signals": [...]}` wrapper —
+ * is the payload the server handler wraps into its JSON-RPC success
+ * response, exactly as it wraps `analyze`'s array.
+ *
+ * The stages are `analyze`'s, identically and in the identical order
+ * (FR-013's one-shared-pipeline guarantee is structural, never a second
+ * walk): `prepareAnalysis` — the one discovery/bootstrap/extraction
+ * pipeline, so the identical discovered, pattern-filtered,
+ * exclusion-filtered file set and record set — then `detectEffects`, then
+ * the T024 core with the program-mode context still live: the evidence
+ * snapshots (`buildRecordEvidence`, caller index included) taken while the
+ * checker can still answer, then `classifyPairs` — the pair-keyed fan-out
+ * whose four-key-ordered `signals` feed is this entry's payload. The two
+ * entries differ by the last stage only: assembly and
+ * `serializeFunctionRecord` there, feed serialization here.
+ *
+ * The program-mode context's dispose lifetime is owned here exactly as
+ * `analyze` owns its own (the same `finally` discipline): the native
+ * compiler server behind the context is closed whatever the detection and
+ * classification outcome, so no subprocess outlives one request. A
+ * parse-only context owns nothing to dispose. `prepareAnalysis` itself
+ * releases the context when extraction throws, and an invalid root throws
+ * `InvalidRootPathError` before any context exists — it propagates
+ * untouched for the server to map to the shared `-32602` root message.
+ *
+ * Deterministic (Constitution Principle I): the feed is a pure function of
+ * the analyzed tree and analyzer version — fixed row order, fixed
+ * reasoning templates, no timestamps or environment-dependent data — so
+ * repeated requests over the same tree serialize byte-identically.
+ *
+ * @param rootPath Absolute or relative project root; validated and
+ * realpath-resolved by `prepareAnalysis` (an invalid root throws
+ * `InvalidRootPathError`, the server maps to `-32602`).
+ * @param patterns The raw `patterns` parameter value; shape-validated by
+ * the server (`-32602`) before analysis runs, normalized by
+ * `prepareAnalysis`. A set matching nothing yields `[]`, never an error.
+ * @param stderr Injected diagnostic sink (Testability principle); defaults
+ * to `process.stderr`. Stdout is never touched.
+ * @returns The serialized signals, `(package, function, side_effect_type,
+ * source)`-sorted.
+ * @throws InvalidRootPathError when the root does not exist, is not a
+ * directory, or cannot be accessed; the server handler maps it to the
+ * contract's `-32602` response.
+ */
+export async function classifySignals(
+  rootPath: string,
+  patterns: unknown,
+  stderr: Writable = process.stderr,
+): Promise<readonly Record<string, unknown>[]> {
+  const prepared = await prepareAnalysis(rootPath, patterns, stderr);
+  try {
+    const effects = detectEffects(prepared.records, prepared.context);
+    // The core's composition order (this module's header): evidence while
+    // the program-mode context is live — the caller index's
+    // `getSignatureUsage` traffic and every checker query ride it — then
+    // the pair-keyed fan-out whose four-key-ordered feed is the payload.
+    const evidence = buildRecordEvidence(
+      prepared.context,
+      prepared.records,
+      prepared.inScopePaths,
+    );
+    const classified = classifyPairs(prepared.records, effects, evidence);
+    return classified.signals.map(serializeSignal);
+  } finally {
+    if (prepared.context.mode === "program") {
+      prepared.context.dispose();
+    }
+  }
 }
