@@ -286,7 +286,7 @@ pipeline run, consumed by all three strategies:
 | `byName` | `ReadonlyMap<string, readonly ExtractionRecord[]>` | Name → records, for the naming strategy and parse-only matching |
 | `byNode` | `ReadonlyMap<Node, ExtractionRecord>` | Declaration node → record, for checker-mode symbol-declaration matching |
 | `effects` | `ReadonlyMap<ExtractionRecord, readonly Effect[]>` | `detectEffects`' output — the inference layer's effect sets |
-| `context` | `ProgramContext` | Live during pairing (checker queries); the handler owns disposal |
+| `context` | `ProgramContext` | Live during pairing (checker queries); the pipeline entry owns disposal (the `finally` discipline) |
 
 ### 5.5 Provenance inputs (src/quality/inference.ts)
 

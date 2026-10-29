@@ -25,15 +25,19 @@ coverage compute from for TypeScript projects. The method is
 capability-gated (`capabilities.test_mapping`), accepts the shared
 analysis-params surface, and returns `{"mappings": [...]}`.
 
-The handler body (mirroring `classify_signals`'s registration):
+The handler body (mirroring `classify_signals`'s registration — the
+envelope boundary differs: `testMapping` returns the complete one-key
+`TestMappingResult` itself, so the handler passes it through):
 
 ```typescript
 dispatch.set("test_mapping", async (params) => {
   const { rootPath, patterns } = validateAnalysisParams(params);
   try {
-    const result: TestMappingResult = {
-      mappings: await testMapping(rootPath, patterns, this.stderr),
-    };
+    const result: TestMappingResult = await testMapping(
+      rootPath,
+      patterns,
+      this.stderr,
+    );
     return result;
   } catch (error) {
     throw mapRootPathError(error) ?? error;
@@ -42,9 +46,12 @@ dispatch.set("test_mapping", async (params) => {
 ```
 
 Skip diagnostics flow to the server's stderr — never stdout, which is
-reserved for JSON-RPC responses. The result is already the serialized,
-wire-shaped row array, so the sorted-key envelope serializer only
-re-orders keys — repeated requests stay byte-identical.
+reserved for JSON-RPC responses. The entry's result is already the
+serialized, wire-shaped `TestMappingResult` — `testMapping` assembles
+the `{"mappings": [...]}` envelope and serializes its rows itself, and
+the handler adds no wrapper (where `classifySignals` returns the bare
+array and its handler wraps) — so the sorted-key envelope serializer
+only re-orders keys — repeated requests stay byte-identical.
 
 ## 2. Request
 
