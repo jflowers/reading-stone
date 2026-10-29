@@ -412,6 +412,108 @@ describe("testMapping", () => {
     expect(rows(parseOnly.result)).toEqual(expected);
   });
 
+  it("emits the quickstart tree's four rows in both bootstrap modes (multi-strategy)", async () => {
+    // T024 / SC-004; quickstart Sections 1, 4, and 7 verbatim: the tree
+    // exercises all three pairing strategies — "math > add" pairs by
+    // naming (90, the title equals the target name), "math > sums two
+    // numbers" by direct calls (80, the callback calls add), and
+    // "delegates through a helper" by the import graph (75 — the only
+    // reference to `add` outside the import clause sits in the
+    // file-local `double` helper, structurally outside every test
+    // callback). Each pair's assertion set emits one row per matcher
+    // invocation; `add` returns, so every row maps ReturnValue (the
+    // value-row chain's first hit). The parse-only twin (the same tree
+    // minus tsconfig) answers the same four rows with the same
+    // confidences — degradation reduces precision, never availability
+    // (edge case 1).
+    const sources: Readonly<Record<string, string>> = {
+      "src/math.ts": [
+        "export function add(a: number, b: number): number {", // 1
+        "  return a + b;", // 2
+        "}", // 3
+      ].join("\n"),
+      "tests/math.test.ts": [
+        'import { add } from "../src/math";', // 1
+        "", // 2
+        "function double(n: number): number {", // 3
+        "  return add(n, n);", // 4
+        "}", // 5
+        "", // 6
+        'describe("math", () => {', // 7
+        '  it("add", () => {', // 8
+        "    expect(add(1, 2)).toBe(3);", // 9
+        "    expect(add(2, 2)).toBe(4);", // 10
+        "  });", // 11
+        "", // 12
+        '  it("sums two numbers", () => {', // 13
+        "    const result = add(3, 4);", // 14
+        "    expect(result).toBe(7);", // 15
+        "  });", // 16
+        "});", // 17
+        "", // 18
+        'it("delegates through a helper", () => {', // 19
+        "  expect(double(2)).toBe(4);", // 20
+        "});", // 21
+      ].join("\n"),
+    };
+    // Quickstart Section 4's exact four rows, in the FR-013 stable-key
+    // order: test_function UTF-16 order first ("delegates through a
+    // helper" < "math > add" < "math > sums two numbers"), then
+    // assertion line.
+    const expected = [
+      {
+        test_function: "delegates through a helper",
+        test_file: "tests/math.test.ts",
+        assertion_location: "tests/math.test.ts:20",
+        assertion_type: "equality",
+        target_function: "add",
+        target_package: "src.math",
+        side_effect_type: "ReturnValue",
+        confidence: 75,
+      },
+      {
+        test_function: "math > add",
+        test_file: "tests/math.test.ts",
+        assertion_location: "tests/math.test.ts:9",
+        assertion_type: "equality",
+        target_function: "add",
+        target_package: "src.math",
+        side_effect_type: "ReturnValue",
+        confidence: 90,
+      },
+      {
+        test_function: "math > add",
+        test_file: "tests/math.test.ts",
+        assertion_location: "tests/math.test.ts:10",
+        assertion_type: "equality",
+        target_function: "add",
+        target_package: "src.math",
+        side_effect_type: "ReturnValue",
+        confidence: 90,
+      },
+      {
+        test_function: "math > sums two numbers",
+        test_file: "tests/math.test.ts",
+        assertion_location: "tests/math.test.ts:15",
+        assertion_type: "equality",
+        target_function: "add",
+        target_package: "src.math",
+        side_effect_type: "ReturnValue",
+        confidence: 80,
+      },
+    ];
+
+    // The quickstart's own tsconfig spelling (Section 1): strict only.
+    const checker = await mappingOf({
+      ...sources,
+      "tsconfig.json": '{"compilerOptions": {"strict": true}}',
+    });
+    expect(rows(checker.result)).toEqual(expected);
+
+    const parseOnly = await mappingOf(sources);
+    expect(rows(parseOnly.result)).toEqual(expected);
+  });
+
   it("reproduces identical serialized bytes across two full pipeline runs", async () => {
     // R10: the determinism golden — two complete testMapping calls, each
     // with its own prepareAnalysis walk, produce byte-identical serialized

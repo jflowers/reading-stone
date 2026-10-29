@@ -30,8 +30,16 @@ import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
  * wire-shaped result (FR-001).
  */
 
-/** File extensions considered by discovery (FR-002). Case-sensitive. */
-const WALKED_EXTENSIONS: ReadonlySet<string> = new Set([
+/**
+ * File extensions considered by discovery (FR-002). Case-sensitive.
+ *
+ * Also the parse-only module-specifier resolution domain's extension
+ * enumeration (spec 004's imports pairing tier, FR-004): the pairing
+ * strategies import the SAME set so specifier resolution and file
+ * discovery can never disagree about which extensions name an in-root
+ * module — one enumeration, two consumers, no drift.
+ */
+export const WALKED_EXTENSIONS: ReadonlySet<string> = new Set([
   ".ts",
   ".tsx",
   ".js",

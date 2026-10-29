@@ -7,9 +7,11 @@ import type { FileSystem, FileSystemEntries } from "typescript/unstable/fs";
 import {
   API,
   type Checker,
+  type Symbol as CompilerSymbol,
   type Diagnostic,
   DiagnosticCategory,
   type Program,
+  SymbolFlags,
 } from "typescript/unstable/sync";
 import { relativeUnderBase } from "./internal.js";
 import { readBoundedSync } from "./safeio.js";
@@ -171,6 +173,59 @@ export type ProgramContext =
       dispose(): void;
     }
   | { mode: "parse-only"; sources: ReadonlyMap<string, SourceFile> };
+
+/**
+ * The alias-resolution hop bound: a defensive ceiling on the
+ * `getAliasedSymbol` loop below. Real import/re-export chains are short
+ * (a direct import resolves in one hop; a barrel re-exporting a barrel in
+ * two), and TypeScript alias graphs are acyclic — the bound only guards a
+ * pathological server response, never real input.
+ */
+const ALIAS_HOP_LIMIT = 8;
+
+/**
+ * Resolves a checker-returned symbol to the symbol its references name,
+ * following import and re-export aliases to the declaring symbol — the
+ * shared checker-safety primitive for declaration matching (spec 004's
+ * pairing strategies; Constitution Principle III's price on the unstable
+ * surface).
+ *
+ * `Checker.getAliasedSymbol` PANICS the native compiler server when handed
+ * a non-alias argument ("Should only get alias here", verified against
+ * 7.0.2 — the src/signals/evidence.ts module header records the same
+ * hazard for its single-hop heritage route), so the Alias-flag gate below
+ * is a safety requirement, not a stylistic choice. Alias chains (a barrel
+ * re-exporting another barrel) resolve hop by hop, bounded by
+ * `ALIAS_HOP_LIMIT` — beyond the bound the symbol is treated as unresolved
+ * (absence of evidence, never an error). The checker's unknown symbol (an
+ * alias whose target cannot be resolved — a name imported from a missing
+ * module) identifies nothing and returns null the same way.
+ *
+ * @param checker The live program-mode type checker.
+ * @param symbol The symbol a reference or import specifier resolved to, or
+ * undefined when it resolved nowhere.
+ * @returns The referenced symbol with aliases followed, or null when
+ * nothing resolvable backs the reference.
+ */
+export function resolveSymbolAliases(
+  checker: Checker,
+  symbol: CompilerSymbol | undefined,
+): CompilerSymbol | null {
+  if (symbol === undefined) {
+    return null;
+  }
+  let current = symbol;
+  for (let hops = 0; (current.flags & SymbolFlags.Alias) !== 0; hops += 1) {
+    if (hops >= ALIAS_HOP_LIMIT) {
+      return null;
+    }
+    current = checker.getAliasedSymbol(current);
+    if (checker.isUnknownSymbol(current)) {
+      return null;
+    }
+  }
+  return current;
+}
 
 /**
  * The explicit script-kind extension map (research R2): deterministic and
