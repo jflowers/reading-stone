@@ -150,8 +150,10 @@ export function locatedEffects(
 
 // The closed effect key set (003 FR-012 requires a classification on every
 // analyze effect, superseding 002's FR-019; anything beyond these six keys
-// is a wire-shape violation).
-const EFFECT_KEYS: readonly string[] = [
+// is a wire-shape violation). Exported as the single authority — the
+// detector-rules suites and tests/detector.test.ts's local wire-invariant
+// check both consume this one copy.
+export const EFFECT_KEYS: readonly string[] = [
   "type",
   "description",
   "location",
@@ -218,9 +220,12 @@ const CLASSIFICATION_LABELS: ReadonlySet<string> = new Set([
  * `serializeClassification` pins its validity: exactly the two fields
  * {label, confidence}, one of the three protocol labels, an integer
  * confidence in 0-100. A missing or malformed value is an analyze-wiring bug
- * (T025), never a soft skip — fail loud, naming the effect.
+ * (T025), never a soft skip — fail loud, naming the effect. Exported as the
+ * single authority: `expectWireInvariants` below and tests/detector.test.ts's
+ * local wire-invariant check both consume this one copy — one copy, one
+ * authority, never a second validation block to drift.
  */
-function expectValidClassification(effect: WireEffect): void {
+export function expectValidClassification(effect: WireEffect): void {
   if (effect.classification === undefined) {
     throw new Error(
       `effect of type "${effect.type}" at ${

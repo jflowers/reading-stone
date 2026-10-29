@@ -37,16 +37,15 @@ import { analyze } from "../src/analysis.js";
 import { derivePackage } from "../src/models.js";
 import { SIDE_EFFECT_TYPES } from "../src/taxonomy.js";
 import { createFixtureTree, memorySink } from "./helpers/fixtures.js";
-
-/** The classification on one serialized effect (spec 003 FR-012) — the wire
- * shape serializeClassification emits for src/models.ts's `Classification`. */
-interface WireClassification {
-  readonly label: "contractual" | "incidental" | "ambiguous";
-  readonly confidence: number;
-}
+import {
+  EFFECT_KEYS,
+  expectValidClassification,
+  type WireClassification,
+} from "./helpers/wire.js";
 
 /** One serialized effect as the analyze entry returns it (spec 001 shape,
- * plus spec 003's classification field). */
+ * plus spec 003's classification field — the shared WireClassification from
+ * tests/helpers/wire.ts, the one authority for the classification shape). */
 interface WireEffect {
   readonly type: string;
   readonly description: string;
@@ -163,18 +162,6 @@ function projectRecord(record: WireRecord): Record<string, unknown> {
   };
 }
 
-// The closed effect key set (003 FR-012 requires a classification on every
-// analyze effect, superseding 002's FR-019; anything beyond these six keys
-// is a wire-shape violation).
-const EFFECT_KEYS: readonly string[] = [
-  "type",
-  "description",
-  "location",
-  "target",
-  "detail",
-  "classification",
-];
-
 // (line, column, type) — the documented within-record effect order (FR-020).
 function effectSortKey(effect: WireEffect): readonly [number, number, string] {
   const parts = (effect.location ?? "").split(":");
@@ -219,35 +206,6 @@ function compareEffectKeys(
   return compareStrings(a[2], b[2]);
 }
 
-// The three protocol labels — the membership set serializeClassification
-// (src/models.ts) enforces, mirrored here so this suite's local invariant
-// validates the same closed set the serializer does.
-const CLASSIFICATION_LABELS: ReadonlySet<string> = new Set([
-  "contractual",
-  "incidental",
-  "ambiguous",
-]);
-
-// 003 FR-012 requires every analyze effect to carry a classification, and
-// serializeClassification pins its validity: exactly {label, confidence},
-// one of the three protocol labels, an integer confidence in 0-100. A
-// missing or malformed value is an analyze-wiring bug (T025), never a soft
-// skip — fail loud, naming the effect.
-function expectValidClassification(effect: WireEffect): void {
-  if (effect.classification === undefined) {
-    throw new Error(
-      `effect of type "${effect.type}" at ${
-        effect.location ?? "<unknown location>"
-      } carries no classification (003 FR-012)`,
-    );
-  }
-  expect(Object.keys(effect.classification).sort()).toEqual(["confidence", "label"]);
-  expect(CLASSIFICATION_LABELS).toContain(effect.classification.label);
-  expect(Number.isInteger(effect.classification.confidence)).toBe(true);
-  expect(effect.classification.confidence).toBeGreaterThanOrEqual(0);
-  expect(effect.classification.confidence).toBeLessThanOrEqual(100);
-}
-
 // FR-018/FR-020 invariants plus 003's classification amendment (FR-012,
 // superseding 002's FR-019) over a whole result: canonical types only (so
 // no alias — AsyncTaskSpawn in particular — ever reaches the wire), every
@@ -255,7 +213,9 @@ function expectValidClassification(effect: WireEffect): void {
 // record/effect key sets, package derivation, locations rooted in the
 // record's file, detail only on ambiguity effects, and both documented
 // total orders (records by (file, line, name); effects by (line, column,
-// type)).
+// type)). The classification-validation block — WireClassification,
+// expectValidClassification, EFFECT_KEYS — is consumed from
+// tests/helpers/wire.ts (one copy, one authority).
 function expectWireInvariants(functions: readonly WireRecord[]): void {
   const recordKeys = functions.map((record): readonly [string, number, string] => [
     record.file,
