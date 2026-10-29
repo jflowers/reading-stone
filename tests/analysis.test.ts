@@ -1879,3 +1879,208 @@ function getSign(value: number): number {
     expect(summary.pairsWithSignals).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// prepareAnalysis: test-arm widening (004 FR-006; research R2, R11 rung 5;
+// data-model Section 1) — the opt-in fourth parameter and the
+// inert-without-flag `testPaths` result field. The mapping pipeline
+// (spec 004) is the one consumer that sets the flag; these tests pin the
+// widening's parity contract so every other caller is provably unchanged:
+// flag-off calls are byte-for-byte the old behavior plus one empty field,
+// and flag-on calls admit the test arm to the bootstrap WITHOUT widening
+// the target record set. RED until T005 (the analysis.ts widening) lands.
+// ---------------------------------------------------------------------------
+
+describe("prepareAnalysis: test-arm widening (004 FR-006)", () => {
+  // One shared tree: two source files (different packages), test files
+  // discovered by both signals (the `*.test.ts` name segment and the
+  // `tests/` directory), and a generated test file the screening must
+  // exclude from both arms. Every excluded file declares a real named
+  // function so "absent from the arm" is a strong assertion.
+  const WIDENING_MATH = `export function add(left: number, right: number): number {
+  return left + right;
+}
+`;
+  const WIDENING_UTIL = `export function formatLabel(value: string): string {
+  return value.trim();
+}
+`;
+  const WIDENING_TEST_BY_NAME = `import { add } from "../src/math.js";
+
+describe("math", () => {
+  it("add", () => {
+    expect(add(1, 2)).toBe(3);
+  });
+});
+`;
+  const WIDENING_TEST_BY_DIRECTORY = `import { formatLabel } from "../lib/util.js";
+
+it("formatLabel", () => {
+  expect(formatLabel(" x ")).toBe("x");
+});
+`;
+  const WIDENING_GENERATED_TEST =
+    '// @generated\nit("generated", () => {\n  expect(1).toBe(1);\n});\n';
+  const WIDENING_TREE: Readonly<Record<string, string>> = {
+    "src/math.ts": WIDENING_MATH,
+    "lib/util.ts": WIDENING_UTIL,
+    "src/math.test.ts": WIDENING_TEST_BY_NAME,
+    "tests/helper.test.ts": WIDENING_TEST_BY_DIRECTORY,
+    "tests/generated.test.ts": WIDENING_GENERATED_TEST,
+  };
+
+  it("leaves flag-off calls unchanged — identical records and inScopePaths, testPaths the inert empty array", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await makeTree(WIDENING_TREE);
+    const sink = memorySink();
+    const withNoFlag = await prepareAnalysis(root, undefined, sink.stream);
+    const withFlagOff = await prepareAnalysis(root, undefined, sink.stream, {
+      includeTestArm: false,
+    });
+    try {
+      // The new field is inert without the flag: always present, empty.
+      expect(withNoFlag.testPaths).toEqual([]);
+      expect(withFlagOff.testPaths).toEqual([]);
+      // And the old surface is unchanged: same records, same scope.
+      expect(recordTuples(withNoFlag)).toEqual(recordTuples(withFlagOff));
+      expect(withNoFlag.inScopePaths).toEqual(withFlagOff.inScopePaths);
+      expect(withFlagOff.inScopePaths).toEqual(["lib/util.ts", "src/math.ts"]);
+    } finally {
+      releaseContext(withNoFlag);
+      releaseContext(withFlagOff);
+    }
+  });
+
+  it("flag-on: testPaths carries the full exclusion-screened test arm in classifyFiles order, pattern-UNfiltered", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await makeTree(WIDENING_TREE);
+    const sink = memorySink();
+    const prepared = await prepareAnalysis(root, ["src"], sink.stream, {
+      includeTestArm: true,
+    });
+    try {
+      // The full test arm — both discovery signals, generated excluded —
+      // in classifyFiles' sorted order, regardless of the pattern set.
+      expect(prepared.testPaths).toEqual(["src/math.test.ts", "tests/helper.test.ts"]);
+      // The pattern narrowed the target arm only.
+      expect(prepared.inScopePaths).toEqual(["src/math.ts"]);
+      // The extraction records stay narrowed to the in-scope SOURCE set:
+      // the test files are in the program, their functions are not
+      // targets (the FR-006 target-parity half of this contract).
+      expect(recordPaths(prepared)).toEqual(["src/math.ts"]);
+    } finally {
+      releaseContext(prepared);
+    }
+  });
+
+  it("a pattern set naming test files still yields the full test arm (patterns narrow the target arm only)", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await makeTree(WIDENING_TREE);
+    const sink = memorySink();
+    const prepared = await prepareAnalysis(
+      root,
+      ["tests/helper.test.ts"],
+      sink.stream,
+      {
+        includeTestArm: true,
+      },
+    );
+    try {
+      expect(prepared.testPaths).toEqual(["src/math.test.ts", "tests/helper.test.ts"]);
+      // Test files are excluded from the source arm absolutely, so a
+      // pattern naming one narrows the target set to nothing.
+      expect(prepared.inScopePaths).toEqual([]);
+      expect(prepared.records).toEqual([]);
+    } finally {
+      releaseContext(prepared);
+    }
+  });
+
+  it("flag-on records are record-for-record the identical analyze set over the same request (FR-006 parity, asserted)", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await makeTree(WIDENING_TREE);
+    const sink = memorySink();
+    const prepared = await prepareAnalysis(root, undefined, sink.stream, {
+      includeTestArm: true,
+    });
+    releaseContext(prepared);
+    // Drive both surfaces over the same tree and request: the widened
+    // pipeline's target records must equal analyze's payload records —
+    // same identity tuples, same (file, line, name) order.
+    const functions = await analyze(root, undefined, sink.stream);
+    const analyzeTuples = functions.map((record) => [
+      record.file as string,
+      record.name as string,
+      record.line as number,
+    ]);
+    expect(recordTuples(prepared)).toEqual(analyzeTuples);
+  });
+
+  it("program-mode context serves test-file sources (Program.getSourceFile answers over a test path)", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await makeTree({
+      ...WIDENING_TREE,
+      "tsconfig.json": QUICKSTART_TSCONFIG,
+    });
+    const sink = memorySink();
+    const prepared = await prepareAnalysis(root, undefined, sink.stream, {
+      includeTestArm: true,
+    });
+    try {
+      expect(prepared.context.mode).toBe("program");
+      if (prepared.context.mode === "program") {
+        // The extender config's files root set admits the test arm, so
+        // the checker can answer over test-file sources — the whole
+        // point of the widening for US2's checker-mode strategies. The
+        // paths join against prepared.rootPath (the realpath-resolved
+        // root), never the raw fixture spelling.
+        const byName = prepared.context.program.getSourceFile(
+          join(prepared.rootPath, "src/math.test.ts"),
+        );
+        const byDirectory = prepared.context.program.getSourceFile(
+          join(prepared.rootPath, "tests/helper.test.ts"),
+        );
+        expect(byName).toBeDefined();
+        expect(byDirectory).toBeDefined();
+      }
+    } finally {
+      releaseContext(prepared);
+    }
+  });
+
+  it("parse-only mode joins the test files to the sources map, keyed by root-relative path, in sorted-source-then-sorted-test order", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await makeTree(WIDENING_TREE);
+    const sink = memorySink();
+    const prepared = await prepareAnalysis(root, undefined, sink.stream, {
+      includeTestArm: true,
+    });
+    try {
+      expect(prepared.context.mode).toBe("parse-only");
+      if (prepared.context.mode === "parse-only") {
+        expect(prepared.context.sources.has("src/math.test.ts")).toBe(true);
+        expect(prepared.context.sources.has("tests/helper.test.ts")).toBe(true);
+        // Bootstrap input order is deterministic: the sorted source arm,
+        // then the sorted test arm. The parse-only map's insertion order
+        // preserves the pre-read order, so the key sequence pins it.
+        // (Note the concatenation is deliberately NOT globally sorted:
+        // "src/math.test.ts" would sort before "src/math.ts" globally —
+        // the two-arm order is the pinned determinism, not one sort.)
+        expect([...prepared.context.sources.keys()]).toEqual([
+          "lib/util.ts",
+          "src/math.ts",
+          "src/math.test.ts",
+          "tests/helper.test.ts",
+        ]);
+      }
+    } finally {
+      releaseContext(prepared);
+    }
+  });
+});
