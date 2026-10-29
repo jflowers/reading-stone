@@ -320,7 +320,9 @@ README.md                        # method table: test_mapping -> Implemented; ca
                                  # (incl. the src/index.ts re-export comment line);
                                  # Limits & Troubleshooting: pipeline-cost bullet's
                                  # method list + fixed-scope entries (assertion-library
-                                 # scope, parse-only degradation, sibling collisions);
+                                 # scope, parse-only degradation, sibling collisions,
+                                 # wire-key pair collapse — same-file and
+                                 # colliding-package records);
                                  # ported-design attribution sentence
 NOTICE                           # attribution sentence gains the test-mapping
                                  # pipeline design

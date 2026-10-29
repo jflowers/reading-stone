@@ -4,7 +4,7 @@
 
 **Date**: 2026-10-29
 
-**Status**: Complete — the spec is decision-complete (17 assumptions, 16
+**Status**: Complete — the spec is decision-complete (18 assumptions, 16
 FRs, no clarification markers); this document verifies the technical
 mechanics behind each pinned decision and records the
 implementation-strategy choices the spec leaves open, each with rationale
@@ -274,21 +274,29 @@ FR-004/US2-7). Per strategy:
    by a higher-priority strategy pairs with each such referenced
    target at 75, in record order.
 
-Pair dedup (amended, iteration-2 consented fix): within one test
-function's emitted pairs, no duplicate `(test_function, test_file,
-target_package, target_function)` pair exists. The per-test
-first-match-wins evaluation makes duplicate strategy emissions
-structurally impossible, and within a strategy the record-ordered
-emission over distinct `(package, name)` targets is duplicate-free by
-construction. The residual unsoundness the original pin missed — two
-distinct records sharing one file and one declared name (same-named
-methods of different classes in one file) are wire-indistinguishable
-targets with identical pair keys — resolves by first-wins in analyze
-record order `(file, line, name)`, the `byNode` node-key discipline:
-the pair set keeps the FIRST record's pair and collapses the later
-same-named record as a documented conservative imprecision (FR-005).
-Wire tuples narrower than the pair key legitimately collide: same-named
-targets across different packages are distinct pairs (disambiguated by
+Pair dedup (amended, iteration-2 and iteration-3 consented fixes):
+within one test function's emitted pairs, no duplicate
+`(test_function, test_file, target_package, target_function)` pair
+exists. The per-test first-match-wins evaluation makes duplicate
+strategy emissions structurally impossible. The residual unsoundness
+the original pin missed — wire-indistinguishable targets with
+identical pair keys — resolves by first-wins in analyze record order
+`(file, line, name)`, the `byNode` node-key discipline: the pair set
+keeps the FIRST record's pair and collapses the later record as a
+documented conservative imprecision (FR-005). Iteration-2 covered the
+same-file case (two distinct records sharing one file and one declared
+name — same-named methods of different classes in one file);
+iteration-3 extended the collapse to the derived wire key
+`(derivePackage(relPath), name)` because `derivePackage` is not
+injective over files — same-stem different extensions
+(`util.js`/`util.cjs`), a dot in a stem vs a nested directory
+(`a.b.ts`/`a/b.ts`), and a file vs its directory index
+(`pkg.ts`/`pkg/index.ts`) all derive one package, so same-named records
+in those colliding-package files are wire-indistinguishable exactly
+like the same-file case and collapse the same way. Wire tuples narrower
+than the pair key legitimately collide: same-named
+targets across genuinely different derived packages are distinct pairs
+(disambiguated by
 `target_package`), and same-titled sibling tests inside one `describe`
 share the identical `test_function` — they are distinct test functions
 that each keep their own pairs, and their rows disambiguate through
@@ -355,8 +363,11 @@ Two forms:
    invocation is not an assertion (US3-9 — `expect(x).resolves` alone
    or a bare `expect(x)` statement collects nothing). Unknown matcher
    names are recognized assertions classified `""` (US3-6). The
-   assertion's `assertion_location` is the `expect(` call expression's
-   line (`<relPath>:<line>`, US1-1).
+   assertion's `assertion_location` is the line of its anchor — the
+   outermost wrapper of the matcher invocation (`await` and
+   parenthesized wrappers unwrapped upward, every matcher invocation on
+   one shared chain reporting the same anchor) — as `<relPath>:<line>`
+   (US1-1).
 2. **`node:assert` calls**: the detector builds, per test file, an
    assert-binding table from the file's import/require declarations —
    the closed module-specifier set `{"node:assert",
@@ -371,7 +382,8 @@ Two forms:
    `not`-prefixed functions preserve their base kind (US3-7). The
    asserted expression — the provenance passes' subject (R7) — is the
    FIRST argument for every assert form. The assertion's location is
-   the assert call's line.
+   the line of the assert call's outermost wrapper (the same anchoring
+   rule as expect chains).
 
 **Rationale**: Chain reconstruction by walking from the invocation down
 to the `expect(` root handles every pinned form in one rule: plain
@@ -631,8 +643,11 @@ reserved-method scenario) and `openspec/specs/protocol/spec.md`
 `src/index.ts` re-export comment line, the `## Limits &
 Troubleshooting` section — `test_mapping` joins the per-request
 pipeline-cost bullet's method list, and fixed-scope entries cover the
-assertion-library scope, parse-only degradation, and the
-same-titled-sibling `test_function` collision — and the
+assertion-library scope, parse-only degradation, the
+same-titled-sibling `test_function` collision, and the wire-key pair
+collapse (same-file and colliding-package same-named targets are
+wire-indistinguishable — rows emit only for the first record in
+analyze record order) — and the
 ported-design attribution sentence), `AGENTS.md` (project structure
 gains `src/quality/`, module map), and `NOTICE` (the attribution
 sentence gains the test-mapping pipeline design). `src/index.ts`

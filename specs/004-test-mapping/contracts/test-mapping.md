@@ -153,7 +153,7 @@ advertised in the same change:
 |---|---|
 | `test_function` | Describe-qualified title: enclosing `describe` titles joined `" > "`, then the test title; bare title at top level; `""` for non-static titles |
 | `test_file` | Root-relative POSIX path of the test file |
-| `assertion_location` | `"<relPath>:<line>"` of the `expect(` / assert call — no column |
+| `assertion_location` | `"<relPath>:<line>"` of the assertion's anchor — the outermost wrapper of the matcher/assert invocation (`await` and parenthesized wrappers unwrapped upward) — no column |
 | `assertion_type` | `equality` \| `comparison` \| `membership` \| `error_check` \| `""` per the pinned matcher table ([data-model.md](data-model.md) Section 4) |
 | `target_function` / `target_package` | The paired production function's declared name and `derivePackage` dotted module path — the same identity `analyze` reports |
 | `side_effect_type` | The inferred canonical taxonomy name (provenance passes then the fallback chains — [data-model.md](data-model.md) Section 7); always present, never an alias |
