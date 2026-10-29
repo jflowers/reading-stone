@@ -7,8 +7,8 @@
 // exclusion-filtered target set `analyze` reports, plus the full test
 // arm), `detectEffects` over those targets (the same effect sets
 // `analyze` reports), then the mapping stages — test collection, target
-// indexing, pairing (US1: the naming strategy), assertion collection,
-// inference — and FR-013's row assembly, stable-key sort, and
+// indexing, pairing (naming, calls, imports — first-match-wins), assertion
+// collection, inference — and FR-013's row assembly, stable-key sort, and
 // serialization.
 //
 // Every stage is deterministic (Constitution I): the result is a pure
@@ -113,8 +113,8 @@ function comparePendingRows(a: PendingRow, b: PendingRow): number {
  *    and inference share one detection result.
  * 3. `collectTestFunctions` over the test arm — the test-side input,
  *    sorted by `(relPath, collection index)`.
- * 4. `buildTargetIndex` + `pairTests` — US1's naming strategy; US2's
- *    calls and imports strategies slot into the same evaluation loop.
+ * 4. `buildTargetIndex` + `pairTests` — the three pairing strategies
+ *    (naming, calls, imports) in first-match-wins priority order.
  * 5. `collectAssertions` per paired test (memoized per test function —
  *    a test paired with several targets walks its callback once, never
  *    once per pair), `inferSideEffectType` per (pair, assertion).
@@ -164,7 +164,7 @@ export async function testMapping(
       stderr,
     );
     const index = buildTargetIndex(prepared.records, effects, prepared.context);
-    const pairs = pairTests(tests, index);
+    const pairs = pairTests(tests, index, prepared.rootPath, stderr);
 
     // Assertion collection memoized per test function: a test paired
     // with several same-named targets walks its callback subtree once,
