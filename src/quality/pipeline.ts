@@ -34,7 +34,12 @@ import { detectEffects } from "../detector.js";
 import { derivePackage } from "../models.js";
 import { type AssertionSite, collectAssertions } from "./assertions.js";
 import { collectTestFunctions, type TestFunction } from "./collect.js";
-import { inferSideEffectType } from "./inference.js";
+import {
+  collectFileLocalHelpers,
+  type FileLocalHelper,
+  inferSideEffectType,
+  type ProvenanceInputs,
+} from "./inference.js";
 import { buildTargetIndex, pairTests } from "./pairing.js";
 import {
   type MappingRow,
@@ -117,7 +122,11 @@ function comparePendingRows(a: PendingRow, b: PendingRow): number {
  *    (naming, calls, imports) in first-match-wins priority order.
  * 5. `collectAssertions` per paired test (memoized per test function —
  *    a test paired with several targets walks its callback once, never
- *    once per pair), `inferSideEffectType` per (pair, assertion).
+ *    once per pair), US4's provenance inputs per paired test with
+ *    assertions (the live context plus the test file's file-local
+ *    helper table — `collectFileLocalHelpers`, memoized per test file so
+ *    one file's top level scans once however many of its tests pair),
+ *    `inferSideEffectType` per (pair, assertion).
  * 6. Row assembly and the stable-key sort, then `serializeMappingRow`.
  *
  * The program-mode context's dispose lifetime is owned here exactly as
@@ -171,6 +180,11 @@ export async function testMapping(
     // and every pair's rows read the identical sites — evidence never
     // recomputed per assertion (research R8's single-walk discipline).
     const assertionsByTest = new Map<TestFunction, readonly AssertionSite[]>();
+    // The per-test-file helper table memo (T031; FR-011): file-scope
+    // helpers are a property of the FILE, so the table computes once per
+    // relPath and every test in the file reads the identical evidence
+    // (research R8's single-walk discipline).
+    const helpersByFile = new Map<string, readonly FileLocalHelper[]>();
     const pending: PendingRow[] = [];
     for (const pair of pairs) {
       const sites = assertionsByTest.get(pair.test);
@@ -179,6 +193,19 @@ export async function testMapping(
         assertionsByTest.set(pair.test, assertions);
       }
       const targetEffects = index.effects.get(pair.target) ?? [];
+      // US4's provenance inputs (T031; FR-011): built only when rows will
+      // be built — the live context plus the test file's file-local
+      // helper table. A null-callback test collects no assertions, so no
+      // inputs are built for it.
+      let provenance: ProvenanceInputs | undefined;
+      if (assertions.length > 0 && pair.test.callback !== null) {
+        let helpers = helpersByFile.get(pair.test.relPath);
+        if (helpers === undefined) {
+          helpers = collectFileLocalHelpers(pair.test.callback.getSourceFile());
+          helpersByFile.set(pair.test.relPath, helpers);
+        }
+        provenance = { context: prepared.context, helpers };
+      }
       for (const assertion of assertions) {
         pending.push({
           row: {
@@ -188,7 +215,12 @@ export async function testMapping(
             assertion_type: assertion.kind,
             target_function: pair.target.name,
             target_package: derivePackage(pair.target.relPath),
-            side_effect_type: inferSideEffectType(assertion, pair, targetEffects),
+            side_effect_type: inferSideEffectType(
+              assertion,
+              pair,
+              targetEffects,
+              provenance,
+            ),
             confidence: pair.confidence,
           },
           line: assertion.line,
