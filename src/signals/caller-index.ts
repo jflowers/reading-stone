@@ -80,9 +80,10 @@ import type { ProgramContext } from "../program.js";
  * planting a throwing module inside the compiler's resolved import graph.
  *
  * Lifetime: the checker round-trips to the live native compiler server, so
- * `buildCallerIndex` must run while the program-mode context is alive — the
- * consumer that owns the context's disposal (the adapter, T024) builds the
- * index before disposing, exactly as the detector's checker queries do.
+ * `buildCallerIndex` must run while the program-mode context is alive —
+ * `buildRecordEvidence` runs it for the method entries that own the
+ * context's disposal (src/analysis.ts, T025/T029) before they dispose,
+ * exactly as the detector's checker queries do.
  */
 
 /**
@@ -93,7 +94,8 @@ import type { ProgramContext } from "../program.js";
  *
  * Keying is by record REFERENCE: records are immutable value records
  * (convention pack AP-004) flowing from one `prepareAnalysis` call, and the
- * adapter holds the same array it passes here, so identity is stable and
+ * callers that pass them here hold the same array `prepareAnalysis`
+ * returned, so identity is stable and
  * structural lookups (`index.get(record)`) cannot collide across same-named
  * records. In program mode the map is TOTAL — one entry per record, 0 for
  * uncalled records (US3-4); in parse-only mode it is empty.

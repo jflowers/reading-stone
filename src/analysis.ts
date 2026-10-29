@@ -11,6 +11,7 @@ import {
 import { MAX_FILE_BYTES, readBounded } from "./safeio.js";
 import { classifyPairs } from "./signals/adapter.js";
 import { buildRecordEvidence } from "./signals/evidence.js";
+import { serializeSignal } from "./signals/types.js";
 
 /**
  * Pattern rules and the shared analysis pipeline (FR-001, FR-002; research
@@ -34,6 +35,17 @@ import { buildRecordEvidence } from "./signals/evidence.js";
  * then the pair-keyed fan-out rebuilds every effect as a classified
  * immutable value, so each one reaches the wire already carrying
  * `classification: {label, confidence}`.
+ *
+ * `classifySignals` (T029, FR-014) is the second method entry here — the
+ * `classify_signals` handler's payload source, running the identical
+ * stages `analyze` runs over the same `prepareAnalysis` pipeline and
+ * owning the same dispose lifetime, differing only in the last stage
+ * (feed serialization instead of record assembly). Both entries consume
+ * the pure fan-out core from src/signals/adapter.ts strictly
+ * one-directionally (convention pack AP-005: circular dependencies MUST
+ * NOT exist between modules): this module imports the core, and nothing
+ * under src/signals/ imports this module back, so the classify_signals
+ * flow is acyclic end to end.
  */
 
 /**
@@ -344,6 +356,89 @@ export async function analyze(
     const classified = classifyPairs(prepared.records, effects, evidence);
     const assembled = assembleFunctionRecords(prepared.records, classified.effects);
     return assembled.map(serializeFunctionRecord);
+  } finally {
+    if (prepared.context.mode === "program") {
+      prepared.context.dispose();
+    }
+  }
+}
+
+/**
+ * The `classify_signals` method's entry (FR-014; research R10, R11): the
+ * serialized `Signal[]` payload — the raw evidence behind `analyze`'s
+ * classifications, one row per rule that matched per (function record,
+ * canonical effect type) pair — in FR-014's `(package, function,
+ * side_effect_type, source)` total order, each row already wire-shaped
+ * through `serializeSignal` (validated fields, omit-unset-optionals
+ * `reasoning`). The returned array — not a `{"signals": [...]}` wrapper —
+ * is the payload the server handler wraps into its JSON-RPC success
+ * response, exactly as it wraps `analyze`'s array.
+ *
+ * The stages are `analyze`'s, identically and in the identical order
+ * (FR-013's one-shared-pipeline guarantee is structural, never a second
+ * walk): `prepareAnalysis` — the one discovery/bootstrap/extraction
+ * pipeline, so the identical discovered, pattern-filtered,
+ * exclusion-filtered file set and record set — then `detectEffects`, then
+ * the T024 core with the program-mode context still live: the evidence
+ * snapshots (`buildRecordEvidence`, caller index included) taken while the
+ * checker can still answer, then `classifyPairs` — the pair-keyed fan-out
+ * whose four-key-ordered `signals` feed is this entry's payload. The two
+ * entries differ by the last stage only: assembly and
+ * `serializeFunctionRecord` in `analyze`, feed serialization here.
+ *
+ * The entry lives here beside `analyze` — not in src/signals/adapter.ts —
+ * so the module dependency stays strictly one-directional (convention
+ * pack AP-005): this module imports the pure core; nothing under
+ * src/signals/ imports this module back.
+ *
+ * The program-mode context's dispose lifetime is owned here exactly as
+ * `analyze` owns its own (the same `finally` discipline): the native
+ * compiler server behind the context is closed whatever the detection and
+ * classification outcome, so no subprocess outlives one request. A
+ * parse-only context owns nothing to dispose. `prepareAnalysis` itself
+ * releases the context when extraction throws, and an invalid root throws
+ * `InvalidRootPathError` before any context exists — it propagates
+ * untouched for the server to map to the shared `-32602` root message.
+ *
+ * Deterministic (Constitution Principle I): the feed is a pure function of
+ * the analyzed tree and analyzer version — fixed row order, fixed
+ * reasoning templates, no timestamps or environment-dependent data — so
+ * repeated requests over the same tree serialize byte-identically.
+ *
+ * @param rootPath Absolute or relative project root; validated and
+ * realpath-resolved by `prepareAnalysis` (an invalid root throws
+ * `InvalidRootPathError`, the server maps to `-32602`).
+ * @param patterns The raw `patterns` parameter value; shape-validated by
+ * the server (`-32602`) before analysis runs, normalized by
+ * `prepareAnalysis`. A set matching nothing yields `[]`, never an error.
+ * @param stderr Injected diagnostic sink (Testability principle); defaults
+ * to `process.stderr`. Stdout is never touched.
+ * @returns The serialized signals, `(package, function, side_effect_type,
+ * source)`-sorted.
+ * @throws InvalidRootPathError when the root does not exist, is not a
+ * directory, or cannot be accessed; the server handler maps it to the
+ * contract's `-32602` response.
+ */
+export async function classifySignals(
+  rootPath: string,
+  patterns: unknown,
+  stderr: Writable = process.stderr,
+): Promise<readonly Record<string, unknown>[]> {
+  const prepared = await prepareAnalysis(rootPath, patterns, stderr);
+  try {
+    const effects = detectEffects(prepared.records, prepared.context);
+    // The core's composition order (the adapter header's composition
+    // contract): evidence while the program-mode context is live — the
+    // caller index's `getSignatureUsage` traffic and every checker query
+    // ride it — then the pair-keyed fan-out whose four-key-ordered feed is
+    // the payload.
+    const evidence = buildRecordEvidence(
+      prepared.context,
+      prepared.records,
+      prepared.inScopePaths,
+    );
+    const classified = classifyPairs(prepared.records, effects, evidence);
+    return classified.signals.map(serializeSignal);
   } finally {
     if (prepared.context.mode === "program") {
       prepared.context.dispose();
