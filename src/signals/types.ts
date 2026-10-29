@@ -112,6 +112,12 @@ export interface Signal {
  * `(package, function, side_effect_type, source)` codepoint comparison — a
  * total order with no tie-break rule, because pair keying keeps the
  * ordering key duplicate-free.
+ *
+ * The pin is load-bearing end to end: the `classify_signals` entry
+ * (src/analysis.ts) returns `ClassifySignalsResult["signals"]` and the
+ * server handler constructs its wrapper against this interface, so the
+ * wire shape is compile-time enforced rather than merely declared
+ * (FR-014).
  */
 export interface ClassifySignalsResult {
   /** The raw signals in `(package, function, side_effect_type, source)` order. */
@@ -161,6 +167,12 @@ function requireString(value: unknown, field: string): void {
  * emitted; `reasoning` appears only when set — omitted, never `null`, when
  * absent or explicitly `undefined`.
  *
+ * The return is typed `Signal` — the validated wire-shaped value, its
+ * alias (if any) resolved to the canonical type — so the
+ * `classify_signals` entry's payload and the server handler's
+ * `ClassifySignalsResult` wrapper are compile-time pinned to this shape
+ * (FR-014's wire contract, enforced rather than asserted).
+ *
  * Validation fails loud (Constitution Principle I). `side_effect_type` is
  * checked through the same resolver detection code uses: a canonical name
  * passes through, an alias spelling that slipped past construction
@@ -172,14 +184,14 @@ function requireString(value: unknown, field: string): void {
  * than a construction-time convention.
  *
  * @param signal The signal to serialize.
- * @returns A JSON-ready object with `function`, `package`,
+ * @returns The validated wire-shaped `Signal`: `function`, `package`,
  * `side_effect_type`, `source`, and `weight`, plus `reasoning` when set.
  * @throws Error when `function` or `package` is not a string,
  * `side_effect_type` is neither a canonical side-effect type nor an alias,
  * `source` is outside the closed set, `weight` is not an integer, or
  * `reasoning` is present but not a non-empty string.
  */
-export function serializeSignal(signal: Signal): Record<string, unknown> {
+export function serializeSignal(signal: Signal): Signal {
   requireString(signal.function, "signal function");
   requireString(signal.package, "signal package");
   const type = resolveSideEffectType(signal.side_effect_type);
@@ -192,7 +204,7 @@ export function serializeSignal(signal: Signal): Record<string, unknown> {
   if (!Number.isInteger(signal.weight)) {
     throw new Error(`Invalid signal weight: ${signal.weight} (must be an integer)`);
   }
-  const serialized: Record<string, unknown> = {
+  const serialized: Signal = {
     function: signal.function,
     package: signal.package,
     side_effect_type: type,
@@ -206,7 +218,10 @@ export function serializeSignal(signal: Signal): Record<string, unknown> {
         "Invalid signal reasoning: must be a non-empty string when present",
       );
     }
-    serialized.reasoning = signal.reasoning;
+    // Spread rather than mutate: Signal is an immutable value record
+    // (AP-004), so the optional field joins as a new value — the same
+    // key order the wire has always had, `reasoning` last.
+    return { ...serialized, reasoning: signal.reasoning };
   }
   return serialized;
 }

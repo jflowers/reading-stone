@@ -18,6 +18,7 @@ import {
   shutdownResult,
   successResponse,
 } from "./protocol.js";
+import type { ClassifySignalsResult } from "./signals/types.js";
 
 export class RpcError extends Error {
   readonly code: number;
@@ -367,10 +368,17 @@ export class Server {
         // never disagree about which functions or effects exist. Its
         // result is already the serialized, wire-shaped signal array
         // (T004), so the sorted-key envelope serializer only re-orders
-        // keys — repeated requests stay byte-identical (SC-005). Skip
-        // diagnostics flow to the server's stderr, never stdout, which
-        // is reserved for JSON-RPC responses (FR-017).
-        return { signals: await classifySignals(rootPath, patterns, this.stderr) };
+        // keys — repeated requests stay byte-identical (SC-005). The
+        // wrapper is typed against ClassifySignalsResult — and the
+        // entry's return against ClassifySignalsResult["signals"] — so
+        // the one-key {"signals": [...]} wire shape is compile-time
+        // enforced end to end. Skip diagnostics flow to the server's
+        // stderr, never stdout, which is reserved for JSON-RPC responses
+        // (FR-017).
+        const result: ClassifySignalsResult = {
+          signals: await classifySignals(rootPath, patterns, this.stderr),
+        };
+        return result;
       } catch (error) {
         throw mapRootPathError(error) ?? error;
       }
