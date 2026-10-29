@@ -12,6 +12,11 @@
  * evidence-snapshot type, the five extractor rules, and the normative
  * routing table with its closed vocabulary lists.
  *
+ * The test-mapping pipeline (004 T032; research R9) rides it too: the
+ * `test_mapping` method entry, the `MappingRow` wire record with its
+ * serializer and the `TestMappingResult` envelope, and the normative
+ * matcher tables with their classification lookups.
+ *
  * An explicit, exhaustive barrel (convention pack AP-001) makes the
  * vocabulary consumable package API instead of orphaned code (Zero-Waste
  * Mandate): later analysis methods and downstream consumers import from
@@ -51,6 +56,19 @@ export {
   serializeFunctionRecord,
 } from "./models.js";
 export type { ProgramContext } from "./program.js";
+export {
+  ASSERT_FUNCTION_KINDS,
+  classifyAssertCall,
+  classifyExpectChain,
+  EXPECT_MATCHER_KINDS,
+} from "./quality/matchers.js";
+export { testMapping } from "./quality/pipeline.js";
+export type {
+  AssertionKind,
+  MappingRow,
+  TestMappingResult,
+} from "./quality/types.js";
+export { serializeMappingRow } from "./quality/types.js";
 export { classifyPairs } from "./signals/adapter.js";
 export { callerSignal } from "./signals/caller.js";
 export type { RecordEvidence } from "./signals/evidence.js";

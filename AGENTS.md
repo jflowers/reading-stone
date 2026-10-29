@@ -59,7 +59,7 @@ The division of responsibility:
 - CLI, TUI, and report formatting
 - Universal side effect taxonomy
 - Classification scoring (contractual vs incidental)
-- CRAP and GazeCRAP computation
+- CRAP, GazeCRAP, and contract coverage computation
 - AI report pipeline
 - Analyzer lifecycle management
 
@@ -67,9 +67,10 @@ The division of responsibility:
 
 - TypeScript/JavaScript-specific side effect detection
 - TypeScript/JavaScript-specific classification signals
+- TypeScript/JavaScript test-to-assertion mapping for vitest and jest
+  test suites (the `test_mapping` method)
 - Coverage data parsing
 - Cyclomatic complexity calculation
-- Test-to-assertion mapping (vitest and jest)
 - File and project discovery
 
 ## Technology Stack
@@ -107,7 +108,15 @@ reading-stone/
 │   ├── detector.ts          # Side-effect detection rules + FunctionRecord assembly
 │   ├── complexity.ts        # Cyclomatic complexity engine (ComplexityEntry)
 │   ├── coverage.ts          # Istanbul coverage-final.json artifact parser (CoverageEntry)
-│   └── signals/             # Classification signal pipeline (classify_signals method + analyze wiring)
+│   ├── quality/             # Test-mapping pipeline (test_mapping method + analyze wiring)
+│   │   ├── assertions.ts    # Assertion detection (vitest/jest expect chains, node:assert forms)
+│   │   ├── collect.ts       # Test-function collection (it/test/describe walk, qualified titles)
+│   │   ├── inference.ts     # Assertion-to-effect inference (fallback chains + four provenance passes)
+│   │   ├── matchers.ts      # Normative matcher tables + classification lookups
+│   │   ├── pairing.ts       # Test-target pairing strategies (naming 90/70, calls 80, imports 75)
+│   │   ├── pipeline.ts      # testMapping() orchestration over the shared prepareAnalysis test arm
+│   │   └── types.ts         # MappingRow wire record + serializer (closed assertion-kind set)
+│   ├── signals/             # Classification signal pipeline (classify_signals method + analyze wiring)
 │       ├── adapter.ts       # Pair fan-out core, contradiction synthesis, confidence formula (classifyPairs)
 │       ├── caller-index.ts  # Import-graph caller index (distinct-module counts via the type checker)
 │       ├── caller.ts        # caller_count bucket rule (+5 / +10 / +15 by distinct calling modules)
@@ -118,7 +127,7 @@ reading-stone/
 │       ├── routing.ts       # Effect-type routing table (48 canonical types → agreeing vocabulary)
 │       ├── types.ts         # Signal wire record + serializer (six-value closed source set)
 │       └── visibility.ts    # visibility signal (exported components, clamped at +20)
-├── tests/                   # Vitest suites (tests/signals/ mirrors src/signals/ one-to-one)
+├── tests/                   # Vitest suites (tests/signals/ and tests/quality/ mirror their src/ trees one-to-one)
 ├── docs/
 │   └── effect-disposition.md  # 48-type disposition table (tier, disposition, TypeScript mapping, rationale)
 ├── .github/workflows/       # CI: biome, tsc, vitest gates

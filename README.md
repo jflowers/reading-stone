@@ -17,7 +17,7 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 | `complexity` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — ComplexityEntry records) |
 | `coverage` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — CoverageEntry records) |
 | `classify_signals` | Implemented (params `{root_path, patterns}`; result `{"signals": [...]}` — the raw classification signal feed) |
-| `test_mapping` | Not implemented (`-32601`) |
+| `test_mapping` | Implemented (params `{root_path, patterns}`; result `{"mappings": [...]}` — test-to-assertion MappingRows with pairing confidences and `side_effect_type` inference) |
 | `doc_coverage` | Not implemented (`-32601`) |
 | `cognitive_complexity` | Not implemented (`-32601`) |
 
@@ -27,10 +27,11 @@ methods — not gated behind a capability flag — and share one params surface:
 `root_path` plus an optional `patterns` array of path-prefix strings.
 `classify_signals` is implemented and advertised via
 `capabilities.classify_signals: true`; Gaze calls it only when that flag is
-true, with the same params surface. The remaining capability flags
-(`test_mapping`, `streaming`, `doc_coverage`, `cognitive_complexity`) are
-`false` at handshake; their methods are the roadmap — see
-`openspec/changes/`.
+true, with the same params surface. `test_mapping` is implemented and
+advertised via `capabilities.test_mapping: true` the same way. The
+remaining capability flags (`streaming`, `doc_coverage`,
+`cognitive_complexity`) are `false` at handshake; their methods are the
+roadmap — see `openspec/changes/`.
 
 The side effects `analyze` reports are governed by the disposition table:
 for each of the 48 canonical taxonomy types it records the tier, the
@@ -112,7 +113,7 @@ analyzers:
 ```text
 reading-stone/
 ├── src/
-│   ├── index.ts          # Package surface (VERSION + taxonomy/model/signal re-exports)
+│   ├── index.ts          # Package surface (VERSION + taxonomy/model/signal/mapping re-exports)
 │   ├── main.ts           # Entry point (reading-stone --stdio)
 │   ├── server.ts         # JSON-RPC server (stdin/stdout)
 │   ├── protocol.ts       # Request/response types
@@ -126,6 +127,14 @@ reading-stone/
 │   ├── detector.ts       # Side-effect detection rules + FunctionRecord assembly
 │   ├── complexity.ts     # Cyclomatic complexity engine (ComplexityEntry)
 │   ├── coverage.ts       # Istanbul coverage-final.json artifact parser (CoverageEntry)
+│   ├── quality/          # Test-mapping pipeline (test_mapping method)
+│   │   ├── assertions.ts    # Assertion detection (vitest/jest expect chains, node:assert forms)
+│   │   ├── collect.ts       # Test-function collection (it/test/describe walk, qualified titles)
+│   │   ├── inference.ts     # Assertion-to-effect inference (fallback chains + four provenance passes)
+│   │   ├── matchers.ts      # Normative matcher tables + classification lookups
+│   │   ├── pairing.ts       # Test-target pairing strategies (naming 90/70, calls 80, imports 75)
+│   │   ├── pipeline.ts      # testMapping() orchestration over the shared prepareAnalysis test arm
+│   │   └── types.ts         # MappingRow wire record + serializer (closed assertion-kind set)
 │   └── signals/          # Classification signal pipeline (classify_signals + analyze wiring)
 │       ├── adapter.ts       # Pair fan-out, contradiction synthesis, confidence formula (classifyPairs)
 │       ├── caller-index.ts  # Import-graph caller index (distinct-module counts via the type checker)
@@ -161,12 +170,30 @@ fixed transport bounds (not configurable in v1):
   `<root>/coverage/coverage-final.json`. When that artifact is absent,
   unreadable, or invalid, `coverage` returns `{"functions": []}` and never
   errors (FR-025). It never runs the project's tests.
-- **Per-request pipeline cost** — each `analyze`, `complexity`, or
-  `classify_signals` request
+- **Per-request pipeline cost** — each `analyze`, `complexity`,
+  `classify_signals`, or `test_mapping` request
   boots a fresh TypeScript compiler context (tree walk, pre-read,
   bootstrap, extraction) and disposes it before responding; no pipeline
   state is reused across requests. `coverage` reads a pre-existing
   artifact and is cheap.
+- **Assertion-library scope** — the `test_mapping` method collects
+  assertions from vitest/jest `expect(...)` chains and `node:assert`
+  forms only; chai, should.js, and other assertion libraries are never
+  collected (fixed scope, v1).
+- **Parse-only pairing degradation** — without a usable
+  `tsconfig.json`, `test_mapping` pairs through lexical import/call
+  matching: barrel re-exports are uncrossed and same-named bindings can
+  collide, so pairing precision drops while rows and confidences stay
+  available (degradation reduces precision, never availability).
+- **Same-titled sibling tests** — two tests sharing one title inside a
+  `describe` block share the identical `test_function` value; their rows
+  stay distinct through `assertion_location`.
+- **Wire-key pair collapse** — same-named targets in one file, or in
+  different files whose paths derive one package (for example `pkg.ts`
+  vs `pkg/index.ts`), are wire-indistinguishable
+  (`target_package` + `target_function`); rows emit only for the first
+  record in analyze record order — a documented conservative imprecision,
+  never duplicate rows.
 
 Empty `coverage` results usually mean no artifact exists yet: run the
 project's own test command with an Istanbul reporter writing
@@ -189,7 +216,9 @@ When input is malformed, Reading Stone emits a one-line diagnostic to
 
 ## License
 
-Apache 2.0 -- see [LICENSE](LICENSE). The JSON-RPC protocol layer and the
-classification signal pipeline design are ported from
-[snake-eyes](https://github.com/zero-dot-force/snake-eyes) (zero-dot-force,
-Apache 2.0); see [NOTICE](NOTICE) for attribution.
+Apache 2.0 -- see [LICENSE](LICENSE). The JSON-RPC protocol layer, the
+classification signal pipeline design, and the test-mapping pipeline
+design (pairing strategies and pinned confidences, matcher
+classification semantics, fallback chains, provenance boundaries) are
+ported from [snake-eyes](https://github.com/zero-dot-force/snake-eyes)
+(zero-dot-force, Apache 2.0); see [NOTICE](NOTICE) for attribution.
