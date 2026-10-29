@@ -359,6 +359,7 @@ async function runIndex(
       prepared.context,
       prepared.records,
       prepared.inScopePaths,
+      prepared.rootPath,
     );
     return {
       root: tree.root,
@@ -628,6 +629,7 @@ describe("parse-only degradation (research R7)", () => {
         prepared.context,
         prepared.records,
         prepared.inScopePaths,
+        prepared.rootPath,
       );
       expect(index.size).toBe(0);
       for (const record of prepared.records) {
@@ -657,7 +659,12 @@ describe("degenerate inputs", () => {
     try {
       expect(prepared.context.mode).toBe("program");
       expect(prepared.records.length).toBeGreaterThan(0);
-      const index = buildCallerIndex(prepared.context, [], prepared.inScopePaths);
+      const index = buildCallerIndex(
+        prepared.context,
+        [],
+        prepared.inScopePaths,
+        prepared.rootPath,
+      );
       expect(index.size).toBe(0);
     } finally {
       if (prepared.context.mode === "program") {
