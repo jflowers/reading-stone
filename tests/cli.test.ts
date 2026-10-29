@@ -108,9 +108,11 @@ Copyright 2026 zero-dot-force
 
 This product includes software originally developed in snake-eyes
 (https://github.com/zero-dot-force/snake-eyes), licensed under
-Apache License 2.0. The JSON-RPC protocol layer and the classification
-signal pipeline design are ported from snake-eyes' Python
-implementation of the Gaze analyzer protocol.
+Apache License 2.0. The JSON-RPC protocol layer, the classification
+signal pipeline design, and the test-mapping pipeline design (pairing
+strategies and pinned confidences, matcher classification semantics,
+fallback chains, provenance boundaries) are ported from snake-eyes'
+Python implementation of the Gaze analyzer protocol.
 `);
   });
 });
