@@ -775,4 +775,230 @@ describe("testMapping", () => {
     const parseOnly = await mappingOf(sources);
     expect(rows(parseOnly.result)).toEqual(expected);
   });
+
+  it("maps each provenance pass's fixture through the full pipeline (SC-003)", async () => {
+    // T030 / SC-003; US4 scenarios 1–4; FR-011: the four pass fixtures
+    // end-to-end over one tree whose target carries GeneratorYield plus
+    // the P0 ErrorReturn and no ReturnValue — the distinguishing shape
+    // (US4-1): a firing pass observably prefers GeneratorYield, while
+    // any no-fire path would map the first P0 (ErrorReturn). Each test
+    // pairs through the strategy its shape implies — direct identity
+    // and indirect root through calls (80, the target call sits in the
+    // callback), helper bridge through the import graph (75, the only
+    // out-of-clause reference sits in the file-scope helper), inline
+    // call through calls (80) — so every row also re-pins its pairing
+    // confidence end-to-end. The passes are AST-level, so the
+    // parse-only twin answers identically (spec edge case 10).
+    const sources: Readonly<Record<string, string>> = {
+      "src/stream.ts": [
+        "export function* stream(): Generator<number> {", // 1
+        "  yield 1;", // 2
+        '  throw new Error("dry");', // 3
+        "}", // 4
+      ].join("\n"),
+      "tests/passes.test.ts": [
+        // Extensionless specifier — the quickstart spelling: the imports
+        // strategy's parse-only path resolution resolves it through the
+        // walk's extension enumeration (a `.js`-suffixed specifier naming
+        // a `.ts` file deliberately does not — the documented boundary).
+        'import { stream } from "../src/stream";', // 1
+        "", // 2
+        'it("direct identity", () => {', // 3
+        "  expect(stream()).toBeDefined();", // 4
+        "});", // 5
+        "", // 6
+        'it("indirect root", () => {', // 7
+        "  const gen = stream();", // 8
+        "  expect(gen).toBeDefined();", // 9
+        "});", // 10
+        "", // 11
+        "function firstBatch(): Generator<number> {", // 12
+        "  return stream();", // 13
+        "}", // 14
+        "", // 15
+        'it("helper bridge", () => {', // 16
+        "  expect(firstBatch()).toBeDefined();", // 17
+        "});", // 18
+        "", // 19
+        'it("inline call", () => {', // 20
+        "  const seen: number[] = [];", // 21
+        "  expect(seen).toContain([...stream()][0]);", // 22
+        "});", // 23
+      ].join("\n"),
+    };
+
+    const checker = await mappingOf({ ...sources, "tsconfig.json": TSCONFIG });
+    expect(rows(checker.result)).toEqual([
+      // FR-013 stable-key order: test_function UTF-16 order —
+      // "direct identity" < "helper bridge" < "indirect root" <
+      // "inline call".
+      {
+        test_function: "direct identity",
+        test_file: "tests/passes.test.ts",
+        assertion_location: "tests/passes.test.ts:4",
+        assertion_type: "",
+        target_function: "stream",
+        target_package: "src.stream",
+        side_effect_type: "GeneratorYield",
+        confidence: 80,
+      },
+      {
+        test_function: "helper bridge",
+        test_file: "tests/passes.test.ts",
+        assertion_location: "tests/passes.test.ts:17",
+        assertion_type: "",
+        target_function: "stream",
+        target_package: "src.stream",
+        side_effect_type: "GeneratorYield",
+        confidence: 75,
+      },
+      {
+        test_function: "indirect root",
+        test_file: "tests/passes.test.ts",
+        assertion_location: "tests/passes.test.ts:9",
+        assertion_type: "",
+        target_function: "stream",
+        target_package: "src.stream",
+        side_effect_type: "GeneratorYield",
+        confidence: 80,
+      },
+      {
+        test_function: "inline call",
+        test_file: "tests/passes.test.ts",
+        assertion_location: "tests/passes.test.ts:22",
+        assertion_type: "membership",
+        target_function: "stream",
+        target_package: "src.stream",
+        side_effect_type: "GeneratorYield",
+        confidence: 80,
+      },
+    ]);
+
+    const parseOnly = await mappingOf(sources);
+    expect(rows(parseOnly.result)).toEqual(rows(checker.result));
+  });
+
+  it("maps direct-identity assertions on a generator target to GeneratorYield", async () => {
+    // T030 / SC-003 — the reference analyzer's hardest-learned lesson
+    // (spec assumption 11; research R7): mismatched inference on
+    // generator targets silently zeroed contract coverage. The e2e pin:
+    // direct-identity assertions on a `function*` target map
+    // GeneratorYield. The pure shape (no P0 effect competing): the
+    // return-family preference and the FR-010 chain agree, and the
+    // rows say GeneratorYield — the test pairs by naming (90).
+    const sources: Readonly<Record<string, string>> = {
+      "src/numbers.ts": [
+        "export function* numbers(): Generator<number> {", // 1
+        "  yield 1;", // 2
+        "  yield 2;", // 3
+        "}", // 4
+      ].join("\n"),
+      "tests/numbers.test.ts": [
+        'import { numbers } from "../src/numbers.js";', // 1
+        "", // 2
+        'it("numbers", () => {', // 3
+        "  expect(numbers()).toBeDefined();", // 4
+        "  expect(numbers()).not.toBeNull();", // 5
+        "});", // 6
+      ].join("\n"),
+    };
+    const expected = [
+      {
+        test_function: "numbers",
+        test_file: "tests/numbers.test.ts",
+        assertion_location: "tests/numbers.test.ts:4",
+        assertion_type: "",
+        target_function: "numbers",
+        target_package: "src.numbers",
+        side_effect_type: "GeneratorYield",
+        confidence: 90,
+      },
+      {
+        test_function: "numbers",
+        test_file: "tests/numbers.test.ts",
+        assertion_location: "tests/numbers.test.ts:5",
+        assertion_type: "",
+        target_function: "numbers",
+        target_package: "src.numbers",
+        side_effect_type: "GeneratorYield",
+        confidence: 90,
+      },
+    ];
+
+    const checker = await mappingOf({ ...sources, "tsconfig.json": TSCONFIG });
+    expect(rows(checker.result)).toEqual(expected);
+
+    const parseOnly = await mappingOf(sources);
+    expect(rows(parseOnly.result)).toEqual(expected);
+  });
+
+  it("maps error-family assertions by the target's effect set alone", async () => {
+    // T030 / SC-003; US4-5; FR-009: error rows never use provenance —
+    // even the direct-call asserted expressions here (pass 1 would
+    // fire on a value row) select by the error family alone:
+    // ErrorReturn when the target carries it (a throwing target), else
+    // ErrorSignal when it carries that (process.exit's terminal signal
+    // — deliberately never ErrorReturn), else the ErrorReturn fallback
+    // (an error-less target). Every test pairs by naming (90).
+    const sources: Readonly<Record<string, string>> = {
+      "src/fail.ts": 'export function fail(): void {\n  throw new Error("boom");\n}\n',
+      "src/halt.ts": "export function halt(): void {\n  process.exit(1);\n}\n",
+      "src/plain.ts": "export function plain(): number {\n  return 1;\n}\n",
+      "tests/errors.test.ts": [
+        'import { fail } from "../src/fail.js";', // 1
+        'import { halt } from "../src/halt.js";', // 2
+        'import { plain } from "../src/plain.js";', // 3
+        "", // 4
+        'it("fail", () => {', // 5
+        "  expect(fail()).toThrow(Error);", // 6
+        "});", // 7
+        "", // 8
+        'it("halt", () => {', // 9
+        "  expect(halt()).toThrow(Error);", // 10
+        "});", // 11
+        "", // 12
+        'it("plain", () => {', // 13
+        "  expect(plain()).not.toThrow();", // 14
+        "});", // 15
+      ].join("\n"),
+    };
+    const expected = [
+      {
+        test_function: "fail",
+        test_file: "tests/errors.test.ts",
+        assertion_location: "tests/errors.test.ts:6",
+        assertion_type: "error_check",
+        target_function: "fail",
+        target_package: "src.fail",
+        side_effect_type: "ErrorReturn",
+        confidence: 90,
+      },
+      {
+        test_function: "halt",
+        test_file: "tests/errors.test.ts",
+        assertion_location: "tests/errors.test.ts:10",
+        assertion_type: "error_check",
+        target_function: "halt",
+        target_package: "src.halt",
+        side_effect_type: "ErrorSignal",
+        confidence: 90,
+      },
+      {
+        test_function: "plain",
+        test_file: "tests/errors.test.ts",
+        assertion_location: "tests/errors.test.ts:14",
+        assertion_type: "error_check",
+        target_function: "plain",
+        target_package: "src.plain",
+        side_effect_type: "ErrorReturn",
+        confidence: 90,
+      },
+    ];
+
+    const checker = await mappingOf({ ...sources, "tsconfig.json": TSCONFIG });
+    expect(rows(checker.result)).toEqual(expected);
+
+    const parseOnly = await mappingOf(sources);
+    expect(rows(parseOnly.result)).toEqual(expected);
+  });
 });
