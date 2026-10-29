@@ -360,6 +360,58 @@ describe("testMapping", () => {
     expect(rows(parseOnly.result)).toEqual(expected);
   });
 
+  it("emits rows only for the first of two same-named targets in colliding-package files", async () => {
+    // Iteration-3 F1 variant a (FR-005 amended; data-model Section 6
+    // amended): derivePackage is not injective over files — src/pkg.ts
+    // and src/pkg/index.ts both derive "src.pkg" (the file-vs-index
+    // flattening) — so two same-named functions in those DIFFERENT
+    // files are wire-indistinguishable targets exactly like the
+    // same-file case: the pair set keeps the FIRST in analyze record
+    // order (file, line, name) — "src/pkg.ts" sorts before
+    // "src/pkg/index.ts" — and collapses the other (conservative
+    // imprecision: no wire-duplicate rows). The two targets carry
+    // DIFFERENT effect sets — the flat file's util returns
+    // (ReturnValue), the nested index's util logs (StdoutWrite) — so
+    // the emitted row's side_effect_type pins WHICH record won.
+    const sources: Readonly<Record<string, string>> = {
+      "src/pkg.ts": [
+        "export function util(): number {", // 1
+        "  return 1;", // 2
+        "}", // 3
+      ].join("\n"),
+      "src/pkg/index.ts": [
+        "export function util(): void {", // 1
+        '  console.log("nested");', // 2
+        "}", // 3
+      ].join("\n"),
+      "tests/pkg.test.ts": [
+        'import { util } from "../src/pkg.js";', // 1
+        "", // 2
+        'it("util", () => {', // 3
+        "  expect(util()).toBe(1);", // 4
+        "});", // 5
+      ].join("\n"),
+    };
+    const expected = [
+      {
+        test_function: "util",
+        test_file: "tests/pkg.test.ts",
+        assertion_location: "tests/pkg.test.ts:4",
+        assertion_type: "equality",
+        target_function: "util",
+        target_package: "src.pkg",
+        side_effect_type: "ReturnValue",
+        confidence: 90,
+      },
+    ];
+
+    const checker = await mappingOf({ ...sources, "tsconfig.json": TSCONFIG });
+    expect(rows(checker.result)).toEqual(expected);
+
+    const parseOnly = await mappingOf(sources);
+    expect(rows(parseOnly.result)).toEqual(expected);
+  });
+
   it("reproduces identical serialized bytes across two full pipeline runs", async () => {
     // R10: the determinism golden — two complete testMapping calls, each
     // with its own prepareAnalysis walk, produce byte-identical serialized

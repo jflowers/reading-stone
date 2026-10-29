@@ -24,7 +24,7 @@
 import type { Node } from "typescript/unstable/ast";
 import type { ExtractionRecord } from "../extract.js";
 import { compareFileLineName } from "../internal.js";
-import type { Effect } from "../models.js";
+import { derivePackage, type Effect } from "../models.js";
 import type { ProgramContext } from "../program.js";
 import type { TestFunction } from "./collect.js";
 
@@ -278,17 +278,24 @@ function namingPairs(
 
 /**
  * The per-test pair-key first-wins dedup (FR-005 amended; iteration-2
- * review fix F1): within ONE test function's emitted pairs, the wire
- * pair key `(test_function, test_file, target_package, target_function)`
- * is unique. The test side is constant within one test's pairs, and the
+ * review fix F1, extended iteration-3 to the derived wire key): within
+ * ONE test function's emitted pairs, the wire pair key
+ * `(test_function, test_file, target_package, target_function)` is
+ * unique. The test side is constant within one test's pairs, and the
  * row's `target_package` is derived from the target's file — a pure
- * function of `relPath` — so the key reduces here to
- * `(target relPath, target name)`: two distinct records sharing one file
- * and one declared name (same-named methods of different classes) are
- * wire-indistinguishable targets, and only the FIRST in the strategy's
- * record-ordered emission survives — the `byNode` first-wins discipline.
- * The collapse is a documented conservative imprecision: later
- * same-named records in the same file emit no pairs and no rows.
+ * function of `relPath` — so the key reduces here to the derived wire
+ * identity `(derivePackage(relPath), name)`. `derivePackage` is NOT
+ * injective over files (same-stem different extensions
+ * `util.js`/`util.cjs`; a dot in a stem vs a nested directory
+ * `a.b.ts`/`a/b.ts`; a file vs its directory index
+ * `pkg.ts`/`pkg/index.ts`), so two distinct records that share one file
+ * and one declared name (same-named methods of different classes) OR
+ * that sit in different files whose paths derive the same package while
+ * sharing the declared name, are wire-indistinguishable targets — and
+ * only the FIRST in the strategy's record-ordered emission survives —
+ * the `byNode` first-wins discipline. The collapse is a documented
+ * conservative imprecision: later wire-indistinguishable records emit
+ * no pairs and no rows.
  *
  * The dedup domain is deliberately the test function, never the bare
  * wire tuple: same-titled sibling tests inside one describe (spec edge
@@ -305,7 +312,11 @@ function dedupeByPairKey(testPairs: readonly Pairing[]): readonly Pairing[] {
   const seen = new Set<string>();
   const kept: Pairing[] = [];
   for (const pair of testPairs) {
-    const key = `${pair.target.relPath}\0${pair.target.name}`;
+    // The derived wire identity, not (relPath, name): colliding-package
+    // files (pkg.ts vs pkg/index.ts) derive one target_package, so the
+    // key must collapse them exactly like the same-file case — the
+    // iteration-3 F1 amendment (data-model.md Section 6).
+    const key = `${derivePackage(pair.target.relPath)}\0${pair.target.name}`;
     if (seen.has(key)) {
       continue;
     }
@@ -334,7 +345,8 @@ function dedupeByPairKey(testPairs: readonly Pairing[]): readonly Pairing[] {
  * @param index The pairing-support target index for the same run.
  * @returns The pairs: per test in input order, each test's matches in
  * analyze record order `(file, line, name)`, wire-indistinguishable
- * same-file-same-name targets collapsed to the first record.
+ * targets (same-file and colliding-package same-named records alike)
+ * collapsed to the first record.
  */
 export function pairTests(
   tests: readonly TestFunction[],
