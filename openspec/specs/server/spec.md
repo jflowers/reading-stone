@@ -101,7 +101,7 @@ The system SHALL respond to an unknown method with `-32601` and message `Method 
 
 ### Requirement: Injectable dispatch table
 
-The system SHALL accept an injectable dispatch table (`Map` from method name to handler callable) via the `Server` constructor, replacing the default built-in `initialize`/`shutdown`/`discover`/`analyze`/`complexity`/`coverage` table. Tests SHALL be able to register a handler — including a raising handler — to exercise dispatch and error paths through stdin/stdout without altering the built-in method set.
+The system SHALL accept an injectable dispatch table (`Map` from method name to handler callable) via the `Server` constructor, replacing the default built-in `initialize`/`shutdown`/`discover`/`analyze`/`complexity`/`coverage`/`classify_signals` table. Tests SHALL be able to register a handler — including a raising handler — to exercise dispatch and error paths through stdin/stdout without altering the built-in method set.
 
 #### Scenario: Raising handler registered via injected dispatch
 
@@ -142,9 +142,9 @@ The system SHALL answer `shutdown` with a success result `{}` and then resolve t
 
 ### Requirement: Dispatch table scope
 
-The system SHALL register only `initialize`, `shutdown`, `discover`, `analyze`, `complexity`, and `coverage` as built-in dispatch handlers. Any other method SHALL return `-32601`; the reserved analysis method names are `test_mapping`, `classify_signals`, `analyze/stream`, `doc_coverage`, and `cognitive_complexity`. The dispatch table SHALL be overridable via the `Server` constructor for testing (see `Injectable dispatch table`).
+The system SHALL register only `initialize`, `shutdown`, `discover`, `analyze`, `complexity`, `coverage`, and `classify_signals` as built-in dispatch handlers. Any other method SHALL return `-32601`; the reserved analysis method names are `test_mapping`, `analyze/stream`, `doc_coverage`, and `cognitive_complexity`. The dispatch table SHALL be overridable via the `Server` constructor for testing (see `Injectable dispatch table`).
 
 #### Scenario: Reserved methods are not implemented
 
-- **WHEN** a request for `test_mapping`, `classify_signals`, `analyze/stream`, `doc_coverage`, or `cognitive_complexity` is written
+- **WHEN** a request for `test_mapping`, `analyze/stream`, `doc_coverage`, or `cognitive_complexity` is written
 - **THEN** the system responds with `-32601`
