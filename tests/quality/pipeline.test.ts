@@ -652,4 +652,127 @@ describe("testMapping", () => {
     const result = await testMapping(tree.root);
     expect(rows(result).map((row) => row.target_function)).toEqual(["add"]);
   });
+
+  it("profiles assertion coverage — zero, partial, and full (US3-8)", async () => {
+    // T027 / SC-002: the coverage profile over PAIRED tests. Pairing and
+    // asserting are independent stages: a paired test with no assertions
+    // contributes no rows (zero coverage); a suite partly asserting and
+    // partly silent keeps rows only for the asserting tests (partial);
+    // an all-asserting suite emits for every test (full). Rows are never
+    // fabricated for silent tests — the truthful outcome (US3-8).
+    const math =
+      "export function add(a: number, b: number): number {\n  return a + b;\n}\n";
+
+    // Zero coverage: the paired test asserts nothing.
+    const zero = await mappingOf({
+      "src/math.ts": math,
+      "tests/math.test.ts": [
+        'describe("add", () => {', // 1
+        "  it('silent', () => {", // 2
+        "    const unused = 1;", // 3
+        "  });", // 4
+        "});", // 5
+      ].join("\n"),
+    });
+    expect(zero.result).toEqual({ mappings: [] });
+
+    // Partial coverage: one asserting test, one silent — both paired
+    // through the describe title.
+    const partial = await mappingOf({
+      "src/math.ts": math,
+      "tests/math.test.ts": [
+        'describe("add", () => {', // 1
+        '  it("asserts", () => {', // 2
+        "    expect(add(1, 2)).toBe(3);", // 3
+        "  });", // 4
+        "", // 5
+        "  it('silent', () => {", // 6
+        "    const unused = 1;", // 7
+        "  });", // 8
+        "});", // 9
+      ].join("\n"),
+    });
+    expect(rows(partial.result).map((row) => row.test_function)).toEqual([
+      "add > asserts",
+    ]);
+
+    // Full coverage: every paired test asserts.
+    const full = await mappingOf({
+      "src/math.ts": math,
+      "tests/math.test.ts": [
+        'describe("add", () => {', // 1
+        '  it("first", () => {', // 2
+        "    expect(add(1, 2)).toBe(3);", // 3
+        "  });", // 4
+        "", // 5
+        '  it("second", () => {', // 6
+        "    expect(add(2, 2)).toBe(4);", // 7
+        "  });", // 8
+        "});", // 9
+      ].join("\n"),
+    });
+    expect(rows(full.result).map((row) => row.test_function)).toEqual([
+      "add > first",
+      "add > second",
+    ]);
+  });
+
+  it("emits no rows for a paired test whose callback is a bare identifier", async () => {
+    // US3-8's pipeline shape: the callback reference has no subtree, so
+    // the assertion stage collects nothing — the pair exists but no row
+    // is fabricated for it. The delegated body sits outside every test
+    // callback, structurally outside the scan domain.
+    const { result } = await mappingOf({
+      "src/math.ts":
+        "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+      "tests/math.test.ts": [
+        'import { add } from "../src/math.js";', // 1
+        "", // 2
+        'it("add", runCase);', // 3
+        "", // 4
+        "function runCase(): void {", // 5
+        "  expect(add(1, 2)).toBe(3);", // 6
+        "}", // 7
+      ].join("\n"),
+    });
+    expect(result).toEqual({ mappings: [] });
+  });
+
+  it("collects node:assert assertions through the pipeline in both bootstrap modes", async () => {
+    // T026's both-modes pin at the pipeline level: the assert-binding
+    // table is built syntactically from the file's import declarations,
+    // so checker mode (where node:assert resolves to no in-root module —
+    // the unresolved-import type error is never a gate) and parse-only
+    // mode collect the same sites and emit the same rows.
+    const sources: Readonly<Record<string, string>> = {
+      "src/math.ts":
+        "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+      "tests/assert.test.ts": [
+        'import assert from "node:assert";', // 1
+        'import { add } from "../src/math";', // 2
+        "", // 3
+        'describe("add", () => {', // 4
+        '  it("asserts", () => {', // 5
+        "    assert.equal(add(1, 2), 3);", // 6
+        "  });", // 7
+        "});", // 8
+      ].join("\n"),
+    };
+    const expected = [
+      {
+        test_function: "add > asserts",
+        test_file: "tests/assert.test.ts",
+        assertion_location: "tests/assert.test.ts:6",
+        assertion_type: "equality",
+        target_function: "add",
+        target_package: "src.math",
+        side_effect_type: "ReturnValue",
+        confidence: 90,
+      },
+    ];
+    const checker = await mappingOf({ ...sources, "tsconfig.json": TSCONFIG });
+    expect(rows(checker.result)).toEqual(expected);
+    const parseOnly = await mappingOf(sources);
+    expect(rows(parseOnly.result)).toEqual(expected);
+  });
 });

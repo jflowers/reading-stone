@@ -509,3 +509,322 @@ describe("collectAssertions (bounded-walk guard)", () => {
     expect(shallowSink.text()).toBe("");
   });
 });
+
+describe("collectAssertions (full form coverage)", () => {
+  // T026 — US3's full form-coverage suite (FR-007/FR-008; SC-002; US3
+  // scenarios 1–10; research R5; data-model Section 4): every matcher
+  // family of the pinned table exercised through real chains, the
+  // modifier/await parity pins, and the negation-preservation rule.
+  it("classifies every matcher family of the pinned table through real chains", async () => {
+    const sites = await sitesIn(
+      {
+        "tests/families.test.ts": `
+it("families", () => {
+  expect(plain).toBe(1);
+  expect(deep).toStrictEqual({ a: 1 });
+  expect(close).toBeCloseTo(1.5, 5);
+  expect(shallow).toMatchObject({ a: 1 });
+  expect(spy).toHaveBeenCalledWith(1, 2);
+  expect(spy).toHaveReturnedWith(3);
+  expect(count).toBeGreaterThan(2);
+  expect(count).toBeLessThanOrEqual(10);
+  expect(list).toContain("x");
+  expect(list).toContainEqual("x");
+  expect(text).toMatch(/x/);
+  expect(boom).toThrow();
+  expect(boom).toThrowError("bad");
+  expect(flag).toBeTruthy();
+  expect(value).toBeDefined();
+  expect(nan).toBeNaN();
+  expect(spy).toHaveBeenCalled();
+  expect(spy).toHaveBeenCalledTimes(2);
+  expect(instance).toBeInstanceOf(Map);
+});
+`,
+      },
+      "families",
+    );
+    expect(shapeOf(sites).map((site) => site.kind)).toEqual([
+      "equality", // toBe
+      "equality", // toStrictEqual
+      "equality", // toBeCloseTo
+      "equality", // toMatchObject
+      "equality", // toHaveBeenCalledWith
+      "equality", // toHaveReturnedWith
+      "comparison", // toBeGreaterThan
+      "comparison", // toBeLessThanOrEqual
+      "membership", // toContain
+      "membership", // toContainEqual
+      "membership", // toMatch
+      "error_check", // toThrow
+      "error_check", // toThrowError
+      "", // toBeTruthy
+      "", // toBeDefined
+      "", // toBeNaN
+      "", // toHaveBeenCalled
+      "", // toHaveBeenCalledTimes
+      "", // toBeInstanceOf
+    ]);
+    expect(sites.every((site) => site.expectChain)).toBe(true);
+  });
+
+  it("preserves kinds under negation, await parity, and the rejects reroute", async () => {
+    // US3-7 (negation preserves the relation family — for expect AND
+    // node:assert alike), US3-10 (an awaited assertion classifies
+    // identically to its non-awaited form), US3-4 (.rejects. reroutes
+    // any matcher to error_check).
+    const sites = await sitesIn(
+      {
+        "tests/parity.test.ts": `
+it("parity", () => {
+  expect(value).not.toBe(1);
+  expect(promise).resolves.toEqual(2);
+  expect(promise).rejects.toContain("x");
+  expect(await expect(promise).resolves.toMatchObject({}));
+});
+`,
+      },
+      "parity",
+    );
+    expect(shapeOf(sites).map((site) => site.kind)).toEqual([
+      "equality", // .not. preserves
+      "equality", // .resolves. preserves
+      "error_check", // .rejects. reroutes membership
+      "equality", // awaited resolves chain classifies identically
+    ]);
+  });
+});
+
+describe("collectAssertions (node:assert forms)", () => {
+  // T026/T028 — FR-007's node:assert form; research R5; data-model
+  // Sections 4.2 and 5.2: the assert-binding table built from the test
+  // file's import/require declarations over the closed module-specifier
+  // set, the four binding forms, classification through the pinned
+  // member table, and expectChain false for every assert-rooted site.
+  it("recognizes the default-import binding form with the full member table", async () => {
+    const sites = await sitesIn(
+      {
+        "tests/default.test.ts": `
+import assert from "node:assert";
+
+it("default form", () => {
+  assert(truthy);
+  assert.ok(truthy);
+  assert.ifError(err);
+  assert.fail("boom");
+  assert.equal(a, b);
+  assert.notStrictEqual(a, b);
+  assert.match(text, /x/);
+  assert.throws(boom);
+  assert.weirdCustom(a);
+});
+`,
+      },
+      "default form",
+    );
+    expect(shapeOf(sites).map((site) => site.kind)).toEqual([
+      "", // bare truthiness call
+      "", // ok
+      "", // ifError
+      "", // fail
+      "equality", // equal
+      "equality", // notStrictEqual — US3-7: not-prefixed preserves
+      "membership", // match
+      "error_check", // throws
+      "", // unknown member — the total miss path, never a drop
+    ]);
+    expect(sites.every((site) => !site.expectChain)).toBe(true);
+  });
+
+  it("recognizes the namespace-import binding form", async () => {
+    const sites = await sitesIn(
+      {
+        "tests/namespace.test.ts": `
+import * as assert from "node:assert";
+
+it("namespace form", () => {
+  assert.strictEqual(a, b);
+  assert.doesNotThrow(boom);
+  assert(value);
+});
+`,
+      },
+      "namespace form",
+    );
+    expect(shapeOf(sites).map((site) => site.kind)).toEqual([
+      "equality", // strictEqual
+      "error_check", // doesNotThrow
+      "", // bare truthiness on the namespace binding
+    ]);
+    expect(sites.every((site) => !site.expectChain)).toBe(true);
+  });
+
+  it("recognizes named imports — each local name mapped to its assert function", async () => {
+    const sites = await sitesIn(
+      {
+        "tests/named.test.ts": `
+import { equal, notEqual as ne, throws } from "node:assert";
+
+it("named form", () => {
+  equal(a, b);
+  ne(a, b);
+  throws(boom);
+});
+`,
+      },
+      "named form",
+    );
+    expect(shapeOf(sites).map((site) => site.kind)).toEqual([
+      "equality", // equal
+      "equality", // the IMPORTED name (notEqual) routes — not the local rename
+      "error_check", // throws
+    ]);
+    expect(sites.every((site) => !site.expectChain)).toBe(true);
+  });
+
+  it("recognizes the CJS require binding form", async () => {
+    const sites = await sitesIn(
+      {
+        "tests/cjs.test.ts": `
+const assert = require("node:assert");
+
+it("cjs form", () => {
+  assert.ok(truthy);
+  assert.deepEqual(a, b);
+});
+`,
+      },
+      "cjs form",
+    );
+    expect(shapeOf(sites).map((site) => site.kind)).toEqual([
+      "", // ok
+      "equality", // deepEqual
+    ]);
+    expect(sites.every((site) => !site.expectChain)).toBe(true);
+  });
+
+  it("routes node:assert/strict and the bare assert specifier identically", async () => {
+    // node:assert/strict changes call SEMANTICS, not routing: the member
+    // name routes through the same table, and the binding's module
+    // specifier never reaches classification (data-model Section 4.2).
+    const strict = await sitesIn(
+      {
+        "tests/strict.test.ts": `
+import assert from "node:assert/strict";
+
+it("strict form", () => {
+  assert.equal(a, b);
+});
+`,
+      },
+      "strict form",
+    );
+    expect(shapeOf(strict).map((site) => site.kind)).toEqual(["equality"]);
+
+    const bare = await sitesIn(
+      {
+        "tests/bare.test.ts": `
+import assert from "assert";
+
+it("bare form", () => {
+  assert.equal(a, b);
+});
+`,
+      },
+      "bare form",
+    );
+    expect(shapeOf(bare).map((site) => site.kind)).toEqual(["equality"]);
+  });
+
+  it("pins the asserted expression as the assert call's first argument", async () => {
+    const sites = await sitesIn(
+      {
+        "tests/subject.test.ts": [
+          'import assert from "node:assert";', // 1
+          "", // 2
+          'it("subject", () => {', // 3
+          "  assert.equal(add(1, 2), 3);", // 4
+          "});", // 5
+        ].join("\n"),
+      },
+      "subject",
+    );
+    const site = sites[0];
+    if (site === undefined || site.assertedExpression === null) {
+      throw new Error("expected one site with an asserted expression");
+    }
+    // The provenance subject is the assert call's FIRST argument — the
+    // add(1, 2) call at line 4, character 15 (just past the
+    // `assert.equal(` opener at character 2).
+    const asserted = site.assertedExpression;
+    const sourceFile = asserted.getSourceFile();
+    const start = sourceFile.getLineAndCharacterOfPosition(
+      asserted.getStart(sourceFile),
+    );
+    expect(start.line + 1).toBe(4);
+    expect(start.character).toBe(15);
+    if (!isCallExpression(asserted) || !isIdentifier(asserted.expression)) {
+      throw new Error("expected the asserted expression to be the add(1, 2) call");
+    }
+    expect(asserted.expression.text).toBe("add");
+    // The pass-4 scan domain for node:assert forms (data-model Section
+    // 5.2): the assert call's full argument list — the invocation node
+    // anchored at the assert identifier.
+    const subtree = site.argumentSubtree;
+    const subtreeFile = subtree.getSourceFile();
+    const subtreeStart = subtreeFile.getLineAndCharacterOfPosition(
+      subtree.getStart(subtreeFile),
+    );
+    expect(subtreeStart.line + 1).toBe(4);
+    expect(subtreeStart.character).toBe(2);
+  });
+
+  it("anchors awaited assert calls at the outermost wrapper", async () => {
+    // The data-model Section 5.2 anchoring pin applies to assert calls
+    // alike: `await assert.rejects(p)` anchors at the `await` — the
+    // leftmost spelling of the full assertion expression.
+    const sites = await sitesIn(
+      {
+        "tests/awaited.test.ts": [
+          'import assert from "node:assert";', // 1
+          "", // 2
+          'it("awaited", async () => {', // 3
+          "  await assert.rejects(boom);", // 4
+          "});", // 5
+        ].join("\n"),
+      },
+      "awaited",
+    );
+    expect(shapeOf(sites)).toEqual([
+      {
+        kind: "error_check",
+        line: 4,
+        character: 2, // the `await`, not the `assert`
+        expectChain: false,
+        hasAssertedExpression: true,
+      },
+    ]);
+  });
+
+  it("collects nothing for same-named locals that are not assert bindings", async () => {
+    // Recognition is import-gated (data-model Section 4.2: through the
+    // file's import/require declarations over the closed specifier set):
+    // a file-local `equal` never entered the table, so its call is not
+    // an assertion — the truthful miss, never a name-based guess.
+    const sites = await sitesIn(
+      {
+        "tests/local.test.ts": `
+it("local shadow", () => {
+  equal(a, b);
+});
+
+function equal(a: unknown, b: unknown): boolean {
+  return a === b;
+}
+`,
+      },
+      "local shadow",
+    );
+    expect(sites).toEqual([]);
+  });
+});
