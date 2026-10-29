@@ -101,13 +101,24 @@ reading-stone/
 │   ├── internal.ts          # Shared internal primitives: (file, line, name) order, lexical path containment
 │   ├── safeio.ts            # Bounded safe file reader with skip diagnostics
 │   ├── discovery.ts         # Project walking, file classification, framework detection, discover()
-│   ├── analysis.ts          # Pattern rules + shared prepareAnalysis pipeline; analyze() response assembly
+│   ├── analysis.ts          # Pattern rules + shared prepareAnalysis pipeline; analyze() response assembly emitting classification records via the signal pipeline
 │   ├── program.ts           # TypeScript analysis context (program mode with type checker; parse-only fallback)
 │   ├── extract.ts           # Table-driven function extraction (ExtractionRecord set)
 │   ├── detector.ts          # Side-effect detection rules + FunctionRecord assembly
 │   ├── complexity.ts        # Cyclomatic complexity engine (ComplexityEntry)
-│   └── coverage.ts          # Istanbul coverage-final.json artifact parser (CoverageEntry)
-├── tests/
+│   ├── coverage.ts          # Istanbul coverage-final.json artifact parser (CoverageEntry)
+│   └── signals/             # Classification signal pipeline (classify_signals method + analyze wiring)
+│       ├── adapter.ts       # Pair fan-out core, contradiction synthesis, confidence formula, classifySignals()
+│       ├── caller-index.ts  # Import-graph caller index (distinct-module counts via the type checker)
+│       ├── caller.ts        # caller_count bucket rule (+5 / +10 / +15 by distinct calling modules)
+│       ├── evidence.ts      # RecordEvidence snapshot (exportedness, JSDoc, interface membership, callers)
+│       ├── interface.ts     # interface signal (+30, declared interface members)
+│       ├── jsdoc.ts         # docstring signal (+15 tags / +5 indirect / -15 incidental verbs)
+│       ├── naming.ts        # naming_convention signal (prefix rules + Err sentinel special case)
+│       ├── routing.ts       # Effect-type routing table (48 canonical types → agreeing vocabulary)
+│       ├── types.ts         # Signal wire record + serializer (six-value closed source set)
+│       └── visibility.ts    # visibility signal (exported components, clamped at +20)
+├── tests/                   # Vitest suites (tests/signals/ mirrors src/signals/ one-to-one)
 ├── docs/
 │   └── effect-disposition.md  # 48-type disposition table (tier, disposition, TypeScript mapping, rationale)
 ├── .github/workflows/       # CI: biome, tsc, vitest gates
