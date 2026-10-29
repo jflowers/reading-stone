@@ -88,7 +88,7 @@ export function initializeResult(): InitializeResult {
     capabilities: {
       discover: true,
       test_mapping: false,
-      classify_signals: false,
+      classify_signals: true,
       streaming: false,
       doc_coverage: false,
       cognitive_complexity: false,
