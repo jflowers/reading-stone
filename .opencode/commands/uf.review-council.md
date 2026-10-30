@@ -271,8 +271,11 @@ included plan runs in parallel batches:
   plan, and coverage;
 - `max_parallel_runs`: from the plan's returned `max_parallel_runs`;
 - `budget_usd`: from the plan's returned budget limit;
-- `per_run_timeout_ms`: from the plan's `limits.per_run_timeout_seconds`
-  converted to milliseconds;
+- `per_run_timeout_ms`: omit it — each run derives its window from the
+  matrix limit (`limits.per_run_timeout_seconds` and per-tier overrides)
+  plus the dispatched work (prompt bytes, plan tier, parallelism),
+  clamped to the configured ceiling; an explicit value still wins and is
+  recorded with source "explicit" (RD-FR-029);
 - `pre_flight_results`: formatted pre-flight check output (when available);
 - `walkthrough`: PR walkthrough text (when available); and
 - `review_context`: spec artifacts or other context (when available).

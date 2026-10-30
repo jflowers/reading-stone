@@ -132,10 +132,35 @@ Categorize each check as:
 - **PENDING**: Check still running
 - **SKIPPED**: Check was skipped
 
-If checks are still PENDING, inform the user and use
-the **question tool** with options
-`["Wait for checks to complete", "Proceed with
-available results"]`.
+If checks are still PENDING, inform the user and present
+the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The pending-check list: which checks are still running
+     and which have completed
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Wait for checks to complete"** polls until all
+       checks finish; fits the conservative default — CI
+       results feed pre-flight and the verdict
+     - **"Proceed with available results"** continues with
+       the completed checks; fits when the remaining
+       checks are informational
+   - A recommendation with its justification (advisory only —
+     the human decides): "Wait" (conservative — CI results
+     feed pre-flight and the verdict) unless remaining
+     checks are informational.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Wait for checks to complete", "Proceed with
+   available results"]`.
 
 **If all checks pass**: Record this and move to Step 3.5. No CI triage needed.
 
@@ -172,8 +197,32 @@ from Step 2 metadata:
 
 **If total diff lines > 2000 OR changed files > 50**:
 
-Use the **question tool** with options
-`["Review all files", "Focus on specific files"]`.
+Present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The diff stats: total diff lines and changed file count
+     that triggered the advisory
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Review all files"** reviews every changed file;
+       fits the conservative default (completeness) unless
+       the diff is dominated by generated or lock files
+     - **"Focus on specific files"** follows up open-ended
+       for the files or directories to focus on; fits a
+       diff dominated by generated or lock files
+   - A recommendation with its justification (advisory only —
+     the human decides): "Review all files" (completeness)
+     unless the diff is dominated by generated or lock files.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Review all files", "Focus on specific files"]`.
 
 If the user selects "Focus on specific files", follow up
 with the **question tool** (open-ended, no preset
@@ -384,8 +433,11 @@ included plan runs in parallel batches:
   plan, and coverage;
 - `max_parallel_runs`: from the plan's returned `max_parallel_runs`;
 - `budget_usd`: from the plan's returned budget limit;
-- `per_run_timeout_ms`: from the plan's `limits.per_run_timeout_seconds`
-  converted to milliseconds;
+- `per_run_timeout_ms`: omit it — each run derives its window from the
+  matrix limit (`limits.per_run_timeout_seconds` and per-tier overrides)
+  plus the dispatched work (prompt bytes, plan tier, parallelism),
+  clamped to the configured ceiling; an explicit value still wins and is
+  recorded with source "explicit" (RD-FR-029);
 - `pre_flight_results`: formatted pre-flight check output from Step 3.7;
 - `existing_reviews`: existing review state from Step 3.10 (within token
   budget);
@@ -578,8 +630,37 @@ I identified <N> pre-existing CI failure(s) that are NOT caused by this PR:
 These failures also occur on the base branch (<baseRefName>).
 ```
 
-Use the **question tool** with options
-`["Yes -- create fix branch", "No -- skip"]`.
+Present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The pre-existing failure context printed above: the
+     failing checks, their base-branch classification, and
+     why they are not caused by this PR
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- create fix branch"** starts the fix-branch
+       flow below; fits a trivial, well-understood
+       pre-existing failure
+     - **"No -- skip"** leaves the pre-existing failures for
+       separate handling; fits when the guardrail calls
+       the fix non-trivial
+   - A recommendation with its justification (advisory only —
+     the human decides): "Yes" for a trivial, well-understood
+     pre-existing failure; "No" when the guardrail calls it
+     non-trivial.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Yes -- create fix branch", "No -- skip"]`.
+   The array enumerates the option set; the recommended-first
+   directive governs presentation order and "(Recommended)"
+   labeling at runtime.
 
 **If the user selects "Yes -- create fix branch"**:
 
@@ -646,17 +727,38 @@ Use the **question tool** with options
    > Assisted-by: <model>
    > ```
 
-   Use the **question tool** with options
-   `["Commit -- apply fix",
-   "Edit commit message", "Abort -- discard changes"]`.
+   Present the decision as follows:
 
-   - **"Commit -- apply fix"**: Proceed with the commit
-     using the displayed message.
-   - **"Edit commit message"**: Let the user modify the
-     commit message, then re-confirm.
-   - **"Abort -- discard changes"**: Discard staged
-     changes and skip the fix branch. Switch back to
-     the PR branch.
+   1. Print the decision content as plain session text **above**
+      the question tool (visibility directive — the printed text
+      and the question tool MUST present the
+      same details and options):
+      - The fix-branch commit preview and proposed commit
+        message displayed above
+      - Per-option reasoning: what each choice does and
+        when it fits:
+        - **"Commit -- apply fix"** proceeds with the commit
+          using the displayed message; fits when the staged
+          diff matches the failing check and the message
+          follows the template
+        - **"Edit commit message"** lets the user modify the
+          commit message, then re-confirm; fits a message
+          needing adjustment
+        - **"Abort -- discard changes"** discards staged
+          changes, skips the fix branch, and switches back
+          to the PR branch; fits any doubt about the fix
+      - A recommendation with its justification (advisory only —
+        the human decides): "Commit -- apply fix" when the
+        staged diff matches the failing check and the message
+        follows the template.
+        If the assessment data does not ground any option, the
+        gate MUST say so, present the trade-off, and still ask
+        the full option set (fail-closed, per FR-006/FR-012)
+   2. Present the **question tool** below the printed text with
+      the same options, the recommended option FIRST and
+      labeled "(Recommended)":
+      `["Commit -- apply fix",
+      "Edit commit message", "Abort -- discard changes"]`.
 
    **CRITICAL RULE**: NEVER commit on a fix branch
    without explicit human confirmation via the
@@ -702,9 +804,32 @@ Use the **question tool** with options
 ### 8. Offer Verdict-aligned PR Review
 
 After presenting the review, always offer to post the review as a
-formal GitHub review on the PR. Use the **question tool** with
-options `["Yes -- post as GitHub review", "No -- terminal
-summary is sufficient"]`.
+formal GitHub review on the PR. Present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The terminal review summary just presented: verdict,
+     finding counts, and severity breakdown
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- post as GitHub review"** proceeds to the
+       pre-posting checks (Step 8a); fits when the terminal
+       review is final and verdict-aligned
+     - **"No -- terminal summary is sufficient"** stops after
+       the terminal report; fits a review not ready to post
+   - A recommendation with its justification (advisory only —
+     the human decides): "Yes" when the terminal review is
+     final and verdict-aligned.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Yes -- post as GitHub review", "No -- terminal
+   summary is sufficient"]`.
 
 **If the user selects "Yes -- post as GitHub review"**:
 
@@ -714,13 +839,63 @@ summary is sufficient"]`.
 user (from Step 3.10-iii) already exists in the review list (from
 Step 3.10-i):
 
-- If a prior review with the **same verdict** exists: use the
-  **question tool** with options
-  `["Yes -- post new review", "No -- skip posting"]`.
-- If a prior review with a **different verdict** exists: use the
-  **question tool** with options
-  `["Yes -- override with <new_verdict>",
-  "No -- keep existing <old_verdict>"]`.
+- If a prior review with the **same verdict** exists: present
+  the decision as follows:
+
+  1. Print the decision content as plain session text **above**
+     the question tool (visibility directive — the printed text
+     and the question tool MUST present the
+     same details and options):
+     - The duplicate-review finding: the prior review with the
+       same verdict
+     - Per-option reasoning: what each choice does and
+       when it fits:
+       - **"Yes -- post new review"** posts a fresh review
+         with the same verdict; fits a materially updated
+         review body
+       - **"No -- skip posting"** keeps the existing review;
+         fits an unchanged assessment
+     - A recommendation with its justification (advisory only —
+       the human decides): "No -- skip posting" (duplicate
+       same-verdict review adds noise).
+       If the assessment data does not ground any option, the
+       gate MUST say so, present the trade-off, and still ask
+       the full option set (fail-closed, per FR-006/FR-012)
+  2. Present the **question tool** below the printed text with
+     the same options, the recommended option FIRST and
+     labeled "(Recommended)":
+     `["No -- skip posting", "Yes -- post new review"]`.
+- If a prior review with a **different verdict** exists:
+  present the decision as follows:
+
+  1. Print the decision content as plain session text **above**
+     the question tool (visibility directive — the printed text
+     and the question tool MUST present the
+     same details and options):
+     - The prior review's verdict and the newly derived
+       verdict that differs from it
+     - Per-option reasoning: what each choice does and
+       when it fits:
+       - **"Yes -- override with <new_verdict>"** posts the
+         new review, superseding the prior one; fits when
+         the new verdict reflects the current PR state
+       - **"No -- keep existing <old_verdict>"** leaves the
+         prior review standing; fits a stale or unverified
+         new verdict
+     - A recommendation with its justification (advisory only —
+       the human decides): "Yes -- override" when the new
+       verdict reflects the current PR state; keep otherwise.
+       If the assessment data does not ground any option, the
+       gate MUST say so, present the trade-off, and still ask
+       the full option set (fail-closed, per FR-006/FR-012)
+  2. Present the **question tool** below the printed text with
+     the same options, the recommended option FIRST and
+     labeled "(Recommended)":
+     `["Yes -- override with <new_verdict>",
+     "No -- keep existing <old_verdict>"]`.
+     The array enumerates the option set; the recommended-first
+     directive governs presentation order and "(Recommended)"
+     labeling at runtime.
 - If no prior review exists: proceed silently.
 
 **Stale review + CODEOWNER checks** (APPROVE verdicts only):
@@ -802,6 +977,37 @@ Map the council verdict to the GitHub API event type:
 **VISIBILITY DIRECTIVE**: Before invoking the question tool, print
 the full verdict context (verdict type, review body, and all inline
 comments) as plain assistant output.
+
+Present the posting decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The full verdict context printed per the VISIBILITY
+     DIRECTIVE above: verdict type, review body, and all
+     inline comments, mapped to the GitHub event type
+     per the verdict mapping table
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Approve -- post review"** / **"Yes -- post review"**
+       posts the review with the mapped event type; fits when
+       the printed review matches the terminal summary
+     - **"No -- skip posting"** does not post; fits a review
+       not ready to post
+     - **"Edit comments first"** returns to comment editing
+       before posting; fits comments needing changes
+     - **"Change verdict"** returns to verdict selection;
+       fits a verdict that no longer matches the findings
+   - A recommendation with its justification (advisory only —
+     the human decides): the verdict-aligned posting option
+     when the printed review matches the terminal summary.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
 
 For APPROVE verdicts, use options:
 `["Approve -- post review", "No -- skip posting",

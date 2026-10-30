@@ -677,7 +677,9 @@ sections instead of embedding their text.
    `plan_entries`, `session_metadata` (command, mode,
    full, input context, change profile, plan,
    coverage), and the plan limits (`max_parallel_runs`,
-   `budget_usd`, `per_run_timeout_ms`). Pass the spec
+   `budget_usd`; omit `per_run_timeout_ms` so each run derives
+   its window from the matrix limit and the dispatched work,
+   with explicit values still winning). Pass the spec
    artifacts as `review_context`. Then call
    `consolidate_dispatch` exactly once per finalization
    attempt with provenance: branch, 40-character head
@@ -1527,7 +1529,10 @@ text.
       `plan_entries`, `session_metadata` (command, mode,
       full, input context, change profile, plan,
       coverage), and the plan limits (`max_parallel_runs`,
-      `budget_usd`, `per_run_timeout_ms`). Pass the
+      `budget_usd`; omit `per_run_timeout_ms` so each run
+      derives its window from the matrix limit and the
+      dispatched work, with explicit values still winning).
+      Pass the
       soft-gate results as `pre_flight_results` (verdict,
       causality classifications, baseline method). Then
       call `consolidate_dispatch` exactly once per

@@ -375,8 +375,11 @@ dispatches all included plan runs in parallel batches:
   plan, and coverage;
 - `max_parallel_runs`: from the plan's returned `max_parallel_runs`;
 - `budget_usd`: from the plan's returned budget limit;
-- `per_run_timeout_ms`: from the plan's `limits.per_run_timeout_seconds`
-  converted to milliseconds; and
+- `per_run_timeout_ms`: omit it — each run derives its window from the
+  matrix limit (`limits.per_run_timeout_seconds` and per-tier overrides)
+  plus the dispatched work (prompt bytes, plan tier, parallelism),
+  clamped to the configured ceiling; an explicit value still wins and is
+  recorded with source "explicit" (RD-FR-029); and
 - `review_context`: the complete deterministic feedback change signal,
   loaded `AGENTS.md`, constitution, convention packs, applicable spec,
   linked-issue, and review-context evidence.
@@ -681,9 +684,45 @@ If the item has a GitHub suggestion block, display it clearly as an applicable c
 
 ### 3.2 Author Decision
 
-For each item, use the **question tool** with
-options `["Accept", "Modify", "Reject", "Ask"]`. The
-author chooses exactly one:
+For each item, present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The Section 3.1 item display: reviewer, authority,
+     file and line, classification, evidence, the
+     recommendation assessment, the full thread, and the
+     suggested approach
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Accept"** applies the suggested approach as a
+       queued code change; fits an ACCEPT assessment
+     - **"Modify"** collects the author's alternative
+       approach via an open-ended follow-up; fits a sound
+       change the author wants shaped differently
+     - **"Reject"** queues a reply comment with
+       evidence-based reasoning; fits a suggestion the
+       evidence does not support
+     - **"Ask"** queues a reply comment with a
+       clarification question; fits missing context
+   - A recommendation with its justification (advisory only —
+     the human decides): "Accept" on an ACCEPT assessment;
+     on AUTHOR-DECIDES, the advisory suggestion from
+     evidence and reviewer authority, clearly labeled
+     non-binding.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Accept", "Modify", "Reject", "Ask"]`.
+   The array enumerates the option set; the recommended-first
+   directive governs presentation order and "(Recommended)"
+   labeling at runtime.
+
+The author chooses exactly one:
 
 | Decision | Follow-up | Queued action |
 |---|---|---|
@@ -714,10 +753,36 @@ Total:   N items
 ─────────────────────────────────────────
 ```
 
-List each item with its decision. Use the
-**question tool** with options `["Confirm --
-proceed with execution", "Revise -- change decisions"]`
-before execution proceeds.
+List each item with its decision. Present the decision as
+follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The triage summary and the per-item decision list
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Confirm -- proceed with execution"** locks the
+       decisions and proceeds to the Phase 4 execution
+       gate; fits when all decisions are recorded and
+       consistent
+     - **"Revise -- change decisions"** re-opens the
+       per-item decisions; fits an inconsistency or a
+       changed decision
+   - A recommendation with its justification (advisory only —
+     the human decides): "Confirm" when all decisions are
+     recorded and consistent.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Confirm -- proceed with execution",
+   "Revise -- change decisions"]`.
+
+The question MUST be answered before execution proceeds.
 
 > **CHECKPOINT**: Call `checkpoint` with
 > `command: "uf.address-feedback"`, `step: "triage"`,
@@ -755,16 +820,40 @@ Present the execution summary to the user:
 > triage. Individual sub-steps (4.4 push, 4.5 reply
 > comments) have their own confirmation prompts.
 
-Use the **question tool** with options
-`["Proceed with Phase 4 execution",
-"Review plan again", "Abort -- stop here"]`.
+Present the decision as follows:
 
-- **"Proceed with Phase 4 execution"**: Continue to
-  sub-step 4.1.
-- **"Review plan again"**: Re-display the Phase 3
-  triage summary and allow decision changes.
-- **"Abort -- stop here"**: Stop execution. Report
-  that no mutations were performed.
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The Phase 4 execution plan summary above, bound to
+     the question options
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Proceed with Phase 4 execution"** continues to
+       sub-step 4.1; fits when the execution plan matches
+       the triage decisions
+     - **"Review plan again"** re-displays the Phase 3
+       triage summary and allows decision changes; fits
+       a plan that no longer matches the decisions
+     - **"Abort -- stop here"** stops execution and reports
+       that no mutations were performed; fits any doubt
+       about executing the batch
+   - A recommendation with its justification (advisory only —
+     the human decides): "Proceed with Phase 4 execution"
+     when the execution plan matches the triage decisions;
+     otherwise "Review plan again".
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Proceed with Phase 4 execution",
+   "Review plan again", "Abort -- stop here"]`.
+   The array enumerates the option set; the recommended-first
+   directive governs presentation order and "(Recommended)"
+   labeling at runtime.
 
 **CRITICAL RULE**: NEVER begin Phase 4 execution
 (code changes, commits, push, reply comments, or
@@ -838,9 +927,39 @@ git status
 ```
 
 **If branch has diverged** (another contributor pushed
-commits): warn the author and use the
-**question tool** with options `["Rebase onto
-remote and push", "Abort -- preserve local commits"]`.
+commits): warn the author and present the decision as
+follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The divergence warning: the remote and local commits
+     that diverged
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Rebase onto remote and push"** replays the local
+       commits onto the remote head and pushes; fits a
+       clean replay that preserves both remote and local
+       work
+     - **"Abort -- preserve local commits"** leaves the
+       local commits untouched for manual resolution;
+       fits a replay that would conflict
+   - A recommendation with its justification (advisory only —
+     the human decides): "Rebase" when a clean replay
+     preserves both remote and local work; otherwise
+     "Abort".
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Rebase onto remote and push",
+   "Abort -- preserve local commits"]`.
+   The array enumerates the option set; the recommended-first
+   directive governs presentation order and "(Recommended)"
+   labeling at runtime.
 
 Push all commits:
 
@@ -875,10 +994,7 @@ requirement, the structural or content requirement prevails.
 Voice governs the GitHub-posted reply prose only.
 
 After push succeeds (or if there are no code changes),
-post reply comments to the PR. Before posting, use the
-**question tool** with options `["Yes -- post
-reply comments", "No -- skip posting"]`.
-
+post reply comments to the PR.
 
 **Progress gate**: Before presenting comments for posting,
 call `get_progress` with `command: "uf.address-feedback"`
@@ -892,6 +1008,32 @@ this command template and rebuild state from `state.json`
 and the git log. Do NOT post comments without verified
 progress state.
 
+Before posting, print the full composed replies as plain
+session text and present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The full composed reply for every item, verified
+     against the reply-content table below
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- post reply comments"** posts each reply to
+       its review thread; fits replies that verify against
+       the reply-content table
+     - **"No -- skip posting"** posts nothing; fits replies
+       that still need correction
+   - A recommendation with its justification (advisory only —
+     the human decides): "Yes -- post" after the printed
+     replies verify against the reply-content table.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Yes -- post reply comments", "No -- skip posting"]`.
 
 For each item, compose the reply:
 
@@ -945,9 +1087,34 @@ After posting reply comments for accepted items, offer to resolve those threads:
 gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
 ```
 
-Use the **question tool** with options
-`["Yes -- resolve accepted threads", "No -- leave
-threads open"]` before resolving.
+Present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The accepted threads with their posted replies, and
+     the note that REJECT and ASK threads stay open
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- resolve accepted threads"** resolves the
+       threads of accepted items that have posted
+       replies; fits accepted threads with posted replies
+     - **"No -- leave threads open"** leaves every thread
+       open; fits threads that need further discussion
+   - A recommendation with its justification (advisory only —
+     the human decides): "Yes -- resolve" for accepted
+     threads with posted replies.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Yes -- resolve accepted threads", "No -- leave
+   threads open"]`.
+
+The question MUST be answered before resolving.
 
 ### 4.7 Produce Feedback-Triage Artifact
 
