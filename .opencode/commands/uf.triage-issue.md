@@ -252,8 +252,11 @@ included plan runs in parallel batches:
   plan, and coverage;
 - `max_parallel_runs`: from the plan's returned `max_parallel_runs`;
 - `budget_usd`: from the plan's returned budget limit;
-- `per_run_timeout_ms`: from the plan's `limits.per_run_timeout_seconds`
-  converted to milliseconds; and
+- `per_run_timeout_ms`: omit it — each run derives its window from the
+  matrix limit (`limits.per_run_timeout_seconds` and per-tier overrides)
+  plus the dispatched work (prompt bytes, plan tier, parallelism),
+  clamped to the configured ceiling; an explicit value still wins and is
+  recorded with source "explicit" (RD-FR-029); and
 - `review_context`: repository context and duplicate candidates from
   Phase 1.
 
@@ -483,9 +486,41 @@ consent is a violation.
 below to display the full triage summary. The human MUST
 see the summary before being asked to confirm.
 
-**Confirmation**: Use the **question tool** with options:
-`["Proceed -- execute triage actions",
-"Skip -- write artifact only"]`.
+**Confirmation**: Present the decision to the human as
+follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The Phase 4.1 triage summary: classification, verdict,
+     proposed label, comment, and split actions, plus dissent
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Proceed -- execute triage actions"** runs the
+       confirmed label, comment, and split actions (steps
+       4.2, 4.3, and 4.4); fits a decisive panel majority
+       whose proposed actions follow from the classification
+     - **"Skip -- write artifact only"** records all actions
+       as not executed and jumps directly to artifact
+       generation (step 4.5); fits a contested
+       classification, material dissent, or wanting the
+       record without mutations
+   - A recommendation with its justification (advisory only —
+     the human decides): proceed on a decisive panel majority
+     with actions following from the classification; skip on
+     material dissent or uncertainty.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Proceed -- execute triage actions",
+   "Skip -- write artifact only"]`.
+   The array enumerates the option set; the recommended-first
+   directive governs presentation order and "(Recommended)"
+   labeling at runtime.
 
 - If the user selects **"Proceed"**: continue to steps
   4.2, 4.3, and 4.4 as described below.
@@ -561,7 +596,36 @@ self-report, terminal state, usage, and error>
 
 **Path A — Label does NOT exist in the repository**:
 
-Inform the user: "The label '<label>' does not exist in the repository." Use the **question tool** with options `["Yes -- create and apply label '<label>'", "No -- skip"]`.
+Inform the user: "The label '<label>' does not exist in the repository." Present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The proposed label, its category mapping, and the fact
+     that it does not yet exist in the repository
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- create and apply label '<label>'"** creates
+       the label in the repository, then applies it to the
+       issue; fits a decisive classification whose label is
+       missing
+     - **"No -- skip"** skips both creation and application;
+       fits a contested category or a label the human does
+       not want in the repository
+   - A recommendation with its justification (advisory only —
+     the human decides): apply when the classification is
+     decisive; skip when the category was contested.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Yes -- create and apply label '<label>'", "No -- skip"]`.
+   The array enumerates the option set; the recommended-first
+   directive governs presentation order and "(Recommended)"
+   labeling at runtime.
 
 If the user selects "No -- skip", skip both label creation and application. Record `labels_applied: []` and `label_creation_failed: false` in `actions_taken`. Proceed to Section 4.3.
 
@@ -581,7 +645,33 @@ gh issue edit <ISSUE_NUMBER> --add-label "<label>"
 
 **Path B — Label already EXISTS in the repository**:
 
-Use the **question tool** with options `["Yes -- apply label '<label>'", "No -- skip"]`.
+Present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The proposed label, its category mapping, and its
+     existing status in the repository
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- apply label '<label>'"** applies the existing
+       label to the issue; fits a decisive classification
+     - **"No -- skip"** leaves the issue unlabeled by this
+       triage; fits a contested category
+   - A recommendation with its justification (advisory only —
+     the human decides): apply when the classification is
+     decisive; skip when the category was contested.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Yes -- apply label '<label>'", "No -- skip"]`.
+   The array enumerates the option set; the recommended-first
+   directive governs presentation order and "(Recommended)"
+   labeling at runtime.
 
 If the user selects "No -- skip", skip label application. Record `labels_applied: []` in `actions_taken`. Proceed to Section 4.3.
 
@@ -591,7 +681,35 @@ If the user confirms, apply the label:
 gh issue edit <ISSUE_NUMBER> --add-label "<label>"
 ```
 
-**For `duplicate` label only** (supplementary gate, applies after either Path A or Path B confirmation): Inform the user that the `duplicate` label signals the issue should be closed. Use the **question tool** with options `["Yes -- apply duplicate label", "No -- skip"]`. Only execute the `gh issue edit --add-label` command if the user confirms this supplementary gate. If the user declines, skip label application, record `labels_applied: []` in `actions_taken`, and proceed to Section 4.3.
+**For `duplicate` label only** (supplementary gate, applies after either Path A or Path B confirmation): Inform the user that the `duplicate` label signals the issue should be closed. Present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The close-semantics warning: applying the `duplicate`
+     label signals the issue should be closed, and the
+     two-persona duplicate agreement behind it
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- apply duplicate label"** applies the label
+       and its close semantics; fits a strong duplicate
+       classification
+     - **"No -- skip"** skips label application; fits any
+       doubt about the duplicate match
+   - A recommendation with its justification (advisory only —
+     the human decides): apply, citing the two-persona
+     duplicate agreement and restating the close-semantics
+     warning.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Yes -- apply duplicate label", "No -- skip"]`.
+
+Only execute the `gh issue edit --add-label` command if the user confirms this supplementary gate. If the user declines, skip label application, record `labels_applied: []` in `actions_taken`, and proceed to Section 4.3.
 
 ### 4.3 Comment Composition and Posting
 
@@ -634,17 +752,72 @@ _This triage was performed by the Divisor review panel._
 
 **Re-run check**: If a previous triage comment was
 detected in Phase 1.2, warn the user that posting
-another comment may cause confusion. Use the
-**question tool** with options `["Yes -- post
-another comment", "No -- skip comment"]`. If the user
-selects "No -- skip comment", record
+another comment may cause confusion. Present the
+decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The warning that a previous triage comment exists and
+     that posting another may cause confusion
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Yes -- post another comment"** posts the new triage
+       comment alongside the prior one; fits a new round
+       that materially changes the assessment
+     - **"No -- skip comment"** records `comment_posted:
+       false` and skips to Phase 4.4; fits an unchanged
+       assessment where a second comment adds confusion
+   - A recommendation with its justification (advisory only —
+     the human decides): "No -- skip comment" when a prior
+     triage comment exists, unless the new round materially
+     changes the assessment.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["No -- skip comment", "Yes -- post another comment"]`.
+
+If the user selects "No -- skip comment", record
 `comment_posted: false` in the artifact and skip to
 Phase 4.4.
 
 **Present the composed comment to the user for
-confirmation**: Use the **question tool** with
-options `["Approve -- post as-is", "Modify -- adjust
-comment text", "Abort -- do not post"]`.
+confirmation**: Print the composed comment as plain
+session text, then present the decision as follows:
+
+1. Print the decision content as plain session text **above**
+   the question tool (visibility directive — the printed text
+   and the question tool MUST present the
+   same details and options):
+   - The composed triage comment in full, with its tone tier
+     and required footer
+   - Per-option reasoning: what each choice does and
+     when it fits:
+     - **"Approve -- post as-is"** posts the composed comment
+       unchanged; fits a comment that meets its tone-tier
+       requirements
+     - **"Modify -- adjust comment text"** collects adjusted
+       text via an open-ended question, then posts the
+       adjusted version; fits wording the human wants
+       changed
+     - **"Abort -- do not post"** posts nothing and records
+       `comment_posted: false`; fits a comment not ready
+       to post
+   - A recommendation with its justification (advisory only —
+     the human decides): "Approve -- post as-is" when the
+     comment meets its tone-tier requirements.
+     If the assessment data does not ground any option, the
+     gate MUST say so, present the trade-off, and still ask
+     the full option set (fail-closed, per FR-006/FR-012)
+2. Present the **question tool** below the printed text with
+   the same options, the recommended option FIRST and
+   labeled "(Recommended)":
+   `["Approve -- post as-is", "Modify -- adjust
+   comment text", "Abort -- do not post"]`.
 
 | Selection | Action |
 |---|---|
@@ -690,10 +863,35 @@ CP-003.
 
 For each proposed child issue:
 
-1. **Present to user**: Show the proposed title and body.
-   Use the **question tool** with options
-   `["Yes -- create this child issue", "No -- skip"]`
-   for each child issue individually.
+1. **Present to user**: Show the proposed title and body,
+   for each child issue individually. Present the decision
+   as follows:
+
+   1. Print the decision content as plain session text **above**
+      the question tool (visibility directive — the printed text
+      and the question tool MUST present the
+      same details and options):
+      - The proposed child issue title and body
+      - Per-option reasoning: what each choice does and
+        when it fits:
+        - **"Yes -- create this child issue"** creates the child
+          issue with the shown title and body; fits a
+          well-grounded split proposal (2+ personas)
+        - **"No -- skip"** skips this child; fits weak or
+          overlapping proposals
+      - A recommendation with its justification (advisory only —
+        the human decides): create for well-grounded split
+        proposals (2+ personas); skip weak ones.
+        If the assessment data does not ground any option, the
+        gate MUST say so, present the trade-off, and still ask
+        the full option set (fail-closed, per FR-006/FR-012)
+   2. Present the **question tool** below the printed text with
+      the same options, the recommended option FIRST and
+      labeled "(Recommended)":
+      `["Yes -- create this child issue", "No -- skip"]`.
+      The array enumerates the option set; the recommended-first
+      directive governs presentation order and "(Recommended)"
+      labeling at runtime.
 
 2. **Duplicate check**: Before creating, search for existing issues matching the proposed title:
 
@@ -702,9 +900,31 @@ gh issue list --search "<sanitized-child-title>" --state open --json number,titl
 ```
 
    If a close match is found, warn the user about the
-   potential duplicate and use the **question
-   tool** with options `["Yes -- create anyway",
-   "No -- skip this child issue"]`.
+   potential duplicate and present the decision as follows:
+
+   1. Print the decision content as plain session text **above**
+      the question tool (visibility directive — the printed text
+      and the question tool MUST present the
+      same details and options):
+      - The close-match warning: the existing open issue(s)
+        matching the proposed child title
+      - Per-option reasoning: what each choice does and
+        when it fits:
+        - **"Yes -- create anyway"** creates the child issue
+          despite the match; fits a proposal the existing
+          issue does not actually cover
+        - **"No -- skip this child issue"** skips the child;
+          fits a close duplicate match
+      - A recommendation with its justification (advisory only —
+        the human decides): skip on close duplicate match.
+        If the assessment data does not ground any option, the
+        gate MUST say so, present the trade-off, and still ask
+        the full option set (fail-closed, per FR-006/FR-012)
+   2. Present the **question tool** below the printed text with
+      the same options, the recommended option FIRST and
+      labeled "(Recommended)":
+      `["No -- skip this child issue",
+      "Yes -- create anyway"]`.
 
 3. **Create the child issue** (if the user selected a confirming option):
 
