@@ -54,6 +54,25 @@ export interface InitializeResult {
   capabilities: Capabilities;
 }
 
+/**
+ * The `doc_coverage` result shape (spec 005 FR-001): a single `symbols`
+ * key holding the serialized symbol rows — exactly one key, with an empty
+ * analysis a `{"symbols": []}` success rather than an error (US1 scenario
+ * 6). plan.md pins both new methods' result interfaces here in
+ * protocol.ts, following the `ClassifySignalsResult`/`TestMappingResult`
+ * one-key envelope pattern.
+ *
+ * The pin is load-bearing end to end: the `docCoverage` entry
+ * (src/doc-coverage.ts) returns this interface's `symbols` payload and
+ * the server handler constructs its wrapper against this interface, so
+ * the `{"symbols": [...]}` wire shape is compile-time enforced rather
+ * than merely declared (spec 005 FR-012).
+ */
+export interface DocCoverageResult {
+  /** The serialized SymbolRow wire records, in (file, line, name) order. */
+  readonly symbols: readonly Record<string, unknown>[];
+}
+
 export function normalizeId(value: unknown): JsonRpcId {
   if (typeof value === "string") {
     return value;
@@ -93,7 +112,13 @@ export function initializeResult(): InitializeResult {
       test_mapping: true,
       classify_signals: true,
       streaming: false,
-      doc_coverage: false,
+      // doc_coverage flipped true with the src/server.ts dispatch
+      // registration in one protocol-state unit (T009, spec 005
+      // FR-013): no commit advertises a capability the dispatch table
+      // lacks. cognitive_complexity stays false until its own handler
+      // registers (T017) — the capabilities object is the single source
+      // of truth for method availability.
+      doc_coverage: true,
       cognitive_complexity: false,
     },
   };
