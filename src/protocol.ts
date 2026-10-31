@@ -73,6 +73,25 @@ export interface DocCoverageResult {
   readonly symbols: readonly Record<string, unknown>[];
 }
 
+/**
+ * The `cognitive_complexity` result shape (spec 005 FR-005): a single
+ * `functions` key holding the serialized cognitive rows — exactly one key,
+ * with an empty analysis a `{"functions": []}` success rather than an error
+ * (US2 scenario 3). plan.md pins both new methods' result interfaces here in
+ * protocol.ts, following the `ClassifySignalsResult`/`TestMappingResult`
+ * one-key envelope pattern.
+ *
+ * The pin is load-bearing end to end: the `cognitiveComplexity` entry
+ * (src/cognitive.ts) returns this interface's `functions` payload and the
+ * server handler constructs its wrapper against this interface, so the
+ * `{"functions": [...]}` wire shape is compile-time enforced rather than
+ * merely declared (spec 005 FR-012).
+ */
+export interface CognitiveComplexityResult {
+  /** The serialized CognitiveRow wire records, in (file, line, name) order. */
+  readonly functions: readonly Record<string, unknown>[];
+}
+
 export function normalizeId(value: unknown): JsonRpcId {
   if (typeof value === "string") {
     return value;
@@ -115,11 +134,15 @@ export function initializeResult(): InitializeResult {
       // doc_coverage flipped true with the src/server.ts dispatch
       // registration in one protocol-state unit (T009, spec 005
       // FR-013): no commit advertises a capability the dispatch table
-      // lacks. cognitive_complexity stays false until its own handler
-      // registers (T017) — the capabilities object is the single source
-      // of truth for method availability.
+      // lacks. The capabilities object is the single source of truth
+      // for method availability.
       doc_coverage: true,
-      cognitive_complexity: false,
+      // cognitive_complexity flipped true with the src/server.ts dispatch
+      // registration in one protocol-state unit (T017, spec 005
+      // FR-013): no commit advertises a capability the dispatch table
+      // lacks. With both v1.2.0 methods registered, the reserved -32601
+      // set is exactly analyze/stream — only streaming remains false.
+      cognitive_complexity: true,
     },
   };
 }
