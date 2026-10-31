@@ -493,10 +493,12 @@ describe("server: analyze", () => {
   // `initializeResult()` (tautologically green if the function drifts);
   // tests/protocol.test.ts pins the unit output — this literal pin makes a
   // capability flip visible through the server wire too. The pinned state
-  // includes spec 003's classify_signals flip (FR-015; T030) and spec 004's
-  // test_mapping flip (FR-014; T020 lands registration and flag as one
-  // protocol-state unit), so this pin stays red with the 004 server suite
-  // until T020 — the flip's visibility working exactly as designed.
+  // includes spec 003's classify_signals flip (FR-015; T030), spec 004's
+  // test_mapping flip (FR-014; T020), and spec 005's doc_coverage flip
+  // (FR-013; T009) — each landing registration and flag as one
+  // protocol-state unit, each keeping this pin red with its story's server
+  // suite until the flip landed (the visibility working exactly as
+  // designed); cognitive_complexity stays false until US2's T017.
   it("leaves the initialize capability response unchanged", async () => {
     const { responses } = await drive([INIT]);
     expect(responses[0]?.result).toEqual({
@@ -509,7 +511,7 @@ describe("server: analyze", () => {
         test_mapping: true,
         classify_signals: true,
         streaming: false,
-        doc_coverage: false,
+        doc_coverage: true,
         cognitive_complexity: false,
       },
     });
@@ -1227,7 +1229,7 @@ describe("server: classify_signals", () => {
       test_mapping: true,
       classify_signals: true,
       streaming: false,
-      doc_coverage: false,
+      doc_coverage: true,
       cognitive_complexity: false,
     });
   });
@@ -1489,7 +1491,320 @@ describe("server: test_mapping", () => {
       test_mapping: true,
       classify_signals: true,
       streaming: false,
-      doc_coverage: false,
+      doc_coverage: true,
+      cognitive_complexity: false,
+    });
+  });
+});
+
+// The doc_coverage result's wire rows, projected to nothing — every field
+// is contract-pinned (005 FR-001; the WireMapping stance: nothing
+// implementation-defined to project away), so the row type IS the wire row
+// and the exact-row comparisons below see every key, doc_snippet's
+// presence included. The result object must carry exactly one key —
+// `symbols` — so an error response or a malformed result fails loud here,
+// never a soft empty match: any -32601 or -32602 answer surfaces as the
+// explicit absence of a result rather than a vacuous pass (the
+// resultSignals/resultMappings discipline).
+interface WireSymbol {
+  readonly name: string;
+  readonly package: string;
+  readonly kind: string;
+  readonly file: string;
+  readonly line: number;
+  readonly documented: boolean;
+  readonly doc_snippet?: string;
+}
+
+function resultSymbols(response: Record<string, unknown>): readonly WireSymbol[] {
+  const result = (response.result ?? {}) as Record<string, unknown>;
+  expect(Object.keys(result).sort()).toEqual(["symbols"]);
+  expect(Array.isArray(result.symbols)).toBe(true);
+  return result.symbols as readonly WireSymbol[];
+}
+
+describe("server: doc_coverage", () => {
+  const activeFixtures: FixtureTree[] = [];
+  const lockedDirectories: string[] = [];
+
+  // Creates a fixture tree registered for afterEach cleanup; returns the
+  // tree's root path to use as the doc_coverage request's root_path.
+  async function fixtureTree(files: Readonly<Record<string, string>>): Promise<string> {
+    const tree = await createFixtureTree(files);
+    activeFixtures.push(tree);
+    return tree.root;
+  }
+
+  afterEach(async () => {
+    // Recursive cleanup cannot descend into a chmod-000 directory, so every
+    // locked directory is unlocked before its fixture tree is removed.
+    for (const directory of lockedDirectories.splice(0)) {
+      await chmod(directory, 0o755);
+    }
+    await Promise.all(activeFixtures.splice(0).map((tree) => tree.cleanup()));
+  });
+
+  // The canned tree (005 FR-001): src/math.ts is the spec's exact US1-1
+  // fixture — divide carries the one-line JSDoc, add carries none — and
+  // src/tags.ts adds the multi-line summary-then-tags shape, so the exact
+  // row set below pins both snippet forms, the undocumented no-snippet
+  // row, and the (file, line, name) cross-file order. The tsconfig boots
+  // program mode (the classify_signals/test_mapping canned-tree stance for
+  // capability-gated methods); the walk is syntax-only, so parse-only mode
+  // answers the identical rows (US1 scenario 5 — pinned at the pipeline
+  // surface by tests/doc-coverage.test.ts).
+  const TSCONFIG = '{"compilerOptions": {"strict": true, "target": "ES2022"}}';
+  const DOC_SOURCES: Readonly<Record<string, string>> = {
+    "tsconfig.json": TSCONFIG,
+    "src/math.ts": [
+      "/** Divide two numbers, raising an error for a zero divisor. */", // 1
+      "export function divide(dividend: number, divisor: number): number {", // 2
+      "  if (divisor === 0) {", // 3
+      '    throw new Error("zero divisor");', // 4
+      "  }", // 5
+      "  return dividend / divisor;", // 6
+      "}", // 7
+      "", // 8
+      "export function add(left: number, right: number): number {", // 9
+      "  return left + right;", // 10
+      "}", // 11
+      "", // 12
+    ].join("\n"),
+    "src/tags.ts": [
+      "/**", // 1
+      " * Multiplies two numbers.", // 2
+      " * @param left The left factor.", // 3
+      " * @param right The right factor.", // 4
+      " */", // 5
+      "export function multiply(left: number, right: number): number {", // 6
+      "  return left * right;", // 7
+      "}", // 8
+      "", // 9
+    ].join("\n"),
+  };
+  // The exact row set: divide documented with its one-line summary, add
+  // undocumented with no doc_snippet key (omitted, never empty — spec 001
+  // FR-013), multiply documented through its summary-then-tags comment —
+  // in (file, line, name) order, package from the shared derivation.
+  const EXPECTED_SYMBOLS: readonly WireSymbol[] = [
+    {
+      name: "divide",
+      package: "src.math",
+      kind: "function",
+      file: "src/math.ts",
+      line: 2,
+      documented: true,
+      doc_snippet: "Divide two numbers, raising an error for a zero divisor.",
+    },
+    {
+      name: "add",
+      package: "src.math",
+      kind: "function",
+      file: "src/math.ts",
+      line: 9,
+      documented: false,
+    },
+    {
+      name: "multiply",
+      package: "src.tags",
+      kind: "function",
+      file: "src/tags.ts",
+      line: 6,
+      documented: true,
+      doc_snippet: "Multiplies two numbers.",
+    },
+  ];
+
+  it("round-trips a valid doc_coverage request with the exact row set", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await fixtureTree(DOC_SOURCES);
+    const { responses, stderr } = await drive([
+      request(70, "doc_coverage", { root_path: root }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(70);
+    expect(resultSymbols(responses[0] ?? {})).toEqual(EXPECTED_SYMBOLS);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["absent params", undefined],
+    ["null params", null],
+    ["array params", []],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(71, "doc_coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must be an object",
+    );
+    expect(responses[0]?.id).toBe(71);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["missing root_path", {}],
+    ["non-string root_path", { root_path: 42 }],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(72, "doc_coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: root_path must be a string",
+    );
+    expect(responses[0]?.id).toBe(72);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["non-array patterns", { root_path: "/abs/project", patterns: "src/**/*.ts" }],
+    ["number patterns", { root_path: "/abs/project", patterns: 42 }],
+    [
+      "patterns array with a non-string element",
+      { root_path: "/abs/project", patterns: ["src", 7] },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(73, "doc_coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: patterns must be an array of strings",
+    );
+    expect(responses[0]?.id).toBe(73);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["an extra key beside root_path", { root_path: "/abs/project", extra: true }],
+    [
+      "an extra key beside root_path and patterns",
+      { root_path: "/abs/project", patterns: ["src/**"], extra: true },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([request(74, "doc_coverage", params)]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must contain only root_path and patterns",
+    );
+    expect(responses[0]?.id).toBe(74);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a nonexistent root_path with -32602", async () => {
+    const root = await fixtureTree({});
+    const missing = join(root, "does-not-exist");
+    const { responses, stderr } = await drive([
+      request(75, "doc_coverage", { root_path: missing }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${missing}`,
+    );
+    expect(responses[0]?.id).toBe(75);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a non-directory root_path with -32602", async () => {
+    const root = await fixtureTree({ "not-a-dir.ts": "export {};\n" });
+    const file = join(root, "not-a-dir.ts");
+    const { responses, stderr } = await drive([
+      request(76, "doc_coverage", { root_path: file }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${file}`,
+    );
+    expect(responses[0]?.id).toBe(76);
+    expect(stderr).toBe("");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "rejects an inaccessible root_path with -32602",
+    async () => {
+      const root = await fixtureTree({
+        "locked/nested/a.ts": "export const a = 1;\n",
+      });
+      const locked = join(root, "locked");
+      const nested = join(locked, "nested");
+      await chmod(locked, 0o000);
+      lockedDirectories.push(locked);
+      const { responses, stderr } = await drive([
+        request(77, "doc_coverage", { root_path: nested }),
+      ]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+      expect(errorBody(responses[0] ?? {}).message).toBe(
+        `Invalid params: root_path is not a directory: ${nested}`,
+      );
+      expect(responses[0]?.id).toBe(77);
+      expect(stderr).toBe("");
+    },
+  );
+
+  it("echoes the cwd-resolved path for a relative root_path", async () => {
+    const relative = "no-such-directory-doc-coverage";
+    const { responses, stderr } = await drive([
+      request(78, "doc_coverage", { root_path: relative }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${resolve(relative)}`,
+    );
+    expect(responses[0]?.id).toBe(78);
+    expect(stderr).toBe("");
+  });
+
+  it("answers a repeated request with byte-identical response lines", {
+    timeout: 60_000,
+  }, async () => {
+    // US1 scenario 3 / Constitution I: two full pipeline runs over the
+    // same tree produce identical response bytes — no timestamps, no
+    // environment-dependent data.
+    const root = await fixtureTree(DOC_SOURCES);
+    const line = request(79, "doc_coverage", { root_path: root });
+    const { responses, rawLines, stderr } = await drive([line, line]);
+    expect(responses).toHaveLength(2);
+    expect(rawLines).toHaveLength(2);
+    expect(rawLines[0]).toBe(rawLines[1]);
+    expect(responses[0]?.id).toBe(79);
+    expect(resultSymbols(responses[0] ?? {})).toEqual(EXPECTED_SYMBOLS);
+    expect(stderr).toBe("");
+  });
+
+  it("answers a pattern set matching nothing with an empty symbols array", {
+    timeout: 60_000,
+  }, async () => {
+    // US1 scenario 6 / spec edge case: a `patterns` set matching no file
+    // is a success — `{"symbols": []}` — never an error. The tree still
+    // carries its tsconfig, so the request genuinely runs the pipeline
+    // and answers an empty row set rather than failing early.
+    const root = await fixtureTree(DOC_SOURCES);
+    const { responses, stderr } = await drive([
+      request(80, "doc_coverage", { root_path: root, patterns: ["nope"] }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(80);
+    expect(resultSymbols(responses[0] ?? {})).toEqual([]);
+    expect(stderr).toBe("");
+  });
+
+  // 005 FR-013 / US1: doc_coverage is capability-gated from the platform's
+  // side (Gaze calls it when and only when the initialize flag is true),
+  // so the initialize handshake must advertise it. The literal pin — not
+  // `initializeResult()`, which would be tautologically green — makes a
+  // flag drift visible through the server wire, mirroring the analyze
+  // block's FR-028 pin and the classify_signals/test_mapping pins above;
+  // tests/protocol.test.ts (T006) pins the unit output the same way.
+  // `cognitive_complexity` stays false until US2's T017 lands its own
+  // protocol-state unit.
+  it("advertises doc_coverage in the initialize capability response", async () => {
+    const { responses } = await drive([INIT]);
+    const result = responses[0]?.result as Record<string, unknown> | undefined;
+    expect(result?.capabilities).toEqual({
+      discover: true,
+      test_mapping: true,
+      classify_signals: true,
+      streaming: false,
+      doc_coverage: true,
       cognitive_complexity: false,
     });
   });
@@ -1586,9 +1901,15 @@ describe("server: dispatch", () => {
   // dropped for the same reason.
   // `test_mapping` is pinned the same way by the "server: test_mapping"
   // block above — red until T020 landed registration with the capability
-  // flip as one protocol-state unit — and is dropped for the same reason,
-  // shrinking the reserved set to spec 004 FR-014's terminal three.
-  it.each(["analyze/stream", "doc_coverage", "cognitive_complexity"])(
+  // flip as one protocol-state unit — and is dropped for the same reason.
+  // `doc_coverage` is pinned the same way by the "server: doc_coverage"
+  // block above — T009 landed registration with the capability flip as
+  // one protocol-state unit, so malformed params answer its -32602
+  // matrix there, never the -32601 this case asserts — and is dropped
+  // for the same reason, shrinking the reserved set to spec 005 FR-012's
+  // intermediate pair: analyze/stream (behind the streaming flag) and
+  // cognitive_complexity (until US2's T017).
+  it.each(["analyze/stream", "cognitive_complexity"])(
     "answers reserved method %s with -32601",
     async (method) => {
       const { responses } = await drive([request(6, method)]);
