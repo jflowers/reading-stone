@@ -141,7 +141,7 @@ describe("initialize result", () => {
     expect(initializeResult().language_version).toBe(process.versions.node);
   });
 
-  it("exposes exactly six capability flags, discover, classify_signals, and test_mapping true", () => {
+  it("exposes exactly six capability flags, discover, classify_signals, test_mapping, and doc_coverage true", () => {
     const capabilities = initializeResult().capabilities;
     expect(Object.keys(capabilities).sort()).toEqual([
       "classify_signals",
@@ -155,7 +155,7 @@ describe("initialize result", () => {
     expect(capabilities.classify_signals).toBe(true);
     expect(capabilities.test_mapping).toBe(true);
     expect(capabilities.streaming).toBe(false);
-    expect(capabilities.doc_coverage).toBe(false);
+    expect(capabilities.doc_coverage).toBe(true);
     expect(capabilities.cognitive_complexity).toBe(false);
   });
 
@@ -163,7 +163,7 @@ describe("initialize result", () => {
     const expected =
       `{"id":1,"jsonrpc":"2.0","result":{"analyzer_name":"reading-stone",` +
       `"capabilities":{"classify_signals":true,"cognitive_complexity":false,` +
-      `"discover":true,"doc_coverage":false,"streaming":false,"test_mapping":true},` +
+      `"discover":true,"doc_coverage":true,"streaming":false,"test_mapping":true},` +
       `"language":"typescript","language_version":"${process.versions.node}",` +
       `"protocol_version":"1.2.0"}}`;
     expect(serialize(successResponse(1, initializeResult()))).toBe(expected);
