@@ -19,6 +19,21 @@
 //   relativize against it; parse-only sources are already keyed by
 //   root-relative path), the bootstrapped ProgramContext second, and the
 //   injected diagnostic sink last (research R15's AST-depth skip channel).
+// - Walk set: `collectSources(realRoot, context)` — the `[relPath,
+//   SourceFile][]` pairs the extraction pass walks (005 T002; FR-004 and
+//   FR-011; research R2). Parse-only mode returns the context's sources
+//   keyed by root-relative path; program mode filters the compiler's
+//   source file names to those relativizing strictly beneath the real
+//   root (default libraries and out-of-root files excluded); the pairs
+//   cover exactly the in-scope source arm analyze reports for the same
+//   request (spec 003's file-set parity, asserted against the real
+//   method); and a pattern set matching nothing yields an empty walk
+//   set, never an error. RED-FIRST: collectSources is module-private
+//   today — T003 adds the `export` keyword — so the section below fails
+//   on `collectSources is not a function` by design. The missing named
+//   export does not fail this file's module load (the binding is
+//   undefined at runtime under vitest's transform), so every pre-existing
+//   suite above stays green; verified before this section landed.
 // - Ordering: `(relPath, line, name)` per FR-008, with the
 //   platform-default stable sort resolving full-key ties (same file, line,
 //   AND name — a getter/setter pair on one line) by AST position.
@@ -36,9 +51,15 @@
 // the absence of their records.
 
 import { realpathSync } from "node:fs";
-import { extname } from "node:path";
+import { extname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type ExtractionRecord, extractFunctions } from "../src/extract.js";
+import { prepareAnalysis } from "../src/analysis.js";
+import {
+  collectSources,
+  type ExtractionRecord,
+  extractFunctions,
+} from "../src/extract.js";
+import { relativeUnderBase } from "../src/internal.js";
 import { buildProgramContext } from "../src/program.js";
 import {
   createFixtureTree,
@@ -46,6 +67,7 @@ import {
   memorySink,
   registerCleanup,
 } from "./helpers/fixtures.js";
+import { analyzeTree } from "./helpers/wire.js";
 
 // Fixture trees register their cleanup with the shared helpers so every
 // test body stays linear; afterEach drains the queue in creation order.
@@ -560,5 +582,237 @@ describe("extractFunctions: degenerate trees", () => {
     expect(records).toEqual([]);
     expect(sink.text()).toBe("");
     expect(stdout).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectSources: the walk set (005 T002; FR-004 and FR-011; research R2).
+//
+// The second tested surface, recorded per the header above. RED-FIRST:
+// collectSources is module-private in src/extract.ts today — T003 adds the
+// `export` keyword — so these tests fail on `collectSources is not a
+// function` by design while every suite above stays green.
+//
+// The clauses, one per group below:
+//
+// - Parse-only keying (FR-004): the context's sources keyed by
+//   root-relative path, each SourceFile carrying the absolute fileName
+//   under the real root and the pre-read text verbatim.
+// - Program-mode containment (FR-004): exactly the compiler's source file
+//   names that relativize strictly beneath the real root — default
+//   libraries and out-of-root files excluded. The compiler always pulls
+//   the default libraries in from outside the root, so the filter has
+//   real exclusions to make; the expected set is computed from the raw
+//   names, not hardcoded.
+// - Walk-set parity (FR-004; spec 003's file-set parity): the pairs cover
+//   exactly the in-scope source arm — the identical file set analyze
+//   reports for the same request, asserted against the real method, not
+//   assumed. The fixture plants a test file (name signal) and a generated
+//   file (leading-comment marker) alongside the sources and keeps the
+//   source arm free of imports into the excluded arms, so the whole-tree
+//   walk set equals the in-scope list in both modes.
+// - Degenerate scope: a pattern set matching nothing yields an empty walk
+//   set, never an error (FR-004's shared analysis-params semantics).
+// ---------------------------------------------------------------------------
+
+// The unit fixture for the bootstrap-mode keying: a nested TypeScript
+// source and a root-level JavaScript source, both declaring a record.
+const WALK_UNIT_FILES: Readonly<Record<string, string>> = {
+  "src/one.ts": ["export function one(): number {", "  return 1;", "}", ""].join("\n"),
+  "two.js": ["export function two() {", "  return 2;", "}", ""].join("\n"),
+};
+
+// The parity fixture: two source files — each declaring a record, so
+// analyze's distinct reported file set observes the whole arm — plus a
+// test file classified by name signal and a generated file excluded by its
+// leading-comment marker. Nothing in the source arm imports the excluded
+// arms, so the program-mode compiler never pulls them in transitively.
+const WALK_PARITY_FILES: Readonly<Record<string, string>> = {
+  "src/entry.ts": [
+    'import { helper } from "./util";',
+    "",
+    "export function entryRun(): number {",
+    "  return helper(1);",
+    "}",
+    "",
+  ].join("\n"),
+  "src/util.ts": [
+    "export function helper(n: number): number {",
+    "  return n + 1;",
+    "}",
+    "",
+  ].join("\n"),
+  "src/util.test.ts": [
+    'import { helper } from "./util";',
+    "",
+    "export function probe(): number {",
+    "  return helper(2);",
+    "}",
+    "",
+  ].join("\n"),
+  "generated/api.ts": [
+    "// @generated by fixture — do not edit",
+    "export function generatedValue(): number {",
+    "  return 3;",
+    "}",
+    "",
+  ].join("\n"),
+};
+
+// Bootstraps a context over a fixture tree without extracting: the
+// collectSources unit tests read the pairs while the context is live
+// (program-mode source files round-trip to the native compiler server), so
+// unlike extractFromTree the driver hands the context back for the caller
+// to dispose.
+async function contextFromTree(
+  files: Readonly<Record<string, string>>,
+  mode: Mode,
+): Promise<{
+  root: string;
+  context: ReturnType<typeof buildProgramContext>;
+  sink: ReturnType<typeof memorySink>;
+  stdout: ReturnType<typeof vi.spyOn>;
+}> {
+  const onDisk: Record<string, string> =
+    mode === "program" ? { ...files, "tsconfig.json": TSCONFIG } : { ...files };
+  const root = await makeTree(onDisk);
+  const pairs = Object.entries(files)
+    .filter(([relPath]) => COMPILABLE_EXTENSIONS.has(extname(relPath)))
+    .map(([relPath, text]) => [relPath, text] as const);
+  const sink = memorySink();
+  const stdout = vi.spyOn(process.stdout, "write");
+  const context = buildProgramContext(root, pairs, sink.stream);
+  return { root, context, sink, stdout };
+}
+
+describe("collectSources: bootstrap-mode keying (005 FR-004)", () => {
+  it("parse-only mode returns the context's sources keyed by root-relative path", async () => {
+    const { root, context, sink, stdout } = await contextFromTree(
+      WALK_UNIT_FILES,
+      "parse-only",
+    );
+    expect(context.mode).toBe("parse-only");
+
+    const pairs = collectSources(root, context);
+
+    // Keying: pairs keyed by root-relative path, each SourceFile carrying
+    // the absolute fileName under the real root and the pre-read text.
+    expect(pairs.map(([relPath]) => relPath).sort()).toEqual(["src/one.ts", "two.js"]);
+    for (const [relPath, sourceFile] of pairs) {
+      expect(sourceFile.fileName).toBe(join(root, relPath));
+      expect(sourceFile.text).toBe(WALK_UNIT_FILES[relPath]);
+    }
+    expect(sink.text()).toBe("");
+    expect(stdout).not.toHaveBeenCalled();
+  });
+
+  it("program mode keeps only compiler names that relativize beneath the root", {
+    timeout: 30_000,
+  }, async () => {
+    const { root, context, sink, stdout } = await contextFromTree(
+      WALK_UNIT_FILES,
+      "program",
+    );
+    expect(context.mode).toBe("program");
+    try {
+      const raw = context.program.getSourceFileNames();
+      // Non-vacuity: the compiler's name set includes the default
+      // libraries from outside the root, so the containment filter has
+      // real exclusions to make.
+      expect(raw.some((name) => relativeUnderBase(root, name) === null)).toBe(true);
+
+      const pairs = collectSources(root, context);
+
+      // Containment: exactly the raw names that relativize strictly
+      // beneath the real root, keyed by that relative path — computed
+      // from the raw set, not hardcoded.
+      const expected = raw
+        .map((name) => relativeUnderBase(root, name))
+        .filter((rel): rel is string => rel !== null)
+        .sort();
+      expect(pairs.map(([relPath]) => relPath).sort()).toEqual(expected);
+      for (const [relPath, sourceFile] of pairs) {
+        expect(sourceFile.fileName).toBe(join(root, relPath));
+      }
+      // The fixture's own sources survive the filter in both spellings:
+      // a nested .ts and a root-level .js.
+      expect(pairs.map(([relPath]) => relPath)).toContain("src/one.ts");
+      expect(pairs.map(([relPath]) => relPath)).toContain("two.js");
+      expect(sink.text()).toBe("");
+      expect(stdout).not.toHaveBeenCalled();
+    } finally {
+      context.dispose();
+    }
+  });
+});
+
+describe.each(["parse-only", "program"] as const)(
+  "collectSources: walk-set parity in %s mode (005 FR-004/FR-011)",
+  (mode) => {
+    it("covers exactly the in-scope source arm analyze reports", {
+      timeout: 30_000,
+    }, async () => {
+      const onDisk: Record<string, string> =
+        mode === "program"
+          ? { ...WALK_PARITY_FILES, "tsconfig.json": TSCONFIG }
+          : { ...WALK_PARITY_FILES };
+      const root = await makeTree(onDisk);
+      const sink = memorySink();
+      const prepared = await prepareAnalysis(root, undefined, sink.stream);
+      expect(prepared.context.mode).toBe(mode);
+      try {
+        const walkSet = collectSources(root, prepared.context)
+          .map(([relPath]) => relPath)
+          .sort();
+
+        // The arm itself: the two source files, nothing else — the test
+        // file (name signal) and the generated file (marker) are absent
+        // from the walk set exactly as they are from discovery's lists.
+        expect(walkSet).toEqual(["src/entry.ts", "src/util.ts"]);
+
+        // Parity with the pipeline's own in-scope list (FR-011: both
+        // new methods ride prepareAnalysis; the walk set must be that
+        // arm).
+        expect(walkSet).toEqual([...prepared.inScopePaths]);
+
+        // Parity with the real method, asserted not assumed: analyze
+        // over the same request reports exactly the walk-set files.
+        // Every in-scope file declares a record, so the distinct
+        // reported file set observes the whole arm.
+        const analyzed = await analyzeTree(root);
+        expect(
+          [...new Set(analyzed.functions.map((record) => record.file))].sort(),
+        ).toEqual(walkSet);
+        expect(analyzed.stderr()).toBe("");
+        expect(sink.text()).toBe("");
+      } finally {
+        if (prepared.context.mode === "program") {
+          prepared.context.dispose();
+        }
+      }
+    });
+  },
+);
+
+describe("collectSources: degenerate scope (005 FR-004)", () => {
+  it("a pattern set matching nothing yields an empty walk set, never an error", {
+    timeout: 30_000,
+  }, async () => {
+    // A usable tsconfig sits at the root, yet the pattern set matches
+    // nothing: the empty in-scope set short-circuits the bootstrap
+    // before any config is consulted, so the arm's mode is an
+    // implementation detail here and is deliberately not asserted.
+    const root = await makeTree({ ...WALK_PARITY_FILES, "tsconfig.json": TSCONFIG });
+    const sink = memorySink();
+    const prepared = await prepareAnalysis(root, ["./no-such-dir"], sink.stream);
+    expect(prepared.inScopePaths).toEqual([]);
+    try {
+      expect(collectSources(root, prepared.context)).toEqual([]);
+      expect(sink.text()).toBe("");
+    } finally {
+      if (prepared.context.mode === "program") {
+        prepared.context.dispose();
+      }
+    }
   });
 });
