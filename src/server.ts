@@ -1,11 +1,13 @@
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { analyze, classifySignals } from "./analysis.js";
+import { cognitiveComplexity } from "./cognitive.js";
 import { computeComplexity } from "./complexity.js";
 import { parseCoverage } from "./coverage.js";
 import { discover, InvalidRootPathError } from "./discovery.js";
 import { docCoverage } from "./doc-coverage.js";
 import {
+  type CognitiveComplexityResult,
   type DocCoverageResult,
   errorResponse,
   INTERNAL_ERROR,
@@ -459,6 +461,46 @@ export class Server {
         // responses (spec 001 FR-017).
         const result: DocCoverageResult = {
           symbols: await docCoverage(rootPath, patterns, this.stderr),
+        };
+        return result;
+      } catch (error) {
+        throw mapRootPathError(error) ?? error;
+      }
+    });
+    // `cognitive_complexity` (spec 005 FR-005 to FR-009 and FR-012;
+    // protocol.md v1.2.0's cognitive_complexity schema): the SAME shared
+    // analysis-params validation as analyze/complexity/coverage/
+    // classify_signals/test_mapping/doc_coverage — one validator, one
+    // error table, never a copy — then the T016 entry: the SonarSource
+    // cognitive-complexity walk over the one shared analysis pipeline,
+    // wrapped as the one-key `{"functions": [...]}` result. Like the
+    // other capability-gated methods, the method is capability-gated
+    // from the platform's side (Gaze calls it when and only when the
+    // initialize flag is true, spec 005 FR-013), so initializeResult()
+    // advertises `cognitive_complexity: true` in the same
+    // protocol-state unit as this registration — no commit advertises a
+    // capability the dispatch table lacks. The method registers
+    // unconditionally: no runtime toggle. Registering it shrinks the
+    // reserved -32601 set to exactly analyze/stream (FR-012).
+    dispatch.set("cognitive_complexity", async (params) => {
+      const { rootPath, patterns } = validateAnalysisParams(params);
+      try {
+        // cognitiveComplexity (T016) runs the identical prepareAnalysis
+        // stages analyze runs over the same extraction records, so US2-2's
+        // parity with the cyclomatic complexity method is structural (a
+        // function has a cognitive score if and only if it has a cyclomatic
+        // one). Its result is already the serialized, wire-shaped row
+        // array — sorted by (file, line, name) inside the entry — so the
+        // sorted-key envelope serializer only re-orders keys: repeated
+        // requests stay byte-identical (spec 005 US2 scenario 1). The
+        // wrapper is typed against CognitiveComplexityResult and the entry
+        // returns the bare `functions` payload (the computeComplexity
+        // split), so the one-key `{"functions": [...]}` wire shape is
+        // compile-time enforced end to end. Skip diagnostics flow to the
+        // server's stderr, never stdout, which is reserved for JSON-RPC
+        // responses (spec 001 FR-017).
+        const result: CognitiveComplexityResult = {
+          functions: await cognitiveComplexity(rootPath, patterns, this.stderr),
         };
         return result;
       } catch (error) {
