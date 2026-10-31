@@ -213,13 +213,17 @@ export function extractFunctions(
  * the in-scope files that relativize strictly beneath `realRoot`. The
  * configured program's default libraries live outside the analysis root
  * and cannot pass the containment test, so exactly the analyzed tree's
- * sources are walked.
+ * sources are walked. Exported as a pure widening (spec 005 T003,
+ * FR-011; research R2) for the doc-coverage consumer
+ * (src/doc-coverage.ts): its symbol-surface walk iterates this one walk
+ * set instead of re-deriving the in-scope sources, so FR-004's
+ * file-set parity with `analyze` stays structural.
  *
  * @param realRoot Realpath-resolved absolute analysis root.
  * @param context The bootstrapped context in either mode.
  * @returns `(relPath, SourceFile)` pairs in context order.
  */
-function collectSources(
+export function collectSources(
   realRoot: string,
   context: ProgramContext,
 ): Array<[string, SourceFile]> {
