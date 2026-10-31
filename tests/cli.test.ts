@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { VERSION } from "../src/index.js";
 import { main } from "../src/main.js";
+import { createFixtureTree } from "./helpers/fixtures.js";
 
 interface Sink {
   stream: Writable;
@@ -119,6 +120,19 @@ Python implementation of the Gaze analyzer protocol.
 
 const mainJs = fileURLToPath(new URL("../dist/main.js", import.meta.url));
 
+// One doc_coverage wire row as observed across the subprocess boundary —
+// the WireSymbol/WireRow shape shared by tests/server.test.ts and
+// tests/doc-coverage.test.ts.
+interface SubprocessSymbol {
+  readonly name: string;
+  readonly package: string;
+  readonly kind: string;
+  readonly file: string;
+  readonly line: number;
+  readonly documented: boolean;
+  readonly doc_snippet?: string;
+}
+
 describe.skipIf(!existsSync(mainJs))("subprocess", () => {
   function readLine(stream: Readable): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -167,5 +181,141 @@ describe.skipIf(!existsSync(mainJs))("subprocess", () => {
       child.on("exit", (code) => resolve(code));
     });
     expect(exitCode).toBe(2);
+  });
+
+  // The closed kind set (005 FR-001): the gaze protocol's doc_coverage
+  // schema enumeration, mirrored so this black-box check validates the
+  // same six values the serializer enforces (the tests/helpers/wire.ts
+  // stance).
+  const SYMBOL_KINDS: readonly string[] = [
+    "class",
+    "constant",
+    "function",
+    "method",
+    "type",
+    "variable",
+  ];
+
+  // The spec's exact US1-1 fixture (005 spec.md US1 scenario 1): divide
+  // carries the one-line JSDoc summary, add carries none. Declaration
+  // lines are auditable in place against the expected rows below. No
+  // tsconfig, so the subprocess answers from the parse-only arm; program
+  // mode is pinned at the pipeline and dispatch surfaces
+  // (tests/doc-coverage.test.ts, tests/server.test.ts).
+  const US1_SOURCES: Readonly<Record<string, string>> = {
+    "src/math.ts": [
+      "/** Divide two numbers, raising an error for a zero divisor. */", // 1
+      "export function divide(dividend: number, divisor: number): number {", // 2
+      "  if (divisor === 0) {", // 3
+      '    throw new Error("zero divisor");', // 4
+      "  }", // 5
+      "  return dividend / divisor;", // 6
+      "}", // 7
+      "", // 8
+      "export function add(left: number, right: number): number {", // 9
+      "  return left + right;", // 10
+      "}", // 11
+      "", // 12
+    ].join("\n"),
+  };
+
+  // US1-1's exact row set: divide documented with its summary line as
+  // doc_snippet, add undocumented with no doc_snippet key (omitted, never
+  // empty — spec 001 FR-013), in (file, line, name) order with package
+  // from the shared derivation.
+  const US1_SYMBOLS: readonly SubprocessSymbol[] = [
+    {
+      name: "divide",
+      package: "src.math",
+      kind: "function",
+      file: "src/math.ts",
+      line: 2,
+      documented: true,
+      doc_snippet: "Divide two numbers, raising an error for a zero divisor.",
+    },
+    {
+      name: "add",
+      package: "src.math",
+      kind: "function",
+      file: "src/math.ts",
+      line: 9,
+      documented: false,
+    },
+  ];
+
+  // T007 — the US1 independent test (005 FR-015; spec.md US1 Independent
+  // Test): a black-box request/response round against the BUILT server,
+  // the artifact Gaze itself spawns. The suite is skipped when dist/ is
+  // absent (CI builds before vitest; locally `npm run build` first).
+  it("serves doc_coverage over real stdio (US1 independent test)", {
+    timeout: 60_000,
+  }, async () => {
+    const tree = await createFixtureTree(US1_SOURCES);
+    const child = spawn(process.execPath, [mainJs, "--stdio"]);
+    try {
+      // Handshake over the fixture root: the initialize response must
+      // advertise the doc_coverage capability (FR-013) — Gaze gates its
+      // doc_coverage calls on this flag.
+      child.stdin.write(
+        `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"root_path":${JSON.stringify(tree.root)}}}\n`,
+      );
+      const initializeLine = await readLine(child.stdout);
+
+      // The identical request line, written twice — the two response
+      // lines must be byte-identical (US1 scenario 3 / Constitution I).
+      const docCoverageRequest = `{"jsonrpc":"2.0","id":2,"method":"doc_coverage","params":{"root_path":${JSON.stringify(tree.root)}}}\n`;
+      child.stdin.write(docCoverageRequest);
+      const firstLine = await readLine(child.stdout);
+      child.stdin.write(docCoverageRequest);
+      const secondLine = await readLine(child.stdout);
+
+      child.stdin.write('{"jsonrpc":"2.0","id":3,"method":"shutdown"}\n');
+      const exitCode = await new Promise<number | null>((resolve) => {
+        child.on("exit", (code) => resolve(code));
+      });
+
+      // Assertions run only after the child exits, so a failure can
+      // never strand the subprocess.
+      expect(exitCode).toBe(0);
+      const initialize = JSON.parse(initializeLine) as {
+        result: { capabilities: Record<string, unknown> };
+      };
+      expect(initialize.result.capabilities.doc_coverage).toBe(true);
+
+      const first = JSON.parse(firstLine) as {
+        jsonrpc: string;
+        id: number;
+        result: Record<string, unknown> | undefined;
+      };
+      expect(first.jsonrpc).toBe("2.0");
+      expect(first.id).toBe(2);
+      // Fail-loud extraction (the resultSymbols discipline): an error
+      // response (-32601/-32602) surfaces as the explicit absence of the
+      // symbols key, never a soft pass.
+      const result: Record<string, unknown> = first.result ?? {};
+      expect(Object.keys(result).sort()).toEqual(["symbols"]);
+      expect(Array.isArray(result.symbols)).toBe(true);
+      const rows = result.symbols as readonly SubprocessSymbol[];
+
+      // The Independent Test's structural contract: every row carries
+      // the six required fields, with kind inside the closed set.
+      for (const row of rows) {
+        expect(row.name).toBeTypeOf("string");
+        expect(row.package).toBeTypeOf("string");
+        expect(row.file).toBeTypeOf("string");
+        expect(Number.isInteger(row.line)).toBe(true);
+        expect(row.documented).toBeTypeOf("boolean");
+        expect(SYMBOL_KINDS).toContain(row.kind);
+      }
+
+      // US1-1: the documented/undocumented pair, exactly.
+      expect(rows).toEqual(US1_SYMBOLS);
+
+      // US1-3: the repeated request answers byte-identical.
+      expect(secondLine).toBe(firstLine);
+    } finally {
+      child.kill();
+      await tree.cleanup();
+    }
   });
 });
