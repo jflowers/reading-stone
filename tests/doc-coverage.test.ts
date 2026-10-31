@@ -5,6 +5,11 @@
 // landed): the SymbolRow record, its fail-loud serializer, and the
 // docCoverage entry over the shared prepareAnalysis pipeline.
 //
+// The T020 extension (US3; FR-002's full routing table, spec US3 scenarios
+// 1-5, research R3/R4 boundaries) appends the kind-routing and
+// excluded-surface suites at the bottom of this file: red-first against
+// the US1-slice walk, they pin the full symbol surface T021 implements.
+//
 // ENTRY CONTRACT — the reading of the feature artifacts, recorded per the
 // task brief (the tests/complexity.test.ts precedent, task-for-task):
 //
@@ -909,4 +914,618 @@ describe("skip diagnostics (FR-011; the injected stderr sink)", () => {
       expect(stdout).not.toHaveBeenCalled();
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// The US3 kind-routing fixtures (T020; FR-002 full table; spec US3 scenario
+// 1): kinds.ts carries one of each top-level exported declaration form;
+// classes.ts carries the exported-class surface — public members, accessor
+// pairs, excluded visibility modifiers, method overloads, and abstract
+// members.
+// ---------------------------------------------------------------------------
+
+const KINDS = [
+  "/** Adds two numbers. */",
+  "export function add(left: number, right: number): number {",
+  "  return left + right;",
+  "}",
+  "",
+  "/** Creates a counter. */",
+  "export const makeCounter = function (): number {",
+  "  return 1;",
+  "};",
+  "",
+  "export const double = (value: number): number => value * 2;",
+  "",
+  "export const gen = function* (): Generator<number> {",
+  "  yield 1;",
+  "};",
+  "",
+  "/** The answer. */",
+  "export const answer = 42;",
+  "",
+  "export const config = { retries: 2 };",
+  "",
+  "export let mutable = 1;",
+  "",
+  "export var legacy = 2;",
+  "",
+  "/** A paired value. */",
+  "export type Pair = { left: number; right: number };",
+  "",
+  "/** A shape. */",
+  "export interface Shape {",
+  "  area(): number;",
+  "}",
+  "",
+  "/** Supported colors. */",
+  "export enum Color {",
+  "  Red,",
+  "  Blue,",
+  "}",
+].join("\n");
+
+const CLASSES = [
+  "/** A widget. */",
+  "export class Widget {",
+  "  /** Builds the widget. */",
+  "  constructor(public name: string) {}",
+  "",
+  "  /** Renames the widget. */",
+  "  rename(next: string): void {",
+  "    this.name = next;",
+  "  }",
+  "",
+  "  get size(): number {",
+  "    return this.name.length;",
+  "  }",
+  "",
+  "  /** Sets the size. */",
+  "  set size(value: number) {",
+  "    void value;",
+  "  }",
+  "",
+  "  private hidden(): void {}",
+  "",
+  "  protected guarded(): void {}",
+  "",
+  "  #secret(): void {}",
+  "",
+  "  /** Overload-only docs do not count. */",
+  "  process(value: string): void;",
+  "  process(value: number): void {",
+  "    void value;",
+  "  }",
+  "",
+  "  compute(value: string): void;",
+  "  /** Implementation docs count. */",
+  "  compute(value: number): void {",
+  "    void value;",
+  "  }",
+  "}",
+  "",
+  "/** A base shape. */",
+  "export abstract class Base {",
+  "  /** Draws the shape. */",
+  "  abstract draw(): void;",
+  "}",
+].join("\n");
+
+const KIND_FILES: Readonly<Record<string, string>> = {
+  "classes.ts": CLASSES,
+  "kinds.ts": KINDS,
+};
+
+// The full FR-002 routing table over the two-file tree: every top-level
+// declaration form, the exported-class surface, the exact combined
+// projection, the wire invariants, and repeat-run byte identity. Red-first
+// against the US1-slice walk — only exported function declarations have
+// rows today, so every other symbol these cases pin is the T021 contract.
+describe("kind routing — the full FR-002 table (US3 scenario 1)", () => {
+  let root = "";
+  let rows: readonly WireRow[] = [];
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(KIND_FILES);
+    cleanup = tree.cleanup;
+    root = tree.root;
+    rows = (await symbolsTree(tree.root)).rows;
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it("export function declarations route to function", () => {
+    const row = rowFor(rows, "add", "kinds.ts");
+    expect(row.kind).toBe("function");
+    expect(row.documented).toBe(true);
+    expect(row.doc_snippet).toBe("Adds two numbers.");
+  });
+
+  it("export const with a function-like initializer routes to function — function expression, arrow, and generator forms", () => {
+    for (const name of ["makeCounter", "double", "gen"]) {
+      expect(rowFor(rows, name, "kinds.ts").kind).toBe("function");
+    }
+  });
+
+  it("other export const declarations route to constant", () => {
+    expect(rowFor(rows, "answer", "kinds.ts").kind).toBe("constant");
+    expect(rowFor(rows, "config", "kinds.ts").kind).toBe("constant");
+  });
+
+  it("export let and export var declarations route to variable", () => {
+    expect(rowFor(rows, "mutable", "kinds.ts").kind).toBe("variable");
+    expect(rowFor(rows, "legacy", "kinds.ts").kind).toBe("variable");
+  });
+
+  it("export type, export interface, and export enum declarations route to type", () => {
+    expect(rowFor(rows, "Pair", "kinds.ts").kind).toBe("type");
+    expect(rowFor(rows, "Shape", "kinds.ts").kind).toBe("type");
+    expect(rowFor(rows, "Color", "kinds.ts").kind).toBe("type");
+  });
+
+  it("export class declarations route to class — concrete and abstract", () => {
+    expect(rowFor(rows, "Widget", "classes.ts").kind).toBe("class");
+    expect(rowFor(rows, "Base", "classes.ts").kind).toBe("class");
+  });
+
+  it("public methods, constructors, and accessors of an exported class route to method — abstract methods included", () => {
+    expect(rowFor(rows, "constructor", "classes.ts").kind).toBe("method");
+    expect(rowFor(rows, "rename", "classes.ts").kind).toBe("method");
+    expect(rowFor(rows, "draw", "classes.ts").kind).toBe("method");
+  });
+
+  it("private, protected, and #private class members produce no rows (US3 scenario 2)", () => {
+    // The excluded member declarations sit on lines 20 (private), 22
+    // (protected), and 24 (#private) of classes.ts — a line-based filter
+    // pins their absence without guessing how a walk might spell the
+    // private-identifier name.
+    expect(
+      rows.filter(
+        (row) => row.file === "classes.ts" && [20, 22, 24].includes(row.line),
+      ),
+    ).toEqual([]);
+  });
+
+  it("a getter/setter pair emits two method rows, one per accessor declaration line, each independently documented (US3 scenario 4)", () => {
+    const accessors = rows.filter(
+      (row) => row.name === "size" && row.file === "classes.ts",
+    );
+    expect(accessors).toHaveLength(2);
+    expect(accessors.map((row) => row.line)).toEqual([11, 16]);
+    expect(accessors.every((row) => row.kind === "method")).toBe(true);
+    // The getter is undocumented; the setter carries its own JSDoc — each
+    // accessor is judged independently.
+    expect(accessors[0].documented).toBe(false);
+    expect(accessors[1].documented).toBe(true);
+    expect(accessors[1].doc_snippet).toBe("Sets the size.");
+  });
+
+  it("method overloads: documentation on the implementation signature counts, on an overload signature alone it does not", () => {
+    const process = rowFor(rows, "process", "classes.ts");
+    expect(process.line).toBe(28);
+    expect(process.documented).toBe(false);
+    const compute = rowFor(rows, "compute", "classes.ts");
+    expect(compute.line).toBe(34);
+    expect(compute.documented).toBe(true);
+    expect(compute.doc_snippet).toBe("Implementation docs count.");
+  });
+
+  it("the exact combined projection — every kind form in the (file, line, name) order", () => {
+    expect(rowProjection(rows)).toEqual([
+      {
+        file: "classes.ts",
+        line: 2,
+        name: "Widget",
+        kind: "class",
+        documented: true,
+        doc_snippet: "A widget.",
+      },
+      {
+        file: "classes.ts",
+        line: 4,
+        name: "constructor",
+        kind: "method",
+        documented: true,
+        doc_snippet: "Builds the widget.",
+      },
+      {
+        file: "classes.ts",
+        line: 7,
+        name: "rename",
+        kind: "method",
+        documented: true,
+        doc_snippet: "Renames the widget.",
+      },
+      {
+        file: "classes.ts",
+        line: 11,
+        name: "size",
+        kind: "method",
+        documented: false,
+      },
+      {
+        file: "classes.ts",
+        line: 16,
+        name: "size",
+        kind: "method",
+        documented: true,
+        doc_snippet: "Sets the size.",
+      },
+      {
+        file: "classes.ts",
+        line: 28,
+        name: "process",
+        kind: "method",
+        documented: false,
+      },
+      {
+        file: "classes.ts",
+        line: 34,
+        name: "compute",
+        kind: "method",
+        documented: true,
+        doc_snippet: "Implementation docs count.",
+      },
+      {
+        file: "classes.ts",
+        line: 40,
+        name: "Base",
+        kind: "class",
+        documented: true,
+        doc_snippet: "A base shape.",
+      },
+      {
+        file: "classes.ts",
+        line: 42,
+        name: "draw",
+        kind: "method",
+        documented: true,
+        doc_snippet: "Draws the shape.",
+      },
+      {
+        file: "kinds.ts",
+        line: 2,
+        name: "add",
+        kind: "function",
+        documented: true,
+        doc_snippet: "Adds two numbers.",
+      },
+      {
+        file: "kinds.ts",
+        line: 7,
+        name: "makeCounter",
+        kind: "function",
+        documented: true,
+        doc_snippet: "Creates a counter.",
+      },
+      {
+        file: "kinds.ts",
+        line: 11,
+        name: "double",
+        kind: "function",
+        documented: false,
+      },
+      {
+        file: "kinds.ts",
+        line: 13,
+        name: "gen",
+        kind: "function",
+        documented: false,
+      },
+      {
+        file: "kinds.ts",
+        line: 18,
+        name: "answer",
+        kind: "constant",
+        documented: true,
+        doc_snippet: "The answer.",
+      },
+      {
+        file: "kinds.ts",
+        line: 20,
+        name: "config",
+        kind: "constant",
+        documented: false,
+      },
+      {
+        file: "kinds.ts",
+        line: 22,
+        name: "mutable",
+        kind: "variable",
+        documented: false,
+      },
+      {
+        file: "kinds.ts",
+        line: 24,
+        name: "legacy",
+        kind: "variable",
+        documented: false,
+      },
+      {
+        file: "kinds.ts",
+        line: 27,
+        name: "Pair",
+        kind: "type",
+        documented: true,
+        doc_snippet: "A paired value.",
+      },
+      {
+        file: "kinds.ts",
+        line: 30,
+        name: "Shape",
+        kind: "type",
+        documented: true,
+        doc_snippet: "A shape.",
+      },
+      {
+        file: "kinds.ts",
+        line: 35,
+        name: "Color",
+        kind: "type",
+        documented: true,
+        doc_snippet: "Supported colors.",
+      },
+    ]);
+    expectWireInvariants(rows);
+  });
+
+  it("rows stay ordered and byte-identical across repeat requests", {
+    timeout: 120_000,
+  }, async () => {
+    const again = await symbolsTree(root);
+    expect(JSON.stringify(again.rows)).toBe(JSON.stringify(rows));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The excluded-surface fixtures (US3 scenario 2; FR-002): non-exported
+// declarations, re-exports, and namespace members contribute nothing — only
+// the exported module surface and the public members of exported classes
+// count. visible.ts carries the one kept symbol so the exclusions are
+// non-vacuous: the tree must yield exactly its row and nothing else.
+// ---------------------------------------------------------------------------
+
+const EXCLUDED_FILES: Readonly<Record<string, string>> = {
+  "excluded.ts": [
+    "/** An internal function. */",
+    "function internalFn(): void {}",
+    "",
+    "const internalConst = 1;",
+    "",
+    "/** An internal class. */",
+    "class InternalClass {",
+    "  /** A public method of a non-exported class. */",
+    "  public method(): void {}",
+    "}",
+  ].join("\n"),
+  "namespace.ts": [
+    "namespace Inner {",
+    "  /** A namespace member. */",
+    "  export function hidden(): void {}",
+    "}",
+  ].join("\n"),
+  "reexport.ts": [
+    'export { kept } from "./visible.js";',
+    'export * from "./visible.js";',
+  ].join("\n"),
+  "visible.ts": ["/** The one kept symbol. */", "export function kept(): void {}"].join(
+    "\n",
+  ),
+};
+
+describe("the excluded surface (FR-002; US3 scenario 2)", () => {
+  let rows: readonly WireRow[] = [];
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(EXCLUDED_FILES);
+    cleanup = tree.cleanup;
+    rows = (await symbolsTree(tree.root)).rows;
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it("non-exported declarations produce no rows — functions, consts, classes, and public members of non-exported classes", () => {
+    expect(rows.filter((row) => row.file === "excluded.ts")).toEqual([]);
+  });
+
+  it("re-exports produce no rows — export { x } from and export * from add nothing beyond the source module's own row", () => {
+    expect(rows.filter((row) => row.file === "reexport.ts")).toEqual([]);
+    // kept has exactly one row — visible.ts's own, never a second carried
+    // by the re-exporting module.
+    const kept = rowFor(rows, "kept", "visible.ts");
+    expect(kept.kind).toBe("function");
+    expect(kept.documented).toBe(true);
+  });
+
+  it("namespace members produce no rows", () => {
+    expect(rows.filter((row) => row.file === "namespace.ts")).toEqual([]);
+    expect(rows.filter((row) => row.name === "hidden" || row.name === "Inner")).toEqual(
+      [],
+    );
+  });
+
+  it("the excluded tree yields exactly the one exported row", () => {
+    expect(rowProjection(rows)).toEqual([
+      {
+        file: "visible.ts",
+        line: 2,
+        name: "kept",
+        kind: "function",
+        documented: true,
+        doc_snippet: "The one kept symbol.",
+      },
+    ]);
+    expectWireInvariants(rows);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The default-export fixtures (US3 scenario 3; FR-002; the spec 002
+// FR-007/FR-008 extraction identity; research R3/R4 boundaries): the
+// declaration and identifier forms carry the shared identity — the declared
+// name when one exists, else the literal "default" — while every other
+// expression form, export clause, CJS spelling, and destructuring pattern
+// is a documented no-row boundary, never a silent omission.
+// ---------------------------------------------------------------------------
+
+const DEFAULTS_FILES: Readonly<Record<string, string>> = {
+  "anonymous-default.ts": [
+    "/** An anonymous default export. */",
+    "export default function (): number {",
+    "  return 1;",
+    "}",
+  ].join("\n"),
+  "arrow-default.ts": ["export default (): number => 1;", ""].join("\n"),
+  "cjs.ts": [
+    "/** A CommonJS spelling. */",
+    "function cjsFn(): void {}",
+    "",
+    "module.exports = { cjsFn };",
+  ].join("\n"),
+  "destructuring.ts": [
+    "export const { a } = { a: 1 };",
+    "",
+    "export const [b] = [2];",
+  ].join("\n"),
+  "export-clause.ts": [
+    "/** A local function. */",
+    "function local(): void {}",
+    "",
+    "export { local };",
+  ].join("\n"),
+  "identifier-default.ts": [
+    "/** Divides two numbers. */",
+    "function divide(left: number, right: number): number {",
+    "  return left / right;",
+    "}",
+    "",
+    "export default divide;",
+  ].join("\n"),
+  "literal-default.ts": ["export default 42;", ""].join("\n"),
+  "named-default.ts": [
+    "/** Divides two numbers. */",
+    "export default function divide(left: number, right: number): number {",
+    "  return left / right;",
+    "}",
+  ].join("\n"),
+};
+
+describe("default exports — the shared extraction identity (FR-002; US3 scenario 3)", () => {
+  let rows: readonly WireRow[] = [];
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(DEFAULTS_FILES);
+    cleanup = tree.cleanup;
+    rows = (await symbolsTree(tree.root)).rows;
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it("export default function divide(...) names divide", () => {
+    const row = rowFor(rows, "divide", "named-default.ts");
+    expect(row.kind).toBe("function");
+    expect(row.line).toBe(2);
+    expect(row.documented).toBe(true);
+    expect(row.doc_snippet).toBe("Divides two numbers.");
+  });
+
+  it("an anonymous export default function names the literal default", () => {
+    const row = rowFor(rows, "default", "anonymous-default.ts");
+    expect(row.kind).toBe("function");
+    expect(row.line).toBe(2);
+    expect(row.documented).toBe(true);
+    expect(row.doc_snippet).toBe("An anonymous default export.");
+  });
+
+  it("export default divide carries the referenced declaration's row under its declared name", () => {
+    const row = rowFor(rows, "divide", "identifier-default.ts");
+    expect(row.kind).toBe("function");
+    // The row is the referenced declaration's own — its declaration line,
+    // not the export assignment's.
+    expect(row.line).toBe(2);
+    expect(row.documented).toBe(true);
+    expect(row.doc_snippet).toBe("Divides two numbers.");
+  });
+
+  it("expression default exports beyond the declaration and identifier forms produce no rows — the R3/R4 documented boundary", () => {
+    // An arrow and a literal as the default expression: neither the
+    // declaration nor the identifier form, so no row — a documented
+    // boundary, never a silent omission.
+    expect(rows.filter((row) => row.file === "arrow-default.ts")).toEqual([]);
+    expect(rows.filter((row) => row.file === "literal-default.ts")).toEqual([]);
+  });
+
+  it("export clauses, CJS spellings, and destructuring patterns produce no rows — documented boundaries, never silent omissions", () => {
+    expect(rows.filter((row) => row.file === "export-clause.ts")).toEqual([]);
+    expect(rows.filter((row) => row.file === "cjs.ts")).toEqual([]);
+    expect(rows.filter((row) => row.file === "destructuring.ts")).toEqual([]);
+  });
+
+  it("the defaults tree yields exactly the three identity rows, ordered and invariant", () => {
+    expect(rowProjection(rows)).toEqual([
+      {
+        file: "anonymous-default.ts",
+        line: 2,
+        name: "default",
+        kind: "function",
+        documented: true,
+        doc_snippet: "An anonymous default export.",
+      },
+      {
+        file: "identifier-default.ts",
+        line: 2,
+        name: "divide",
+        kind: "function",
+        documented: true,
+        doc_snippet: "Divides two numbers.",
+      },
+      {
+        file: "named-default.ts",
+        line: 2,
+        name: "divide",
+        kind: "function",
+        documented: true,
+        doc_snippet: "Divides two numbers.",
+      },
+    ]);
+    expectWireInvariants(rows);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The interface-members fixture (US3 scenario 5; FR-002): a type-only
+// export surfaces the named type symbol alone — its members are part of
+// the type's documentation, never separate symbols.
+// ---------------------------------------------------------------------------
+
+describe("interface members are not symbols (FR-002; US3 scenario 5)", () => {
+  it("export interface Shape { area(): number } emits one type row for Shape and no row for area", {
+    timeout: 120_000,
+  }, async () => {
+    const tree = await createFixtureTree({
+      "interface.ts": ["export interface Shape {", "  area(): number;", "}"].join("\n"),
+    });
+    registerCleanup(tree.cleanup);
+    const run = await symbolsTree(tree.root);
+    expect(rowProjection(run.rows)).toEqual([
+      {
+        file: "interface.ts",
+        line: 1,
+        name: "Shape",
+        kind: "type",
+        documented: false,
+      },
+    ]);
+    expect(run.rows.filter((row) => row.name === "area")).toEqual([]);
+    expectWireInvariants(run.rows);
+  });
 });
