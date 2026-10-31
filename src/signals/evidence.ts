@@ -827,11 +827,15 @@ function appendDocParts(doc: JSDoc, parts: string[]): void {
  * Every other parent — object literals, class bodies, source files — ends
  * the walk.
  *
+ * Exported for doc-coverage's symbol walk — a pure widening, the
+ * collectSources precedent: both pipelines read JSDoc attachment through
+ * this one hosting surface, so their semantics cannot drift.
+ *
  * @param node The node whose hosting parent to find.
  * @returns The parent that hosts JSDoc for `node`, or undefined when the
  * walk ends.
  */
-function nextJSDocHost(node: Node): Node | undefined {
+export function nextJSDocHost(node: Node): Node | undefined {
   const parent = node.parent;
   if (
     isPropertyAssignment(parent) ||

@@ -588,13 +588,15 @@ class FileWalker {
  * getStart through getEnd, no trivia — which is the identifier's text for
  * identifier names and the literal's source text for string and numeric
  * literal names, computed names, and private names. Deterministic for the
- * same tree, never fabricated.
+ * same tree, never fabricated. Exported because doc-coverage's class-member
+ * rows carry the same source-spelling identity — the collectBindingNames
+ * widening precedent.
  *
  * @param name The property-name node.
  * @param sourceFile The declaring source, for the text slice.
  * @returns The name's text.
  */
-function propertyNameText(name: PropertyName, sourceFile: SourceFile): string {
+export function propertyNameText(name: PropertyName, sourceFile: SourceFile): string {
   return name.getText(sourceFile);
 }
 

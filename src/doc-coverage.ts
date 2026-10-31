@@ -5,12 +5,27 @@
  *
  * The walk enumerates the exported source-level symbols of an analysis
  * scope and reports, per symbol, whether a JSDoc comment is attached
- * (FR-002) and the first summary line of its description (FR-003). This
- * module implements the US1 slice only — exported body-bearing function
- * declarations (FR-001). Routing for the remaining `SymbolKind` members
- * (type, constant, variable, class, method) arrives with T021's
- * phase-5 walk extension; the full closed set is declared now so that
- * extension widens the walk without widening the wire vocabulary.
+ * (FR-002) and the first summary line of its description (FR-003). The
+ * symbol surface (FR-002): exported function declarations (anonymous
+ * `export default function` included), exported variable declarations —
+ * a const with a function-like initializer routes to "function", any
+ * other const to "constant", let and var to "variable" — exported
+ * classes with their public method members (constructors, methods,
+ * accessors), and exported type, interface, and enum declarations. An
+ * `export default` naming an identifier emits the rows of the
+ * module-level declaration it names, under that declaration's own name,
+ * kind, and documentation.
+ *
+ * Boundary forms emit no row by design, never by silent omission
+ * (Principle II): non-exported declarations; export clauses and
+ * re-exports, whose rows belong to the declaration's own export
+ * spelling; default exports of expressions (arrows, literals, object
+ * literals), which name no declaration; `export =` and `module.exports`,
+ * the CommonJS boundaries; destructuring binding patterns, which bind
+ * many spellings to no single named symbol; namespaces and their
+ * members; body-less overload and ambient signatures, whose
+ * implementation signature is the symbol's documentation site; and
+ * non-public class members (private, protected, #private).
  *
  * Constitution alignment:
  *
@@ -21,16 +36,18 @@
  *   its pass is a structural no-op (the serializeComplexityEntry
  *   discipline).
  * - Principle III (TypeScript-Native Analysis): JSDoc attachment is read
- *   from the declaration's own `jsDoc` array (the surface evidence.ts
- *   reads) and comment text through the compiler's own
- *   `getTextOfJSDocComment` renderer — no custom doc parser. Verified
- *   against typescript 7.0.2: the renderer strips the ` * ` line
- *   decoration and per-line leading whitespace, preserves interior
- *   newlines, and keeps block tags out of the description — so FR-003's
- *   leading-`*` trim is discharged by the compiler surface itself, and
- *   stripping another asterisk here would mangle content asterisks the
- *   renderer deliberately preserves (a `**bold**` summary line survives
- *   verbatim).
+ *   from the compiler's jsDoc arrays and the parent-hosting walk
+ *   evidence.ts mirrors from the compiler's own
+ *   `getNextJSDocCommentLocation` (nextJSDocHost — one shared hosting
+ *   surface, so the doc and signal pipelines cannot drift), and comment
+ *   text through the compiler's own `getTextOfJSDocComment` renderer —
+ *   no custom doc parser. Verified against typescript 7.0.2: the
+ *   renderer strips the ` * ` line decoration and per-line leading
+ *   whitespace, preserves interior newlines, and keeps block tags out of
+ *   the description — so FR-003's leading-`*` trim is discharged by the
+ *   compiler surface itself, and stripping another asterisk here would
+ *   mangle content asterisks the renderer deliberately preserves (a
+ *   `**bold**` summary line survives verbatim).
  * - Principle IV (Testability): the walk core is a pure
  *   PreparedAnalysis-to-SymbolRow[] function; the entry owns the
  *   program-context lifetime and closes it in a finally, exactly as
@@ -43,26 +60,49 @@
 import type { Writable } from "node:stream";
 
 import {
-  type FunctionDeclaration,
+  type ClassDeclaration,
+  type ConstructorDeclaration,
+  type GetAccessorDeclaration,
   getTextOfJSDocComment,
+  isArrowFunction,
+  isClassDeclaration,
+  isConstructorDeclaration,
+  isEnumDeclaration,
+  isExportAssignment,
   isFunctionDeclaration,
+  isFunctionExpression,
+  isGetAccessorDeclaration,
+  isIdentifier,
+  isInterfaceDeclaration,
   isJSDoc,
+  isMethodDeclaration,
+  isPrivateIdentifier,
+  isSetAccessorDeclaration,
+  isTypeAliasDeclaration,
+  isVariableDeclaration,
+  isVariableStatement,
   type JSDoc,
+  type MethodDeclaration,
   ModifierFlags,
+  type Node,
+  NodeFlags,
+  type SetAccessorDeclaration,
   type SourceFile,
+  type VariableDeclaration,
 } from "typescript/unstable/ast";
 
 import { type PreparedAnalysis, prepareAnalysis } from "./analysis.js";
-import { collectSources } from "./extract.js";
+import { collectSources, propertyNameText } from "./extract.js";
 import { compareFileLineName } from "./internal.js";
 import { derivePackage } from "./models.js";
+import { nextJSDocHost } from "./signals/evidence.js";
 
 /**
  * The kind of a documented-symbol row (FR-001): the closed set the gaze
  * protocol's doc_coverage schema accepts — function, type, constant,
- * variable, class, method. Declared in full now so T021's walk extension
- * routes new declaration shapes into the existing vocabulary; the US1
- * walk emits only "function".
+ * variable, class, method. Declared in full so every routed declaration
+ * shape lands in the existing vocabulary; the walk's routing widens,
+ * the wire set never does.
  */
 export type SymbolKind =
   | "function"
@@ -81,7 +121,10 @@ export type SymbolKind =
  * immutable value record (convention pack AP-004).
  */
 export interface SymbolRow {
-  /** The declared name; the literal "default" for an anonymous export-default function. */
+  /**
+   * The declared name; the literal "default" for an anonymous
+   * export-default function or class declaration.
+   */
   readonly name: string;
   /** Dotted module path derived by `derivePackage` from `file`. */
   readonly package: string;
@@ -89,7 +132,11 @@ export interface SymbolRow {
   readonly kind: SymbolKind;
   /** Root-relative POSIX path of the declaring file. */
   readonly file: string;
-  /** 1-based line of the declaration — its first token (`export`), not its JSDoc. */
+  /**
+   * 1-based line of the declaration's first token — modifiers included
+   * (`export` for statements, accessibility keywords for class members)
+   * — never its JSDoc.
+   */
   readonly line: number;
   /** True if and only if a JSDoc comment is attached to the declaration (FR-002). */
   readonly documented: boolean;
@@ -100,10 +147,9 @@ export interface SymbolRow {
 /**
  * The `doc_coverage` method entry (FR-001 to FR-004; the analyze-shaped
  * surface T018 established): the serialized SymbolRow array — one row
- * per in-scope exported body-bearing function declaration, assembled in
- * the (file, line, name) total order and mapped through
- * serializeSymbolRow so every element of the returned array is
- * wire-final.
+ * per in-scope symbol of the FR-002 surface — assembled in the (file,
+ * line, name) total order and mapped through serializeSymbolRow so
+ * every element of the returned array is wire-final.
  *
  * The returned array — not a {symbols: [...]} wrapper — follows the
  * computeComplexity split: the T009 server handler wraps the array into
@@ -209,8 +255,8 @@ const SYMBOL_KINDS: ReadonlySet<string> = new Set<SymbolKind>([
 ]);
 
 /**
- * The US1 slice of the symbol-surface walk: one row per body-bearing
- * exported top-level function declaration of the in-scope sources.
+ * The symbol-surface walk (FR-002): the rows for every documented-symbol
+ * surface member of the in-scope sources.
  *
  * Scope narrowing (FR-004): program mode can pull pattern-excluded
  * in-root transitive imports into the program — the behavior
@@ -220,13 +266,8 @@ const SYMBOL_KINDS: ReadonlySet<string> = new Set<SymbolKind>([
  * drag in: file-set parity with analyze stays structural (research R2;
  * the parity T003's export widening was cut for).
  *
- * The three-clause filter is the US1 surface definition: overload
- * signatures and ambient declarations carry no body and produce no row
- * (the implementation signature is the symbol's documentation site, per
- * the overload edge case), and the Export modifier bit covers export
- * default — the composite flag includes Export. T021's extension adds
- * kind routing here (const/let/var, class, type/interface/enum, class
- * members) without changing the loop's shape.
+ * @param prepared The shared analysis preparation (root, context, scope).
+ * @returns The symbol rows; docCoverage sorts them into wire order.
  */
 function collectSymbolRows(prepared: PreparedAnalysis): SymbolRow[] {
   const rows: SymbolRow[] = [];
@@ -236,53 +277,349 @@ function collectSymbolRows(prepared: PreparedAnalysis): SymbolRow[] {
     if (!inScope.has(relPath)) {
       continue;
     }
-    for (const statement of sourceFile.statements) {
-      if (
-        !isFunctionDeclaration(statement) ||
-        statement.body === undefined ||
-        (statement.modifierFlags & ModifierFlags.Export) === 0
-      ) {
-        continue;
-      }
-      rows.push(functionRowOf(relPath, sourceFile, statement));
-    }
+    collectFileRows(relPath, sourceFile, rows);
   }
   return rows;
 }
 
 /**
- * Builds the row for one exported body-bearing function declaration.
+ * One file's rows, in two passes (FR-002's identifier-default rule).
  *
- * The name fallback: an anonymous body-bearing function declaration is
- * grammatically only `export default function`, and FR-001 pins the
- * literal "default" as its name. The snippet owner is the LAST attached
- * JSDoc — the compiler's own ownership convention (its
- * filterOwnedJSDocTags resolves multiple comments on one node to the
- * final one) — while `documented` reflects any attachment, so a
- * tags-only final comment still reports documented: true with the
- * snippet omitted (FR-003's tags-only edge).
+ * Pass one walks the module-level statements: every exported declaration
+ * emits its rows. Pass two resolves `export default` naming an
+ * identifier — the only default form that names a declaration — against
+ * an index of the file's module-level declarations, emitting the
+ * referenced declaration's rows under its own name, kind, and
+ * documentation (a default export with a declared name uses the name).
+ * The emitted set deduplicates: a declaration both exported and named by
+ * a default export produces one row set, and a declaration whose
+ * routing emits nothing (an overload signature) emits nothing in either
+ * pass — the body gate lives in the shared routing, not the export
+ * spelling.
  *
- * @param relPath Root-relative POSIX path of the declaring file.
- * @param sourceFile The declaring source file (line math).
- * @param declaration The exported body-bearing function declaration.
- * @returns The SymbolRow for the declaration.
+ * Determinism: both passes iterate statement order, and the final
+ * (file, line, name) sort makes append order immaterial to the wire.
+ *
+ * @param relPath Root-relative POSIX path of the file.
+ * @param sourceFile The parsed source.
+ * @param rows The accumulator rows are appended to.
  */
-function functionRowOf(
+function collectFileRows(
   relPath: string,
   sourceFile: SourceFile,
-  declaration: FunctionDeclaration,
+  rows: SymbolRow[],
+): void {
+  const emitted = new Set<Node>();
+  const declarations = indexModuleDeclarations(sourceFile);
+  const defaulted: string[] = [];
+  for (const statement of sourceFile.statements) {
+    if (isExportedDeclaration(statement)) {
+      emitSymbolRows(statement, relPath, sourceFile, rows, emitted);
+      continue;
+    }
+    if (
+      isExportAssignment(statement) &&
+      !statement.isExportEquals &&
+      isIdentifier(statement.expression)
+    ) {
+      defaulted.push(statement.expression.text);
+    }
+  }
+  for (const name of defaulted) {
+    const declaration = declarations.get(name);
+    if (declaration !== undefined && !emitted.has(declaration)) {
+      emitSymbolRows(declaration, relPath, sourceFile, rows, emitted);
+    }
+  }
+}
+
+/**
+ * Name-to-declaration index of a file's module-level statements — the
+ * lookup surface `export default` naming an identifier resolves against.
+ * Names come from the declarations themselves (function, class, type
+ * alias, interface, enum, and identifier-bound variable declarations);
+ * the last statement of a duplicate name wins, matching the overload-set
+ * convention that the implementation signature follows its overloads —
+ * and the body gate in emitSymbolRows, not the index, decides what a
+ * looked-up overload set emits.
+ *
+ * @param sourceFile The parsed source.
+ * @returns The declarations keyed by declared name.
+ */
+function indexModuleDeclarations(sourceFile: SourceFile): Map<string, Node> {
+  const declarations = new Map<string, Node>();
+  for (const statement of sourceFile.statements) {
+    if (isFunctionDeclaration(statement) && statement.name !== undefined) {
+      declarations.set(statement.name.text, statement);
+      continue;
+    }
+    if (isClassDeclaration(statement) && statement.name !== undefined) {
+      declarations.set(statement.name.text, statement);
+      continue;
+    }
+    if (
+      isTypeAliasDeclaration(statement) ||
+      isInterfaceDeclaration(statement) ||
+      isEnumDeclaration(statement)
+    ) {
+      declarations.set(statement.name.text, statement);
+      continue;
+    }
+    if (isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (isIdentifier(declaration.name)) {
+          declarations.set(declaration.name.text, declaration);
+        }
+      }
+    }
+  }
+  return declarations;
+}
+
+/**
+ * Whether a statement is one of the declaration forms the FR-002 surface
+ * routes, carrying the Export modifier — the composite flag whose bits
+ * cover both `export` and `export default` (verified against
+ * typescript 7.0.2: ExportDefault is Export | Default), so one test
+ * admits both spellings. The export-modifier shape extends
+ * evidence.ts's hasExportModifier with the type, interface, and enum
+ * declaration forms the signal pipeline never reads.
+ *
+ * @param statement The module-level statement to test.
+ * @returns True when the statement is an exported routed declaration.
+ */
+function isExportedDeclaration(statement: Node): boolean {
+  return (
+    (isFunctionDeclaration(statement) ||
+      isClassDeclaration(statement) ||
+      isVariableStatement(statement) ||
+      isTypeAliasDeclaration(statement) ||
+      isInterfaceDeclaration(statement) ||
+      isEnumDeclaration(statement)) &&
+    (statement.modifierFlags & ModifierFlags.Export) !== 0
+  );
+}
+
+/**
+ * FR-002's routing table: the rows one module-level declaration emits.
+ * Both file passes converge here — an exported statement and the
+ * declaration an `export default` names route identically, so a symbol's
+ * row never depends on which spelling exported it.
+ *
+ * Routing: a VariableStatement fans out to its declarations (a
+ * multi-declarator statement exports each); a function declaration with
+ * a body emits a "function" row — an anonymous one is grammatically only
+ * `export default function`, so FR-001's literal "default" names it —
+ * while a body-less overload or ambient signature emits none, the
+ * implementation signature being the symbol's documentation site; a
+ * variable declaration with an identifier name emits a row whose kind
+ * the declaration keyword and initializer shape decide (variableRowKind)
+ * — a destructuring pattern binds many spellings to no single symbol
+ * and emits none; a class declaration emits a "class" row plus its
+ * public method members' rows; a type alias, interface, or enum emits a
+ * single "type" row — interface and enum members are not symbols of the
+ * documentation surface. Any other node emits nothing.
+ *
+ * @param node The statement or declaration to route.
+ * @param relPath Root-relative POSIX path of the declaring file.
+ * @param sourceFile The declaring source (line math, member names).
+ * @param rows The accumulator rows are appended to.
+ * @param emitted The declarations that have emitted; the dedup surface
+ * for the identifier-default pass.
+ */
+function emitSymbolRows(
+  node: Node,
+  relPath: string,
+  sourceFile: SourceFile,
+  rows: SymbolRow[],
+  emitted: Set<Node>,
+): void {
+  if (isVariableStatement(node)) {
+    for (const declaration of node.declarationList.declarations) {
+      emitSymbolRows(declaration, relPath, sourceFile, rows, emitted);
+    }
+    return;
+  }
+  if (isFunctionDeclaration(node)) {
+    if (node.body !== undefined) {
+      emitted.add(node);
+      rows.push(
+        symbolRow(relPath, sourceFile, node, node.name?.text ?? "default", "function"),
+      );
+    }
+    return;
+  }
+  if (isVariableDeclaration(node)) {
+    if (isIdentifier(node.name)) {
+      emitted.add(node);
+      rows.push(
+        symbolRow(relPath, sourceFile, node, node.name.text, variableRowKind(node)),
+      );
+    }
+    return;
+  }
+  if (isClassDeclaration(node)) {
+    emitted.add(node);
+    rows.push(
+      symbolRow(relPath, sourceFile, node, node.name?.text ?? "default", "class"),
+    );
+    emitClassMemberRows(node, relPath, sourceFile, rows);
+    return;
+  }
+  if (
+    isTypeAliasDeclaration(node) ||
+    isInterfaceDeclaration(node) ||
+    isEnumDeclaration(node)
+  ) {
+    emitted.add(node);
+    rows.push(symbolRow(relPath, sourceFile, node, node.name.text, "type"));
+  }
+}
+
+/**
+ * The class elements that carry executable declarations: methods,
+ * constructors, and property accessors — the FR-002 method surface.
+ * Property declarations, index signatures, and static blocks are not
+ * members of it.
+ */
+type ClassMethodLike =
+  | MethodDeclaration
+  | ConstructorDeclaration
+  | GetAccessorDeclaration
+  | SetAccessorDeclaration;
+
+/**
+ * Whether a class element is one of the method-like declarations.
+ *
+ * @param member The class element to test.
+ * @returns True when the element declares a method-like member.
+ */
+function isClassMethodLike(member: Node): member is ClassMethodLike {
+  return (
+    isMethodDeclaration(member) ||
+    isConstructorDeclaration(member) ||
+    isGetAccessorDeclaration(member) ||
+    isSetAccessorDeclaration(member)
+  );
+}
+
+/**
+ * The public method surface of one exported class (FR-002): methods,
+ * constructors, and accessors emit "method" rows; every other class
+ * element — property declarations, index signatures, static blocks —
+ * emits none.
+ *
+ * Exclusion is the accessibility contract, not a heuristic: the
+ * private/protected modifier bits and #private names (PrivateIdentifier
+ * — which carries no modifier bit at all, verified against typescript
+ * 7.0.2, so the name's node kind is the only reliable test) mark
+ * members no consumer of the exported surface can see. Body-less
+ * members emit only when abstract: an overload signature has no
+ * documentation site of its own (its implementation is the symbol), but
+ * an abstract method is the declaration of the symbol itself. Static
+ * public methods are part of the exported surface and included. A
+ * getter/setter pair is two declarations and emits two rows, one per
+ * accessor line. Constructors have no name node — the literal
+ * "constructor" is the row name; other members take their source
+ * spelling through propertyNameText, the same identity surface
+ * ExtractionRecord uses, so doc rows and extraction records agree.
+ *
+ * @param cls The exported class declaration.
+ * @param relPath Root-relative POSIX path of the declaring file.
+ * @param sourceFile The declaring source (line math, member names).
+ * @param rows The accumulator rows are appended to.
+ */
+function emitClassMemberRows(
+  cls: ClassDeclaration,
+  relPath: string,
+  sourceFile: SourceFile,
+  rows: SymbolRow[],
+): void {
+  for (const member of cls.members) {
+    if (!isClassMethodLike(member)) {
+      continue;
+    }
+    if ((member.modifierFlags & ModifierFlags.NonPublicAccessibilityModifier) !== 0) {
+      continue;
+    }
+    if (!isConstructorDeclaration(member) && isPrivateIdentifier(member.name)) {
+      continue;
+    }
+    if (
+      member.body === undefined &&
+      (member.modifierFlags & ModifierFlags.Abstract) === 0
+    ) {
+      continue;
+    }
+    const name = isConstructorDeclaration(member)
+      ? "constructor"
+      : propertyNameText(member.name, sourceFile);
+    rows.push(symbolRow(relPath, sourceFile, member, name, "method"));
+  }
+}
+
+/**
+ * FR-002's kind routing for one variable declaration, decided by the
+ * declaration keyword and the initializer's shape: let and var are
+ * reassignable bindings — "variable" — regardless of initializer (the
+ * table routes by keyword); a const with a function-like initializer
+ * (arrow or function expression, generator expressions included — one
+ * node kind) names a function — "function"; any other const is a value
+ * — "constant". The keyword comes from the declaration list's NodeFlags
+ * (Const = 2, verified against typescript 7.0.2), the same flag surface
+ * the compiler's own binder reads.
+ *
+ * @param declaration The variable declaration to classify.
+ * @returns The row kind: function, constant, or variable.
+ */
+function variableRowKind(declaration: VariableDeclaration): SymbolKind {
+  if ((declaration.parent.flags & NodeFlags.Const) === 0) {
+    return "variable";
+  }
+  const initializer = declaration.initializer;
+  if (
+    initializer !== undefined &&
+    (isArrowFunction(initializer) || isFunctionExpression(initializer))
+  ) {
+    return "function";
+  }
+  return "constant";
+}
+
+/**
+ * Builds one symbol row: identity from the arguments, position from the
+ * node's first token, and the documentation fact from the JSDoc
+ * attached to the node (attachedJsDocs).
+ *
+ * The snippet owner is the LAST attached JSDoc — the compiler's own
+ * ownership convention (its filterOwnedJSDocTags resolves multiple
+ * comments on one node to the final one) — while `documented` reflects
+ * any attachment, so a tags-only final comment still reports
+ * documented: true with the snippet omitted (FR-003's tags-only edge).
+ *
+ * @param relPath Root-relative POSIX path of the declaring file.
+ * @param sourceFile The declaring source (line math).
+ * @param node The declaration the row describes.
+ * @param name The symbol's row name.
+ * @param kind The symbol's row kind.
+ * @returns The SymbolRow for the declaration.
+ */
+function symbolRow(
+  relPath: string,
+  sourceFile: SourceFile,
+  node: Node,
+  name: string,
+  kind: SymbolKind,
 ): SymbolRow {
-  const jsDocs = attachedJsDocs(declaration);
+  const jsDocs = attachedJsDocs(node);
   const owner = jsDocs.at(-1);
   const docSnippet = owner !== undefined ? docSnippetOf(owner) : undefined;
   return {
-    name: declaration.name?.text ?? "default",
+    name,
     package: derivePackage(relPath),
-    kind: "function",
+    kind,
     file: relPath,
-    line:
-      sourceFile.getLineAndCharacterOfPosition(declaration.getStart(sourceFile)).line +
-      1,
+    line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
     documented: jsDocs.length > 0,
     ...(docSnippet !== undefined ? { doc_snippet: docSnippet } : {}),
   };
@@ -290,18 +627,31 @@ function functionRowOf(
 
 /**
  * The JSDoc comments attached to a declaration, read from the node's own
- * jsDoc array — the same compiler surface evidence.ts reads. The array
- * is typed readonly Node[], so isJSDoc filters it down to the JSDoc
- * subset. Attachment to the declaration itself is complete for US1:
- * function declarations are statements, so the compiler's parent-hosting
- * walk (nextJSDocHost) never applies — that walk matters for expression
- * and class-member shapes, which arrive with T021.
+ * jsDoc array — the same compiler surface evidence.ts reads — and then
+ * from each hosting parent up the compiler's parent-hosting chain
+ * (nextJSDocHost), innermost first. The hosting chain is what makes a
+ * variable declaration's statement comment its documentation: the
+ * compiler attaches a statement-leading comment to the statement and
+ * considers it hosted by the declaration. For every other routed shape
+ * — statements, class members, type declarations — the walk ends at the
+ * enclosing source file or class body (evidence.ts documents the same
+ * stop), so their rows read their own comments alone.
  *
- * @param declaration The declaration whose attached comments are read.
+ * @param node The declaration whose attached comments are read.
  * @returns The attached JSDoc comments, in attachment order.
  */
-function attachedJsDocs(declaration: FunctionDeclaration): readonly JSDoc[] {
-  return (declaration.jsDoc ?? []).filter(isJSDoc);
+function attachedJsDocs(node: Node): readonly JSDoc[] {
+  const docs: JSDoc[] = [];
+  let current: Node | undefined = node;
+  while (current !== undefined) {
+    for (const attached of current.jsDoc ?? []) {
+      if (isJSDoc(attached)) {
+        docs.push(attached);
+      }
+    }
+    current = nextJSDocHost(current);
+  }
+  return docs;
 }
 
 /**
