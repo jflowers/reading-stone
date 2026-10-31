@@ -4,7 +4,9 @@ import { analyze, classifySignals } from "./analysis.js";
 import { computeComplexity } from "./complexity.js";
 import { parseCoverage } from "./coverage.js";
 import { discover, InvalidRootPathError } from "./discovery.js";
+import { docCoverage } from "./doc-coverage.js";
 import {
+  type DocCoverageResult,
   errorResponse,
   INTERNAL_ERROR,
   INVALID_PARAMS,
@@ -419,6 +421,45 @@ export class Server {
           patterns,
           this.stderr,
         );
+        return result;
+      } catch (error) {
+        throw mapRootPathError(error) ?? error;
+      }
+    });
+    // `doc_coverage` (spec 005 FR-001 to FR-004 and FR-012; protocol.md
+    // v1.2.0's doc_coverage schema): the SAME shared analysis-params
+    // validation as analyze/complexity/coverage/classify_signals/
+    // test_mapping — one validator, one error table, never a copy —
+    // then the T008 entry: the exported-symbol documentation walk over
+    // the one shared analysis pipeline, wrapped as the one-key
+    // `{"symbols": [...]}` result. Like classify_signals and
+    // test_mapping, the method is capability-gated from the platform's
+    // side (Gaze calls it when and only when the initialize flag is
+    // true, spec 005 FR-013), so initializeResult() advertises
+    // `doc_coverage: true` in the same protocol-state unit as this
+    // registration — no commit advertises a capability the dispatch
+    // table lacks. The method registers unconditionally: no runtime
+    // toggle. Registering it shrinks the reserved -32601 set to exactly
+    // analyze/stream + cognitive_complexity (FR-012).
+    dispatch.set("doc_coverage", async (params) => {
+      const { rootPath, patterns } = validateAnalysisParams(params);
+      try {
+        // docCoverage (T008) runs the identical prepareAnalysis stages
+        // analyze runs, so FR-004's file-set parity with analyze's
+        // source arm is structural. Its result is already the
+        // serialized, wire-shaped row array — sorted by (file, line,
+        // name) inside the entry — so the sorted-key envelope
+        // serializer only re-orders keys: repeated requests stay
+        // byte-identical (spec 005 US1 scenario 3). The wrapper is
+        // typed against DocCoverageResult and the entry returns the
+        // bare `symbols` payload (the computeComplexity split), so the
+        // one-key `{"symbols": [...]}` wire shape is compile-time
+        // enforced end to end. Skip diagnostics flow to the server's
+        // stderr, never stdout, which is reserved for JSON-RPC
+        // responses (spec 001 FR-017).
+        const result: DocCoverageResult = {
+          symbols: await docCoverage(rootPath, patterns, this.stderr),
+        };
         return result;
       } catch (error) {
         throw mapRootPathError(error) ?? error;
