@@ -494,11 +494,12 @@ describe("server: analyze", () => {
   // tests/protocol.test.ts pins the unit output — this literal pin makes a
   // capability flip visible through the server wire too. The pinned state
   // includes spec 003's classify_signals flip (FR-015; T030), spec 004's
-  // test_mapping flip (FR-014; T020), and spec 005's doc_coverage flip
-  // (FR-013; T009) — each landing registration and flag as one
-  // protocol-state unit, each keeping this pin red with its story's server
-  // suite until the flip landed (the visibility working exactly as
-  // designed); cognitive_complexity stays false until US2's T017.
+  // test_mapping flip (FR-014; T020), and spec 005's doc_coverage and
+  // cognitive_complexity flips (FR-013; T009, T017) — each landing
+  // registration and flag as one protocol-state unit, each keeping this
+  // pin red with its story's server suite until the flip landed (the
+  // visibility working exactly as designed); only streaming remains
+  // false, gating the unimplemented analyze/stream.
   it("leaves the initialize capability response unchanged", async () => {
     const { responses } = await drive([INIT]);
     expect(responses[0]?.result).toEqual({
@@ -512,7 +513,7 @@ describe("server: analyze", () => {
         classify_signals: true,
         streaming: false,
         doc_coverage: true,
-        cognitive_complexity: false,
+        cognitive_complexity: true,
       },
     });
   });
@@ -1230,7 +1231,7 @@ describe("server: classify_signals", () => {
       classify_signals: true,
       streaming: false,
       doc_coverage: true,
-      cognitive_complexity: false,
+      cognitive_complexity: true,
     });
   });
 });
@@ -1492,7 +1493,7 @@ describe("server: test_mapping", () => {
       classify_signals: true,
       streaming: false,
       doc_coverage: true,
-      cognitive_complexity: false,
+      cognitive_complexity: true,
     });
   });
 });
@@ -1794,8 +1795,8 @@ describe("server: doc_coverage", () => {
   // flag drift visible through the server wire, mirroring the analyze
   // block's FR-028 pin and the classify_signals/test_mapping pins above;
   // tests/protocol.test.ts (T006) pins the unit output the same way.
-  // `cognitive_complexity` stays false until US2's T017 lands its own
-  // protocol-state unit.
+  // `cognitive_complexity` flips true with US2's T017 protocol-state unit
+  // (pinned by the "server: cognitive_complexity" block below).
   it("advertises doc_coverage in the initialize capability response", async () => {
     const { responses } = await drive([INIT]);
     const result = responses[0]?.result as Record<string, unknown> | undefined;
@@ -1805,7 +1806,386 @@ describe("server: doc_coverage", () => {
       classify_signals: true,
       streaming: false,
       doc_coverage: true,
-      cognitive_complexity: false,
+      cognitive_complexity: true,
+    });
+  });
+});
+
+// The cognitive_complexity result's wire rows, projected to nothing —
+// every field is contract-pinned (005 FR-005; the WireSymbol stance:
+// nothing implementation-defined to project away), so the row type IS
+// the wire row and the exact-row comparisons below see every key. The
+// identity key is spelled `function` — the coverage method's row shape
+// and the protocol document's schema over sibling-method symmetry
+// (Assumption 6) — never `name`. The result object must carry exactly
+// one key — `functions` — so an error response or a malformed result
+// fails loud here, never a soft empty match: any -32601 or -32602
+// answer surfaces as the explicit absence of a result rather than a
+// vacuous pass (the resultSignals/resultSymbols discipline).
+interface WireCognitiveRow {
+  readonly package: string;
+  readonly function: string;
+  readonly file: string;
+  readonly line: number;
+  readonly cognitive_complexity: number;
+}
+
+function resultCognitiveRows(
+  response: Record<string, unknown>,
+): readonly WireCognitiveRow[] {
+  const result = (response.result ?? {}) as Record<string, unknown>;
+  expect(Object.keys(result).sort()).toEqual(["functions"]);
+  expect(Array.isArray(result.functions)).toBe(true);
+  return result.functions as readonly WireCognitiveRow[];
+}
+
+describe("server: cognitive_complexity", () => {
+  const activeFixtures: FixtureTree[] = [];
+  const lockedDirectories: string[] = [];
+
+  // Creates a fixture tree registered for afterEach cleanup; returns the
+  // tree's root path to use as the cognitive_complexity request's root_path.
+  async function fixtureTree(files: Readonly<Record<string, string>>): Promise<string> {
+    const tree = await createFixtureTree(files);
+    activeFixtures.push(tree);
+    return tree.root;
+  }
+
+  afterEach(async () => {
+    // Recursive cleanup cannot descend into a chmod-000 directory, so every
+    // locked directory is unlocked before its fixture tree is removed.
+    for (const directory of lockedDirectories.splice(0)) {
+      await chmod(directory, 0o755);
+    }
+    await Promise.all(activeFixtures.splice(0).map((tree) => tree.cleanup()));
+  });
+
+  // The canned tree (005 FR-005): the multi-file parity tree from
+  // tests/cognitive.test.ts (T012) — decide/handlers/mutate/math mixing
+  // declaration, method, and arrow forms with nesting, plus a test file
+  // that contributes no rows on any surface — so the exact row set below
+  // pins the cross-file order, the method and arrow extraction forms, and
+  // the test file's exclusion through the wire. The tsconfig boots
+  // program mode (the classify_signals/test_mapping/doc_coverage
+  // canned-tree stance for capability-gated methods); scoring is
+  // syntax-only, so parse-only mode answers the identical rows (US2
+  // scenario 4 — pinned at the pipeline surface by tests/cognitive.test.ts).
+  const TSCONFIG = '{"compilerOptions": {"strict": true, "target": "ES2022"}}';
+  const COGNITIVE_SOURCES: Readonly<Record<string, string>> = {
+    "tsconfig.json": TSCONFIG,
+    "src/decide.ts": [
+      "export function classify(values: number[]): string {", // 1
+      "  let positive = 0;", // 2
+      "  for (const value of values) {", // 3
+      "    if (value > 0) {", // 4
+      "      positive += 1;", // 5
+      "    }", // 6
+      "  }", // 7
+      '  const describe = (count: number): string => (count > 5 ? "many" : "few");', // 8
+      "  return describe(positive);", // 9
+      "}", // 10
+      "", // 11
+    ].join("\n"),
+    "src/handlers.ts": [
+      "export const handlers = {", // 1
+      "  onSave(event: string): boolean {", // 2
+      '    if (event === "save") {', // 3
+      "      return true;", // 4
+      "    }", // 5
+      "    return false;", // 6
+      "  },", // 7
+      "  onLoad(event: string): boolean {", // 8
+      '    return event === "load";', // 9
+      "  },", // 10
+      "};", // 11
+      "", // 12
+    ].join("\n"),
+    "src/mutate.ts": [
+      "export class Counter {", // 1
+      "  count = 0;", // 2
+      "", // 3
+      "  bump(): void {", // 4
+      "    this.count = this.count + 1;", // 5
+      "  }", // 6
+      "}", // 7
+      "", // 8
+      "export function reset(counter: Counter): void {", // 9
+      "  counter.count = 0;", // 10
+      "}", // 11
+      "", // 12
+    ].join("\n"),
+    "src/utils/math.ts": [
+      "export function add(a: number, b: number): number {", // 1
+      "  return a + b;", // 2
+      "}", // 3
+      "", // 4
+    ].join("\n"),
+    "tests/math.test.ts": [
+      'import { expect, it } from "vitest";', // 1
+      'import { add } from "../src/utils/math.js";', // 2
+      "", // 3
+      'it("adds", () => {', // 4
+      "  expect(add(1, 2)).toBe(3);", // 5
+      "});", // 6
+      "", // 7
+    ].join("\n"),
+  };
+  // The exact row set: the T012 parity rows plus the shared package
+  // derivation — classify = for-of 1 + nested if 2; describe = ternary 1;
+  // onSave = if 1; onLoad, bump, reset, and add have no structural
+  // constructs — in (file, line, name) order, keyed `function` (FR-005).
+  const EXPECTED_FUNCTIONS: readonly WireCognitiveRow[] = [
+    {
+      package: "src.decide",
+      function: "classify",
+      file: "src/decide.ts",
+      line: 1,
+      cognitive_complexity: 3,
+    },
+    {
+      package: "src.decide",
+      function: "describe",
+      file: "src/decide.ts",
+      line: 8,
+      cognitive_complexity: 1,
+    },
+    {
+      package: "src.handlers",
+      function: "onSave",
+      file: "src/handlers.ts",
+      line: 2,
+      cognitive_complexity: 1,
+    },
+    {
+      package: "src.handlers",
+      function: "onLoad",
+      file: "src/handlers.ts",
+      line: 8,
+      cognitive_complexity: 0,
+    },
+    {
+      package: "src.mutate",
+      function: "bump",
+      file: "src/mutate.ts",
+      line: 4,
+      cognitive_complexity: 0,
+    },
+    {
+      package: "src.mutate",
+      function: "reset",
+      file: "src/mutate.ts",
+      line: 9,
+      cognitive_complexity: 0,
+    },
+    {
+      package: "src.utils.math",
+      function: "add",
+      file: "src/utils/math.ts",
+      line: 1,
+      cognitive_complexity: 0,
+    },
+  ];
+
+  it("round-trips a valid cognitive_complexity request with the exact row set", {
+    timeout: 60_000,
+  }, async () => {
+    const root = await fixtureTree(COGNITIVE_SOURCES);
+    const { responses, stderr } = await drive([
+      request(81, "cognitive_complexity", { root_path: root }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(81);
+    expect(resultCognitiveRows(responses[0] ?? {})).toEqual(EXPECTED_FUNCTIONS);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["absent params", undefined],
+    ["null params", null],
+    ["array params", []],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(82, "cognitive_complexity", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must be an object",
+    );
+    expect(responses[0]?.id).toBe(82);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["missing root_path", {}],
+    ["non-string root_path", { root_path: 42 }],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(83, "cognitive_complexity", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: root_path must be a string",
+    );
+    expect(responses[0]?.id).toBe(83);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["non-array patterns", { root_path: "/abs/project", patterns: "src/**/*.ts" }],
+    ["number patterns", { root_path: "/abs/project", patterns: 42 }],
+    [
+      "patterns array with a non-string element",
+      { root_path: "/abs/project", patterns: ["src", 7] },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(84, "cognitive_complexity", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: patterns must be an array of strings",
+    );
+    expect(responses[0]?.id).toBe(84);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
+    ["an extra key beside root_path", { root_path: "/abs/project", extra: true }],
+    [
+      "an extra key beside root_path and patterns",
+      { root_path: "/abs/project", patterns: ["src/**"], extra: true },
+    ],
+  ])("rejects %s with -32602", async (_label, params) => {
+    const { responses, stderr } = await drive([
+      request(85, "cognitive_complexity", params),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      "Invalid params: params must contain only root_path and patterns",
+    );
+    expect(responses[0]?.id).toBe(85);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a nonexistent root_path with -32602", async () => {
+    const root = await fixtureTree({});
+    const missing = join(root, "does-not-exist");
+    const { responses, stderr } = await drive([
+      request(86, "cognitive_complexity", { root_path: missing }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${missing}`,
+    );
+    expect(responses[0]?.id).toBe(86);
+    expect(stderr).toBe("");
+  });
+
+  it("rejects a non-directory root_path with -32602", async () => {
+    const root = await fixtureTree({ "not-a-dir.ts": "export {};\n" });
+    const file = join(root, "not-a-dir.ts");
+    const { responses, stderr } = await drive([
+      request(87, "cognitive_complexity", { root_path: file }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${file}`,
+    );
+    expect(responses[0]?.id).toBe(87);
+    expect(stderr).toBe("");
+  });
+
+  it.skipIf(runningAsRoot)(
+    "rejects an inaccessible root_path with -32602",
+    async () => {
+      const root = await fixtureTree({
+        "locked/nested/a.ts": "export const a = 1;\n",
+      });
+      const locked = join(root, "locked");
+      const nested = join(locked, "nested");
+      await chmod(locked, 0o000);
+      lockedDirectories.push(locked);
+      const { responses, stderr } = await drive([
+        request(88, "cognitive_complexity", { root_path: nested }),
+      ]);
+      expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+      expect(errorBody(responses[0] ?? {}).message).toBe(
+        `Invalid params: root_path is not a directory: ${nested}`,
+      );
+      expect(responses[0]?.id).toBe(88);
+      expect(stderr).toBe("");
+    },
+  );
+
+  it("echoes the cwd-resolved path for a relative root_path", async () => {
+    const relative = "no-such-directory-cognitive";
+    const { responses, stderr } = await drive([
+      request(89, "cognitive_complexity", { root_path: relative }),
+    ]);
+    expect(errorBody(responses[0] ?? {}).code).toBe(-32602);
+    expect(errorBody(responses[0] ?? {}).message).toBe(
+      `Invalid params: root_path is not a directory: ${resolve(relative)}`,
+    );
+    expect(responses[0]?.id).toBe(89);
+    expect(stderr).toBe("");
+  });
+
+  it("answers a repeated request with byte-identical response lines", {
+    timeout: 60_000,
+  }, async () => {
+    // US2 scenario 1 / Constitution I: two full pipeline runs over the
+    // same tree produce identical response bytes — no timestamps, no
+    // environment-dependent data.
+    const root = await fixtureTree(COGNITIVE_SOURCES);
+    const line = request(90, "cognitive_complexity", { root_path: root });
+    const { responses, rawLines, stderr } = await drive([line, line]);
+    expect(responses).toHaveLength(2);
+    expect(rawLines).toHaveLength(2);
+    expect(rawLines[0]).toBe(rawLines[1]);
+    expect(responses[0]?.id).toBe(90);
+    expect(resultCognitiveRows(responses[0] ?? {})).toEqual(EXPECTED_FUNCTIONS);
+    expect(stderr).toBe("");
+  });
+
+  it("answers a pattern set matching nothing with an empty functions array", {
+    timeout: 60_000,
+  }, async () => {
+    // US2 scenario 3 / spec edge case: a `patterns` set matching no file
+    // is a success — `{"functions": []}` — never an error. The tree still
+    // carries its tsconfig, so the request genuinely runs the pipeline
+    // and answers an empty row set rather than failing early.
+    const root = await fixtureTree(COGNITIVE_SOURCES);
+    const { responses, stderr } = await drive([
+      request(91, "cognitive_complexity", { root_path: root, patterns: ["nope"] }),
+    ]);
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.jsonrpc).toBe("2.0");
+    expect(responses[0]?.id).toBe(91);
+    expect(resultCognitiveRows(responses[0] ?? {})).toEqual([]);
+    expect(stderr).toBe("");
+  });
+
+  // 005 FR-013 / US2: cognitive_complexity is capability-gated from the
+  // platform's side (Gaze calls it when and only when the initialize flag
+  // is true), so the initialize handshake must advertise it. The literal
+  // pin — not `initializeResult()`, which would be tautologically green —
+  // makes a flag drift visible through the server wire, mirroring the
+  // analyze block's FR-028 pin and the classify_signals/test_mapping/
+  // doc_coverage pins above; tests/protocol.test.ts (T014) pins the unit
+  // output the same way. With T017's flip only `streaming` remains false,
+  // gating the unimplemented analyze/stream — the reserved set's lone
+  // member.
+  it("advertises cognitive_complexity in the initialize capability response", async () => {
+    const { responses } = await drive([INIT]);
+    const result = responses[0]?.result as Record<string, unknown> | undefined;
+    expect(result?.capabilities).toEqual({
+      discover: true,
+      test_mapping: true,
+      classify_signals: true,
+      streaming: false,
+      doc_coverage: true,
+      cognitive_complexity: true,
     });
   });
 });
@@ -1906,10 +2286,13 @@ describe("server: dispatch", () => {
   // block above — T009 landed registration with the capability flip as
   // one protocol-state unit, so malformed params answer its -32602
   // matrix there, never the -32601 this case asserts — and is dropped
+  // for the same reason.
+  // `cognitive_complexity` is pinned the same way by the
+  // "server: cognitive_complexity" block above — T017 landed registration
+  // with the capability flip as one protocol-state unit — and is dropped
   // for the same reason, shrinking the reserved set to spec 005 FR-012's
-  // intermediate pair: analyze/stream (behind the streaming flag) and
-  // cognitive_complexity (until US2's T017).
-  it.each(["analyze/stream", "cognitive_complexity"])(
+  // terminal singleton: analyze/stream alone, behind the streaming flag.
+  it.each(["analyze/stream"])(
     "answers reserved method %s with -32601",
     async (method) => {
       const { responses } = await drive([request(6, method)]);
