@@ -69,12 +69,12 @@ The system SHALL accept an `initialize` request whose `params` is a JSON object 
 
 ### Requirement: initialize result schema
 
-The system SHALL return an `initialize` result with exact field names: `analyzer_name` = `"reading-stone"`, `language` = `"typescript"`, `language_version` = the running interpreter's version from `process.versions.node`, `protocol_version` = the string `"1.2.0"`, and `capabilities` with all six keys `discover`, `test_mapping`, `classify_signals`, `streaming`, `doc_coverage`, and `cognitive_complexity` present — `discover` = `true` (the `discover` method is implemented and advertised), `classify_signals` = `true` (the `classify_signals` method is implemented and advertised), `test_mapping` = `true` (the `test_mapping` method is implemented and advertised), and the other three flags `false`. The `capabilities` object is the negotiable/optional surface; the core methods (`analyze`, `complexity`, `coverage`) are not gated by a capability flag. The `discover` capability gates the `discover` method, the `classify_signals` capability gates the `classify_signals` method, the `test_mapping` capability gates the `test_mapping` method, the `streaming` capability gates the `analyze/stream` method, the `doc_coverage` capability gates the `doc_coverage` method, and the `cognitive_complexity` capability gates the `cognitive_complexity` method. The result is a plain object built by a helper; `JsonRpcSuccess.result` SHALL be typed `object | null`.
+The system SHALL return an `initialize` result with exact field names: `analyzer_name` = `"reading-stone"`, `language` = `"typescript"`, `language_version` = the running interpreter's version from `process.versions.node`, `protocol_version` = the string `"1.2.0"`, and `capabilities` with all six keys `discover`, `test_mapping`, `classify_signals`, `streaming`, `doc_coverage`, and `cognitive_complexity` present — `discover` = `true` (the `discover` method is implemented and advertised), `classify_signals` = `true` (the `classify_signals` method is implemented and advertised), `test_mapping` = `true` (the `test_mapping` method is implemented and advertised), `doc_coverage` = `true` (the `doc_coverage` method is implemented and advertised), and the other two flags `false`. The `capabilities` object is the negotiable/optional surface; the core methods (`analyze`, `complexity`, `coverage`) are not gated by a capability flag. The `discover` capability gates the `discover` method, the `classify_signals` capability gates the `classify_signals` method, the `test_mapping` capability gates the `test_mapping` method, the `streaming` capability gates the `analyze/stream` method, the `doc_coverage` capability gates the `doc_coverage` method, and the `cognitive_complexity` capability gates the `cognitive_complexity` method. The result is a plain object built by a helper; `JsonRpcSuccess.result` SHALL be typed `object | null`.
 
-#### Scenario: Capability flags are present with discover, classify_signals, and test_mapping true
+#### Scenario: Capability flags are present with discover, classify_signals, test_mapping, and doc_coverage true
 
 - **WHEN** `initialize` is called
-- **THEN** the result contains exactly the six capability keys `discover`, `test_mapping`, `classify_signals`, `streaming`, `doc_coverage`, and `cognitive_complexity`; `discover`, `classify_signals`, and `test_mapping` are `true` and the other three are `false`
+- **THEN** the result contains exactly the six capability keys `discover`, `test_mapping`, `classify_signals`, `streaming`, `doc_coverage`, and `cognitive_complexity`; `discover`, `classify_signals`, `test_mapping`, and `doc_coverage` are `true` and the other two are `false`
 
 #### Scenario: Protocol version is pinned
 
@@ -88,7 +88,7 @@ The system SHALL return an `initialize` result with exact field names: `analyzer
 
 #### Scenario: Optional methods are gated by their capability flags
 
-- **WHEN** a `doc_coverage` or `cognitive_complexity` request is sent while the corresponding capability flag is `false`
+- **WHEN** an `analyze/stream` or `cognitive_complexity` request is sent while the corresponding capability flag is `false`
 - **THEN** a `-32601` method not found error is returned
 
 ### Requirement: shutdown request params
