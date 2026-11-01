@@ -18,8 +18,8 @@ Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/st
 | `coverage` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — CoverageEntry records) |
 | `classify_signals` | Implemented (params `{root_path, patterns}`; result `{"signals": [...]}` — the raw classification signal feed) |
 | `test_mapping` | Implemented (params `{root_path, patterns}`; result `{"mappings": [...]}` — test-to-assertion MappingRows with pairing confidences and `side_effect_type` inference) |
-| `doc_coverage` | Not implemented (`-32601`) |
-| `cognitive_complexity` | Not implemented (`-32601`) |
+| `doc_coverage` | Implemented (params `{root_path, patterns}`; result `{"symbols": [...]}` — SymbolRows with the closed kind set `function | type | constant | variable | class | method`) |
+| `cognitive_complexity` | Implemented (params `{root_path, patterns}`; result `{"functions": [...]}` — CognitiveRows with SonarSource cognitive complexity scores) |
 
 `discover` is implemented and advertised via `capabilities.discover: true`.
 `analyze`, `complexity`, and `coverage` are implemented as core protocol
@@ -28,10 +28,12 @@ methods — not gated behind a capability flag — and share one params surface:
 `classify_signals` is implemented and advertised via
 `capabilities.classify_signals: true`; Gaze calls it only when that flag is
 true, with the same params surface. `test_mapping` is implemented and
-advertised via `capabilities.test_mapping: true` the same way. The
-remaining capability flags (`streaming`, `doc_coverage`,
-`cognitive_complexity`) are `false` at handshake; their methods are the
-roadmap — see `openspec/changes/`.
+advertised via `capabilities.test_mapping: true` the same way.
+`doc_coverage` and `cognitive_complexity` are implemented and advertised
+via `capabilities.doc_coverage: true` and
+`capabilities.cognitive_complexity: true` the same way. The remaining
+capability flag (`streaming`) is `false` at handshake, with
+`analyze/stream` the sole reserved method (`-32601`).
 
 The side effects `analyze` reports are governed by the disposition table:
 for each of the 48 canonical taxonomy types it records the tier, the
@@ -113,7 +115,7 @@ analyzers:
 ```text
 reading-stone/
 ├── src/
-│   ├── index.ts          # Package surface (VERSION + taxonomy/model/signal/mapping re-exports)
+│   ├── index.ts          # Package surface (VERSION + taxonomy/model/signal/mapping/doc-coverage/cognitive re-exports)
 │   ├── main.ts           # Entry point (reading-stone --stdio)
 │   ├── server.ts         # JSON-RPC server (stdin/stdout)
 │   ├── protocol.ts       # Request/response types
@@ -126,7 +128,9 @@ reading-stone/
 │   ├── extract.ts        # Table-driven function extraction (ExtractionRecord set)
 │   ├── detector.ts       # Side-effect detection rules + FunctionRecord assembly
 │   ├── complexity.ts     # Cyclomatic complexity engine (ComplexityEntry)
+│   ├── cognitive.ts      # SonarSource cognitive complexity engine (CognitiveRow)
 │   ├── coverage.ts       # Istanbul coverage-final.json artifact parser (CoverageEntry)
+│   ├── doc-coverage.ts   # Exported-symbol documentation coverage (SymbolRow, symbol-surface walk)
 │   ├── quality/          # Test-mapping pipeline (test_mapping method)
 │   │   ├── assertions.ts    # Assertion detection (vitest/jest expect chains, node:assert forms)
 │   │   ├── collect.ts       # Test-function collection (it/test/describe walk, qualified titles)
@@ -171,15 +175,27 @@ fixed transport bounds (not configurable in v1):
   unreadable, or invalid, `coverage` returns `{"functions": []}` and never
   errors (FR-025). It never runs the project's tests.
 - **Per-request pipeline cost** — each `analyze`, `complexity`,
-  `classify_signals`, or `test_mapping` request
-  boots a fresh TypeScript compiler context (tree walk, pre-read,
-  bootstrap, extraction) and disposes it before responding; no pipeline
-  state is reused across requests. `coverage` reads a pre-existing
-  artifact and is cheap.
+  `classify_signals`, `test_mapping`, `doc_coverage`, or
+  `cognitive_complexity` request boots a fresh TypeScript compiler context
+  (tree walk, pre-read, bootstrap, extraction) and disposes it before
+  responding; no pipeline state is reused across requests. `coverage`
+  reads a pre-existing artifact and is cheap.
 - **Assertion-library scope** — the `test_mapping` method collects
   assertions from vitest/jest `expect(...)` chains and `node:assert`
   forms only; chai, should.js, and other assertion libraries are never
   collected (fixed scope, v1).
+- **Doc-surface scope** — the `doc_coverage` method walks the exported
+  module surface plus public members of exported classes; non-exported
+  declarations, private/protected/`#private` members, re-exports,
+  namespaces, and interface members are out of scope, and overload
+  documentation counts only on the implementation signature.
+  `doc_snippet` is omitted when absent, never empty (fixed scope, v1).
+- **Cognitive-complexity scope** — the `cognitive_complexity` method
+  scores SonarSource cognitive complexity with the documented divergences
+  from Gaze's Go port: conditions are walked, ternaries are scored,
+  labeled breaks are counted, and nesting resets at anonymous function
+  boundaries; the SonarJS lint carve-outs are not applied (fixed scope,
+  v1).
 - **Parse-only pairing degradation** — without a usable
   `tsconfig.json`, `test_mapping` pairs through lexical import/call
   matching: barrel re-exports are uncrossed and same-named bindings can
@@ -217,8 +233,12 @@ When input is malformed, Reading Stone emits a one-line diagnostic to
 ## License
 
 Apache 2.0 -- see [LICENSE](LICENSE). The JSON-RPC protocol layer, the
-classification signal pipeline design, and the test-mapping pipeline
-design (pairing strategies and pinned confidences, matcher
-classification semantics, fallback chains, provenance boundaries) are
-ported from [snake-eyes](https://github.com/zero-dot-force/snake-eyes)
-(zero-dot-force, Apache 2.0); see [NOTICE](NOTICE) for attribution.
+classification signal pipeline design, the test-mapping pipeline design
+(pairing strategies and pinned confidences, matcher classification
+semantics, fallback chains, provenance boundaries), and the doc-coverage
+symbol-surface design (the exported-surface walk) are ported from
+[snake-eyes](https://github.com/zero-dot-force/snake-eyes)
+(zero-dot-force, Apache 2.0); see [NOTICE](NOTICE) for attribution. The
+cognitive-complexity algorithm follows SonarSource cognitive complexity,
+with eslint-plugin-sonarjs as the normative TypeScript/JavaScript
+reference implementation.
