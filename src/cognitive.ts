@@ -2,6 +2,9 @@ import type { Writable } from "node:stream";
 
 import {
   isArrowFunction,
+  isBinaryExpression,
+  isBreakOrContinueStatement,
+  isCallExpression,
   isCaseClause,
   isConditionalExpression,
   isDecorator,
@@ -10,11 +13,16 @@ import {
   isForOfStatement,
   isForStatement,
   isFunctionExpression,
+  isIdentifier,
   isIfStatement,
+  isParenthesizedExpression,
+  isPropertyAccessExpression,
   isSwitchStatement,
+  isThisExpression,
   isTryStatement,
   isWhileStatement,
   type Node,
+  SyntaxKind,
 } from "typescript/unstable/ast";
 
 import { prepareAnalysis } from "./analysis.js";
@@ -23,8 +31,8 @@ import { compareFileLineName } from "./internal.js";
 import { derivePackage } from "./models.js";
 
 /**
- * The cognitive complexity engine (spec 005, FR-005 through FR-007 and
- * FR-009; research R1, R7-R10, R12; Constitution Principles I, III, and
+ * The cognitive complexity engine (spec 005, FR-005 through FR-009;
+ * research R1, R7-R10, R12; Constitution Principles I, III, and
  * IV): the SonarSource cognitive complexity score for every function record
  * the shared extraction table produces. `cognitiveComplexity` (T016) closes
  * the shared `prepareAnalysis` pipeline over that score — the SAME
@@ -34,8 +42,9 @@ import { derivePackage } from "./models.js";
  * the program-mode context's lifetime owned by this handler and closed in a
  * `finally` exactly as `computeComplexity` closes its own.
  *
- * The structural scoring rules (FR-006 structural clauses + FR-007 nesting
- * regions + FR-009 per-record domain), as the walk applies them:
+ * The scoring rules (FR-006's structural, flow-break, and recursion
+ * clauses + FR-007 nesting regions + FR-008 sequences + FR-009
+ * per-record domain), as the walk applies them:
  *
  * 1. **Increments**: `if`, `for`, `for-of`, `for-in`, `while`, `do`,
  *    `switch`, `catch`, and a conditional (ternary) expression each add 1
@@ -56,19 +65,33 @@ import { derivePackage } from "./models.js";
  *    extracted function-likes (each owns its own row), and continues through
  *    anonymous function-likes with the nesting level reset to 0 at the
  *    boundary (the `xs.map((x) => ...)` folding shape).
+ * 4. **Flat rules** (T024's phase-6 extension; FR-006's flow-break and
+ *    recursion clauses + FR-008; research R7-R10): a logical operator
+ *    sequence — `&&`, `||`, `??` — adds 1 per maximal run of the same
+ *    operator in the flattened chain, with parenthesized subexpressions
+ *    transparent to the flattening and sequences counted anywhere the
+ *    walk reaches them, control-structure conditions included; a `break`
+ *    or `continue` referencing a label adds 1 (the plain forms add
+ *    nothing); and direct recursion — a call to the enclosing record's
+ *    own name, bare `f(...)` or `this.m(...)` inside method `m` — adds 1
+ *    per call site, matched binding-blind against the record's name
+ *    (research R10: no checker dependency, so mode parity holds). All
+ *    three increments are FLAT — no nesting term, unlike the structural
+ *    constructs of item 1.
  *
- * Scope (T016): ONLY the structural clauses above are implemented.
- * FR-006's flow-break and recursion clauses — logical operator sequences
- * (FR-008), labeled `break`/`continue`, and direct recursion — land with
- * T024's phase-6 rule extension; tests/cognitive.test.ts pins the FR-010
- * values computable from these rules alone.
+ * Scope (T024): the structural clauses and the flat rules above are the
+ * full rule set — FR-006's flow-break and recursion clauses and FR-008's
+ * sequences have landed with the phase-6 extension;
+ * tests/cognitive.test.ts pins the FR-010 golden table these rules
+ * compute.
  *
  * The documented divergences from Gaze's Go port (spec 005 Assumption 3 —
  * reading-stone follows SonarSource, the norm the protocol field cites):
  * control-structure conditions are walked (Gaze does not), ternaries are
- * scored (Go has none), and nesting resets at anonymous function boundaries
- * (Gaze carries nesting through function literals). The SonarJS lint
- * carve-outs are not adopted (Assumption 4).
+ * scored (Go has none), labeled breaks are counted (Gaze does not), and
+ * nesting resets at anonymous function boundaries (Gaze carries nesting
+ * through function literals). The SonarJS lint carve-outs are not adopted
+ * (Assumption 4).
  *
  * No second AST depth budget: extraction already discarded any file whose
  * AST could exceed its budget (a record exists only for an in-budget file),
@@ -224,9 +247,91 @@ function compareCognitiveRows(a: CognitiveRow, b: CognitiveRow): number {
 }
 
 /**
- * Scores one extraction record's body with the structural cognitive
- * complexity rules (FR-006 structural clauses, FR-007, FR-009; research
- * R7-R9).
+ * Whether a binary operator token kind is one of FR-008's sequence
+ * operators — the logical `&&`, `||`, and `??` tokens whose chains score
+ * per maximal same-operator run (research R7).
+ *
+ * @param kind The binary operator token kind to test.
+ * @returns True for `&&`, `||`, or `??`; false for every other operator
+ *   (`+`, `<=`, `instanceof`, …), which never forms a sequence.
+ */
+function isLogicalSequenceOperator(kind: SyntaxKind): boolean {
+  return (
+    kind === SyntaxKind.AmpersandAmpersandToken ||
+    kind === SyntaxKind.BarBarToken ||
+    kind === SyntaxKind.QuestionQuestionToken
+  );
+}
+
+/**
+ * Flattens a logical operator sequence (FR-008, research R7): collects
+ * the chain's operators and operand leaves in source order, descending
+ * through nested sequence-operator binaries and unwrapping parenthesized
+ * subexpressions — parens are transparent to the flattening, never scored
+ * as leaves. A child that unwraps to anything other than a
+ * sequence-operator binary is an operand leaf.
+ *
+ * A pure recursive projection over the compiler's AST; its depth is
+ * bounded by the subtree the walk already entered — extraction discarded
+ * any out-of-budget file before a record existed (the research R12
+ * argument `complexity.ts` records for its own walk).
+ *
+ * @param node The chain's root node (a sequence-operator binary, per the
+ *   visit dispatch that calls this).
+ * @returns The flattened operator sequence and operand leaves, in source
+ *   order — `operators.length === operands.length - 1` for the chain.
+ */
+function flattenLogicalSequence(node: Node): {
+  readonly operators: SyntaxKind[];
+  readonly operands: Node[];
+} {
+  const operators: SyntaxKind[] = [];
+  const operands: Node[] = [];
+  const descend = (current: Node): void => {
+    let unwrapped = current;
+    while (isParenthesizedExpression(unwrapped)) {
+      unwrapped = unwrapped.expression;
+    }
+    if (
+      isBinaryExpression(unwrapped) &&
+      isLogicalSequenceOperator(unwrapped.operatorToken.kind)
+    ) {
+      descend(unwrapped.left);
+      operators.push(unwrapped.operatorToken.kind);
+      descend(unwrapped.right);
+      return;
+    }
+    operands.push(unwrapped);
+  };
+  descend(node);
+  return { operators, operands };
+}
+
+/**
+ * Counts the maximal same-operator runs in a flattened operator sequence
+ * (FR-008): a single operator is a run of one, and each operator change
+ * starts a new run — `a && b` is 1, `a && b || c` is 2, and
+ * `a && b || c && d` is 3.
+ *
+ * @param operators The flattened operator sequence, in source order.
+ * @returns The run count (0 for an empty sequence).
+ */
+function countOperatorRuns(operators: readonly SyntaxKind[]): number {
+  let runs = 0;
+  let previous: SyntaxKind | undefined;
+  for (const operator of operators) {
+    if (operator !== previous) {
+      runs += 1;
+      previous = operator;
+    }
+  }
+  return runs;
+}
+
+/**
+ * Scores one extraction record's body with the cognitive complexity
+ * rules (FR-006 structural, flow-break, and recursion clauses; FR-007;
+ * FR-008; FR-009; research R7-R10).
  *
  * The walk starts at the record's body node — a block body's statements, an
  * expression-bodied arrow's expression — the countDecisionPoints
@@ -254,8 +359,10 @@ function cognitiveScoreOf(record: ExtractionRecord): number {
   }
   let score = 0;
   // One node, one dispatch: each structural construct takes its FR-006
-  // increment and walks its FR-007 region interiors one level deeper;
-  // everything else descends unchanged.
+  // increment and walks its FR-007 region interiors one level deeper; the
+  // flat rules (FR-006 flow-break and recursion clauses, FR-008
+  // sequences) add theirs with no nesting term; everything else
+  // descends unchanged.
   const visit = (node: Node, nesting: number): void => {
     // FR-009: a nested extracted function-like stops the walk — its own
     // record owns its constructs.
@@ -346,6 +453,59 @@ function cognitiveScoreOf(record: ExtractionRecord): number {
       visit(node.whenTrue, nesting + 1);
       visit(node.whenFalse, nesting + 1);
       return;
+    }
+    // FR-008 (research R7): a logical operator sequence — `&&`, `||`,
+    // `??` — adds 1 per maximal run of the same operator in the
+    // flattened chain: a single operator is a run of one, and each
+    // operator change starts a new run. The increment is FLAT — no
+    // nesting term, unlike the structural constructs above — and a
+    // sequence counts anywhere the walk reaches it,
+    // control-structure conditions included (they are walked at their
+    // construct's own level, so nothing extra is wired here). Each
+    // operand leaf is re-visited below so nested ternaries, calls, and
+    // separate chains inside operands still score; a sequence nested
+    // inside a non-logical binary (e.g. `a + (b && c)`) reaches this
+    // case by the default descent and scores as its own chain.
+    if (
+      isBinaryExpression(node) &&
+      isLogicalSequenceOperator(node.operatorToken.kind)
+    ) {
+      const { operators, operands } = flattenLogicalSequence(node);
+      score += countOperatorRuns(operators);
+      for (const operand of operands) {
+        visit(operand, nesting);
+      }
+      return;
+    }
+    // FR-006 flow-break clause (research R8): only a `break` or
+    // `continue` that REFERENCES A LABEL increments — flat, +1, no
+    // nesting term — while the plain forms add nothing. The increment
+    // falls through to the default descent below, which walks the
+    // statement's children: the label identifier itself scores nothing.
+    // A labeled statement's own label needs no case here — the default
+    // descent enters its statement unchanged.
+    if (isBreakOrContinueStatement(node) && node.label !== undefined) {
+      score += 1;
+    }
+    // FR-006 recursion clause (research R10): direct recursion — a call
+    // to the enclosing record's own name — adds 1 per call site, flat,
+    // bare (`f(...)`) or via `this` (`this.m(...)` inside method `m`).
+    // The match is binding-blind text comparison against the record's
+    // declared name: no type-checker dependency, so program and
+    // parse-only modes score identically (mode parity). Mutual
+    // recursion — calls to any other name — adds nothing. The fall
+    // through to the default descent below still walks the call's
+    // arguments, where nested constructs and further calls score.
+    if (isCallExpression(node)) {
+      const callee = node.expression;
+      if (
+        (isIdentifier(callee) && callee.text === record.name) ||
+        (isPropertyAccessExpression(callee) &&
+          callee.name.text === record.name &&
+          isThisExpression(callee.expression))
+      ) {
+        score += 1;
+      }
     }
     visitChildren(node, nesting);
   };
