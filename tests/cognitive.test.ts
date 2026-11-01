@@ -1629,3 +1629,438 @@ describe("the labeled flow-break rule (FR-006 flow-break clause; US4 rule comple
     expect(stderr()).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The FR-010 normative golden table (T023; US4 Independent Test): golden.ts,
+// one exported function per table row, transcribed verbatim from FR-010 plus
+// the two US4 scenario-2 siblings FR-010 does not enumerate (plain for,
+// for-in at top level). The values are NORMATIVE — deviations are bugs by
+// definition (spec US4 Independent Test; Constitution Principle I), so an
+// expected value is never adjusted to make a case pass. RED-FIRST split, the
+// T020 discipline: the structural rows pass against the landed walk; the
+// sequence, recursion, and labeled-break rows are red until T024 lands,
+// matching the 17 already-red US4 tests. The suite drives the full
+// cognitiveComplexity walk over the fixture tree (rowsTree) — never the
+// serializer alone.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The golden fixture (FR-010): golden.ts, one exported function per pinned
+// value — the structural shapes mirror the proven-green core fixtures
+// (increments, folding) so the red/green split isolates exactly the
+// unimplemented US4 rules; the this.m(...) self-call row is an exported
+// class method.
+// ---------------------------------------------------------------------------
+
+const GOLDEN = [
+  "// The FR-010 normative golden table (US4 Independent Test): the values",
+  "// are normative — deviations are bugs. The sequence, recursion, and",
+  "// labeled-break rows are red until T024 lands.",
+  "export function emptyBody(): void {}",
+  "",
+  "export function ifAlone(x: boolean): void {",
+  "  if (x) {}",
+  "}",
+  "",
+  "export function ifNestedIf(x: boolean, y: boolean): void {",
+  "  if (x) {",
+  "    if (y) {}",
+  "  }",
+  "}",
+  "",
+  "export function ifChainFourDeep(",
+  "  a: boolean,",
+  "  b: boolean,",
+  "  c: boolean,",
+  "  d: boolean,",
+  "): void {",
+  "  if (a) {",
+  "    if (b) {",
+  "      if (c) {",
+  "        if (d) {}",
+  "      }",
+  "    }",
+  "  }",
+  "}",
+  "",
+  "export function ifElseIfElse(a: boolean, b: boolean): number {",
+  "  if (a) {",
+  "    return 1;",
+  "  } else if (b) {",
+  "    return 2;",
+  "  } else {",
+  "    return 3;",
+  "  }",
+  "}",
+  "",
+  "export function ifElseNestedIf(x: boolean, y: boolean): void {",
+  "  if (x) {",
+  "    void x;",
+  "  } else {",
+  "    if (y) {}",
+  "  }",
+  "}",
+  "",
+  "export function forOfLoop(items: string[]): void {",
+  "  for (const item of items) {",
+  "    void item;",
+  "  }",
+  "}",
+  "",
+  "export function whileLoop(flag: boolean): void {",
+  "  while (flag) {",
+  "    void flag;",
+  "  }",
+  "}",
+  "",
+  "export function doLoop(flag: boolean): void {",
+  "  do {",
+  "    void flag;",
+  "  } while (flag);",
+  "}",
+  "",
+  "export function switchThreeClauses(value: number): string {",
+  "  switch (value) {",
+  "    case 1:",
+  '      return "one";',
+  "    case 2:",
+  '      return "two";',
+  "    case 3:",
+  '      return "three";',
+  "  }",
+  '  return "other";',
+  "}",
+  "",
+  "export function forIfSwitch(items: number[]): string {",
+  "  for (const item of items) {",
+  "    if (item > 0) {",
+  "      switch (item) {",
+  "        case 1:",
+  '          return "one";',
+  "        case 2:",
+  '          return "two";',
+  "        default:",
+  '          return "other";',
+  "      }",
+  "    }",
+  "  }",
+  '  return "none";',
+  "}",
+  "",
+  "export function tryCatch(work: () => void): void {",
+  "  try {",
+  "    work();",
+  "  } catch (error) {",
+  "    void error;",
+  "  }",
+  "}",
+  "",
+  "export function tryFinally(work: () => void): void {",
+  "  try {",
+  "    work();",
+  "  } finally {",
+  "    void work;",
+  "  }",
+  "}",
+  "",
+  "export function andPair(x: boolean, y: boolean): boolean {",
+  "  return x && y;",
+  "}",
+  "",
+  "export function andTriple(x: boolean, y: boolean, z: boolean): boolean {",
+  "  return x && y && z;",
+  "}",
+  "",
+  "export function andOr(x: boolean, y: boolean, z: boolean): boolean {",
+  "  return x && y || z;",
+  "}",
+  "",
+  "export function andOrAnd(",
+  "  w: boolean,",
+  "  x: boolean,",
+  "  y: boolean,",
+  "  z: boolean,",
+  "): boolean {",
+  "  return w && x || y && z;",
+  "}",
+  "",
+  "export function nullishPair(x: number | null, y: number): number {",
+  "  return x ?? y;",
+  "}",
+  "",
+  "export function ifAndChain(",
+  "  a: boolean,",
+  "  b: boolean,",
+  "  c: boolean,",
+  "  d: boolean,",
+  "): void {",
+  "  if (a && b && c && d) {}",
+  "}",
+  "",
+  "export function ternaryAlone(flag: boolean): number {",
+  "  return flag ? 1 : 0;",
+  "}",
+  "",
+  "export function ternaryInIf(flag: boolean): number {",
+  "  if (flag) {",
+  "    return flag ? 1 : 0;",
+  "  }",
+  "  return 0;",
+  "}",
+  "",
+  "export function factorialTernary(n: number): number {",
+  "  return n <= 1 ? 1 : n * factorialTernary(n - 1);",
+  "}",
+  "",
+  "export function factorialIf(n: number): number {",
+  "  if (n <= 1) {",
+  "    return 1;",
+  "  }",
+  "  return n * factorialIf(n - 1);",
+  "}",
+  "",
+  "export function labeledBreakInForIf(items: number[]): number {",
+  "  outer: for (const item of items) {",
+  "    if (item > 0) {",
+  "      break outer;",
+  "    }",
+  "  }",
+  "  return 0;",
+  "}",
+  "",
+  "export function plainBreakInLoop(items: number[]): number {",
+  "  for (const item of items) {",
+  "    void item;",
+  "    break;",
+  "  }",
+  "  return 0;",
+  "}",
+  "",
+  "export function anonymousMapFold(xs: boolean[]): number[] {",
+  "  return xs.map((x) => (x ? 1 : 0));",
+  "}",
+  "",
+  "export class SelfCall {",
+  "  m(n: number): number {",
+  "    return n <= 1 ? 1 : this.m(n - 1);",
+  "  }",
+  "}",
+  "",
+  "export function whileDo(flag: boolean): void {",
+  "  while (flag) {",
+  "    do {",
+  "      void flag;",
+  "    } while (flag);",
+  "  }",
+  "}",
+  "",
+  "export function forPlain(items: string[]): void {",
+  "  for (let i = 0; i < items.length; i += 1) {",
+  "    void items[i];",
+  "  }",
+  "}",
+  "",
+  "export function forInLoop(record: Record<string, number>): void {",
+  "  for (const key in record) {",
+  "    void record[key];",
+  "  }",
+  "}",
+  "",
+].join("\n");
+
+const GOLDEN_FILES: Readonly<Record<string, string>> = {
+  "golden.ts": GOLDEN,
+};
+
+// The pinned golden values, one case per table row (FR-010; US4 Independent
+// Test) — transcribed verbatim, never adjusted to make a case pass: the
+// structural rows are green against the landed walk, the sequence/recursion/
+// labeled-break rows red until T024 lands.
+const GOLDEN_CASES: ReadonlyArray<{
+  expected: number;
+  name: string;
+  rule: string;
+}> = [
+  {
+    expected: 0,
+    name: "emptyBody",
+    rule: "empty body — no baseline increment, unlike cyclomatic's +1",
+  },
+  { expected: 1, name: "ifAlone", rule: "if (x) {}" },
+  { expected: 3, name: "ifNestedIf", rule: "if (x) { if (y) {} } (1 + 2)" },
+  {
+    expected: 10,
+    name: "ifChainFourDeep",
+    rule: "a 4-deep if chain (1+2+3+4)",
+  },
+  {
+    expected: 3,
+    name: "ifElseIfElse",
+    rule: "if/else-if/else — else-if and else are flat (1 + 1 + 1)",
+  },
+  {
+    expected: 4,
+    name: "ifElseNestedIf",
+    rule: "if (x) {} else { if (y) {} } (1 + 1 + 2)",
+  },
+  { expected: 1, name: "forOfLoop", rule: "a for-of loop at top level" },
+  { expected: 1, name: "whileLoop", rule: "a while loop at top level" },
+  { expected: 1, name: "doLoop", rule: "a do loop at top level" },
+  {
+    expected: 1,
+    name: "switchThreeClauses",
+    rule: "a switch with 3 clauses — the switch's single 1, case clauses never increment",
+  },
+  { expected: 6, name: "forIfSwitch", rule: "for > if > switch (1+2+3)" },
+  { expected: 1, name: "tryCatch", rule: "try/catch — catch 1, try 0" },
+  { expected: 0, name: "tryFinally", rule: "try/finally — neither increments" },
+  {
+    expected: 1,
+    name: "andPair",
+    rule: "a && b — one && run (FR-008; red until T024)",
+  },
+  {
+    expected: 1,
+    name: "andTriple",
+    rule: "a && b && c — one maximal && run (FR-008; red until T024)",
+  },
+  {
+    expected: 2,
+    name: "andOr",
+    rule: "a && b || c — a && run plus a || run (FR-008; red until T024)",
+  },
+  {
+    expected: 3,
+    name: "andOrAnd",
+    rule: "a && b || c && d — three runs (FR-008; red until T024)",
+  },
+  {
+    expected: 1,
+    name: "nullishPair",
+    rule: "a ?? b — a ?? run (FR-008; red until T024)",
+  },
+  {
+    expected: 2,
+    name: "ifAndChain",
+    rule: "if (a && b && c && d) — the if 1 plus the one && run in its walked condition (FR-008; red until T024)",
+  },
+  {
+    expected: 1,
+    name: "ternaryAlone",
+    rule: "a conditional (ternary) expression",
+  },
+  {
+    expected: 3,
+    name: "ternaryInIf",
+    rule: "a ternary inside an if consequent (1 + 2)",
+  },
+  {
+    expected: 2,
+    name: "factorialTernary",
+    rule: "n <= 1 ? 1 : n * f(n - 1) — ternary 1 plus the direct self-call 1 (FR-006 recursion; red until T024)",
+  },
+  {
+    expected: 2,
+    name: "factorialIf",
+    rule: "if (n <= 1) { return 1 } return n * factorial(n - 1) — if 1 plus the direct self-call 1 (FR-006 recursion; red until T024)",
+  },
+  {
+    expected: 4,
+    name: "labeledBreakInForIf",
+    rule: "a labeled break in for > if — for 1 + nested if 2 + labeled break 1 (FR-006 flow-break; red until T024)",
+  },
+  {
+    expected: 1,
+    name: "plainBreakInLoop",
+    rule: "a plain break in a loop adds +0 — the for-of's 1 alone",
+  },
+  {
+    expected: 1,
+    name: "anonymousMapFold",
+    rule: "xs.map((x) => (x ? 1 : 0)) as the record's body — anonymous folding at reset nesting",
+  },
+  {
+    expected: 2,
+    name: "m",
+    rule: "this.m(n - 1) inside m carrying a ternary — ternary 1 plus the this-self-call 1 (FR-006 recursion; red until T024)",
+  },
+  { expected: 3, name: "whileDo", rule: "while > do (1 + 2)" },
+  {
+    expected: 1,
+    name: "forPlain",
+    rule: "a plain for loop at top level (US4 scenario-2 sibling FR-010 does not enumerate)",
+  },
+  {
+    expected: 1,
+    name: "forInLoop",
+    rule: "a for-in loop at top level (US4 scenario-2 sibling FR-010 does not enumerate)",
+  },
+];
+
+// The exact golden rows, (line, name, cognitive_complexity) in the documented
+// order — FR-010's table verbatim plus the two US4 scenario-2 siblings; the
+// line numbers are audited in place against the GOLDEN array above.
+const GOLDEN_EXPECTED: ReadonlyArray<[number, string, number]> = [
+  [4, "emptyBody", 0],
+  [6, "ifAlone", 1],
+  [10, "ifNestedIf", 3],
+  [16, "ifChainFourDeep", 10],
+  [31, "ifElseIfElse", 3],
+  [41, "ifElseNestedIf", 4],
+  [49, "forOfLoop", 1],
+  [55, "whileLoop", 1],
+  [61, "doLoop", 1],
+  [67, "switchThreeClauses", 1],
+  [79, "forIfSwitch", 6],
+  [95, "tryCatch", 1],
+  [103, "tryFinally", 0],
+  [111, "andPair", 1],
+  [115, "andTriple", 1],
+  [119, "andOr", 2],
+  [123, "andOrAnd", 3],
+  [132, "nullishPair", 1],
+  [136, "ifAndChain", 2],
+  [145, "ternaryAlone", 1],
+  [149, "ternaryInIf", 3],
+  [156, "factorialTernary", 2],
+  [160, "factorialIf", 2],
+  [167, "labeledBreakInForIf", 4],
+  [176, "plainBreakInLoop", 1],
+  [184, "anonymousMapFold", 1],
+  [189, "m", 2],
+  [194, "whileDo", 3],
+  [202, "forPlain", 1],
+  [208, "forInLoop", 1],
+];
+
+describe("the FR-010 normative golden table (US4 Independent Test)", () => {
+  let rows: readonly WireRow[] = [];
+  let stderr: () => string = () => "";
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(GOLDEN_FILES);
+    cleanup = tree.cleanup;
+    const run = await rowsTree(tree.root);
+    rows = run.rows;
+    stderr = run.stderr;
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it.each(GOLDEN_CASES)("$name: $rule — scores $expected", ({ name, expected }) => {
+    expect(rowFor(rows, name, "golden.ts").cognitive_complexity).toBe(expected);
+  });
+
+  it("the exact row set and order with every hand-computed score", () => {
+    expect(fileScores(rows, "golden.ts")).toEqual(GOLDEN_EXPECTED);
+    expectWireInvariants(rows);
+    expect(rows).toHaveLength(30);
+  });
+
+  it("a clean tree writes no stderr diagnostics", () => {
+    expect(stderr()).toBe("");
+  });
+});
