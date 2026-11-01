@@ -17,6 +17,13 @@
  * serializer and the `TestMappingResult` envelope, and the normative
  * matcher tables with their classification lookups.
  *
+ * The doc-coverage and cognitive-complexity pipelines (005 T025)
+ * ride it too: the `doc_coverage` method entry with the `SymbolRow`
+ * wire record, its `SymbolKind` vocabulary and serializer, the
+ * `cognitive_complexity` entry with the `CognitiveRow` record and
+ * its serializer, and the `DocCoverageResult` and
+ * `CognitiveComplexityResult` envelopes.
+ *
  * An explicit, exhaustive barrel (convention pack AP-001) makes the
  * vocabulary consumable package API instead of orphaned code (Zero-Waste
  * Mandate): later analysis methods and downstream consumers import from
@@ -37,12 +44,25 @@ export {
   normalizePatterns,
   pathInScope,
 } from "./analysis.js";
+export type { CognitiveRow } from "./cognitive.js";
+export {
+  cognitiveComplexity,
+  serializeCognitiveRow,
+} from "./cognitive.js";
 export { computeComplexity } from "./complexity.js";
 export { parseCoverage } from "./coverage.js";
 export {
   assembleFunctionRecords,
   detectEffects,
 } from "./detector.js";
+export type {
+  SymbolKind,
+  SymbolRow,
+} from "./doc-coverage.js";
+export {
+  docCoverage,
+  serializeSymbolRow,
+} from "./doc-coverage.js";
 export type { ExtractionRecord } from "./extract.js";
 export type {
   Classification,
@@ -56,6 +76,10 @@ export {
   serializeFunctionRecord,
 } from "./models.js";
 export type { ProgramContext } from "./program.js";
+export type {
+  CognitiveComplexityResult,
+  DocCoverageResult,
+} from "./protocol.js";
 export {
   ASSERT_FUNCTION_KINDS,
   classifyAssertCall,
