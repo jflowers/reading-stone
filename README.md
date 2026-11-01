@@ -94,21 +94,46 @@ npm run build
 node dist/main.js --stdio
 ```
 
-The package installs one bin entry point that launches the JSON-RPC analyzer
-over stdin/stdout:
+The package installs two bin entry points that both launch the JSON-RPC
+analyzer over stdin/stdout:
 
 - `reading-stone` — the primary entry point.
+- `gaze-analyzer-typescript` — an alias that Gaze's tier-3 PATH
+  auto-discovery looks for; either name works in `.gaze.yaml`.
 
 ## Configuration
 
-Point Gaze at the entry point in `.gaze.yaml`:
+Install the package globally:
+
+```bash
+npm i -g reading-stone
+```
+
+Gaze auto-discovers external analyzers by PATH naming convention:
+run gaze with `--language typescript` (e.g.
+`gaze quality --language typescript ./src`) and any
+`gaze-analyzer-typescript` on PATH is used automatically — no
+`.gaze.yaml` needed. Gaze does not infer the project language, so
+without the flag it falls back to its built-in Go analysis. The
+global install puts the alias on PATH alongside `reading-stone`.
+
+To name the analyzer explicitly in `.gaze.yaml`, point it at the
+convention binary:
 
 ```yaml
 analyzers:
   typescript:
-    command: node
-    args: ["dist/main.js", "--stdio"]
+    command: gaze-analyzer-typescript
+    args: ["--stdio"]
 ```
+
+Gaze spawns a `.gaze.yaml` entry with exactly the configured args —
+the `args: ["--stdio"]` line is required. The other two discovery
+tiers, the `--analyzer` CLI flag and the `gaze-analyzer-typescript`
+PATH convention, get `--stdio` passed automatically by Gaze.
+
+To dogfood from a checkout: `npm install && npm run build && npm link`
+puts the same two bins on PATH.
 
 ## Project structure
 

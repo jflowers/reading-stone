@@ -94,12 +94,27 @@ describe("package metadata", () => {
     expect(pkg.version).toBe("0.1.0");
     expect(pkg.license).toBe("Apache-2.0");
     expect(pkg.type).toBe("module");
-    expect(pkg.bin).toEqual({ "reading-stone": "dist/main.js" });
+    expect(pkg.bin).toEqual({
+      "reading-stone": "dist/main.js",
+      "gaze-analyzer-typescript": "dist/main.js",
+    });
     expect((pkg as { engines?: { node?: string } }).engines?.node).toBe(">=22");
     // Exact pin (review dispatch 44e85014): the runtime consumes the
     // typescript/unstable/* surface, which carries no semver stability
     // guarantee, so a caret range could resolve a breaking 7.x.
     expect(pkg.dependencies).toEqual({ typescript: "7.0.2" });
+  });
+
+  it("ships the gaze-analyzer-typescript bin alias for PATH auto-discovery", () => {
+    // Gaze's zero-config discovery tier spawns whatever
+    // gaze-analyzer-<language> binary it finds on PATH (the snake-eyes
+    // precedent: primary name plus convention alias). Both names must
+    // launch the same --stdio server entry point.
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { bin?: Record<string, string> };
+    expect(pkg.bin?.["gaze-analyzer-typescript"]).toBe("dist/main.js");
+    expect(pkg.bin?.["reading-stone"]).toBe("dist/main.js");
   });
 
   it("contains the exact NOTICE attribution text", () => {

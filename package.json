@@ -13,7 +13,8 @@
     "node": ">=22"
   },
   "bin": {
-    "reading-stone": "dist/main.js"
+    "reading-stone": "dist/main.js",
+    "gaze-analyzer-typescript": "dist/main.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
