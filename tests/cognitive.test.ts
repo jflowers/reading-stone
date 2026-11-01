@@ -1329,15 +1329,15 @@ const SEQUENCE_CASES: ReadonlyArray<{
 // documented order — every score hand-computed from FR-008 plus the
 // structural clauses.
 const SEQUENCE_EXPECTED: ReadonlyArray<[number, string, number]> = [
-  [6, "andPair", 1],
-  [10, "andTriple", 1],
-  [14, "andOr", 2],
-  [18, "andOrAnd", 3],
-  [27, "nullishPair", 1],
-  [31, "ifAndChain", 2],
-  [43, "parenSame", 1],
-  [47, "parenMixed", 2],
-  [51, "seqInLoop", 4],
+  [5, "andPair", 1],
+  [9, "andTriple", 1],
+  [13, "andOr", 2],
+  [17, "andOrAnd", 3],
+  [26, "nullishPair", 1],
+  [30, "ifAndChain", 2],
+  [42, "parenSame", 1],
+  [46, "parenMixed", 2],
+  [50, "seqInLoop", 4],
 ];
 
 describe("the logical-sequence rule (FR-008; US4 rule completion)", () => {
