@@ -55,10 +55,11 @@
 //   flat though it sits inside the if's region; a case clause is flat
 //   though it sits inside the switch's). The pinned values are the
 //   FR-010 entries computable from these two rules alone; FR-008
-//   sequences, recursion, and labeled breaks are US4 work (T022/T024)
-//   and are deliberately absent — every fixture condition is a single
-//   comparison, with no &&, ||, ??, labeled break, or self-call, so the
-//   pinned scores are purely structural.
+//   sequences, recursion, and labeled breaks are US4 work — T022 pins
+//   them red-first in the US4 section at the end of this file and T024
+//   implements them — and are deliberately absent from these core
+//   fixtures: every core fixture condition is a single comparison, so
+//   the pinned scores are purely structural.
 // - Extraction parity (US2-2): cognitive_complexity and the existing
 //   cyclomatic `complexity` method report equal (file, line, name)
 //   identity sets over the same request — both walk the same extraction
@@ -1189,4 +1190,184 @@ describe("skip diagnostics (FR-011; the injected stderr sink)", () => {
       expect(stdout).not.toHaveBeenCalled();
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// The US4 rule-completion fixtures (T022; FR-006 flow-break and recursion
+// clauses, FR-008; US4 scenarios 4-6): logical operator sequences, direct
+// recursion, and labeled flow breaks — the rules T024's rule extension
+// implements. RED-FIRST, the T020 discipline: src/cognitive.ts does not
+// implement these rules yet, so the red cases below fail by design (T022 is
+// T024's red pair); the hold cases (mutual recursion, plain break/continue)
+// must pass both before and after T024 lands.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The logical-sequence fixtures (FR-008): sequences.ts, one function per
+// pinned value — each maximal run of the same binary logical operator in
+// the flattened chain adds 1, parenthesized subexpressions are transparent
+// to the flattening, and sequences anywhere in the record's walk count
+// (control-structure conditions are walked).
+// ---------------------------------------------------------------------------
+
+const SEQUENCES = [
+  "// The logical-sequence rule (FR-008): each maximal run of the same",
+  "// binary logical operator in the flattened chain adds 1; parens are",
+  "// transparent to the flattening, and sequences anywhere in the walk",
+  "// count — control-structure conditions included.",
+  "export function andPair(x: boolean, y: boolean): boolean {",
+  "  return x && y;",
+  "}",
+  "",
+  "export function andTriple(x: boolean, y: boolean, z: boolean): boolean {",
+  "  return x && y && z;",
+  "}",
+  "",
+  "export function andOr(x: boolean, y: boolean, z: boolean): boolean {",
+  "  return x && y || z;",
+  "}",
+  "",
+  "export function andOrAnd(",
+  "  w: boolean,",
+  "  x: boolean,",
+  "  y: boolean,",
+  "  z: boolean,",
+  "): boolean {",
+  "  return w && x || y && z;",
+  "}",
+  "",
+  "export function nullishPair(x: number | null): number {",
+  "  return x ?? 0;",
+  "}",
+  "",
+  "export function ifAndChain(",
+  "  a: boolean,",
+  "  b: boolean,",
+  "  c: boolean,",
+  "  d: boolean,",
+  "): number {",
+  "  if (a && b && c && d) {",
+  "    return 1;",
+  "  }",
+  "  return 0;",
+  "}",
+  "",
+  "export function parenSame(x: boolean, y: boolean, z: boolean): boolean {",
+  "  return x && (y && z);",
+  "}",
+  "",
+  "export function parenMixed(x: boolean, y: boolean, z: boolean): boolean {",
+  "  return x && (y || z);",
+  "}",
+  "",
+  "export function seqInLoop(items: boolean[], flag: boolean): number {",
+  "  let count = 0;",
+  "  for (const item of items) {",
+  "    if (item && flag) {",
+  "      count += 1;",
+  "    }",
+  "  }",
+  "  return count;",
+  "}",
+  "",
+].join("\n");
+
+const SEQUENCE_FILES: Readonly<Record<string, string>> = {
+  "sequences.ts": SEQUENCES,
+};
+
+// The pinned sequence values, one case per function (FR-008).
+const SEQUENCE_CASES: ReadonlyArray<{
+  expected: number;
+  name: string;
+  rule: string;
+}> = [
+  { expected: 1, name: "andPair", rule: "x && y — one run of the same operator" },
+  {
+    expected: 1,
+    name: "andTriple",
+    rule: "x && y && z — one maximal run of &&",
+  },
+  {
+    expected: 2,
+    name: "andOr",
+    rule: "x && y || z — a && run plus a || run",
+  },
+  {
+    expected: 3,
+    name: "andOrAnd",
+    rule: "w && x || y && z — three runs (&&, ||, &&)",
+  },
+  {
+    expected: 1,
+    name: "nullishPair",
+    rule: "x ?? 0 — a ?? run",
+  },
+  {
+    expected: 2,
+    name: "ifAndChain",
+    rule: "if (a && b && c && d) — the if plus the one && run in its walked condition",
+  },
+  {
+    expected: 1,
+    name: "parenSame",
+    rule: "x && (y && z) — parens transparent, still one && run",
+  },
+  {
+    expected: 2,
+    name: "parenMixed",
+    rule: "x && (y || z) — parens transparent, a && run plus a || run",
+  },
+  {
+    expected: 4,
+    name: "seqInLoop",
+    rule: "for-of 1 + if at nesting 1 (2) + the && run in the if's condition — sequences anywhere in the walk count",
+  },
+];
+
+// The exact sequence rows, (line, name, cognitive_complexity) in the
+// documented order — every score hand-computed from FR-008 plus the
+// structural clauses.
+const SEQUENCE_EXPECTED: ReadonlyArray<[number, string, number]> = [
+  [6, "andPair", 1],
+  [10, "andTriple", 1],
+  [14, "andOr", 2],
+  [18, "andOrAnd", 3],
+  [27, "nullishPair", 1],
+  [31, "ifAndChain", 2],
+  [43, "parenSame", 1],
+  [47, "parenMixed", 2],
+  [51, "seqInLoop", 4],
+];
+
+describe("the logical-sequence rule (FR-008; US4 rule completion)", () => {
+  let rows: readonly WireRow[] = [];
+  let stderr: () => string = () => "";
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(SEQUENCE_FILES);
+    cleanup = tree.cleanup;
+    const run = await rowsTree(tree.root);
+    rows = run.rows;
+    stderr = run.stderr;
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it.each(SEQUENCE_CASES)("$name: $rule — scores $expected", ({ name, expected }) => {
+    expect(rowFor(rows, name, "sequences.ts").cognitive_complexity).toBe(expected);
+  });
+
+  it("the exact row set and order with every hand-computed score", () => {
+    expect(fileScores(rows, "sequences.ts")).toEqual(SEQUENCE_EXPECTED);
+    expectWireInvariants(rows);
+    expect(rows).toHaveLength(9);
+  });
+
+  it("a clean tree writes no stderr diagnostics", () => {
+    expect(stderr()).toBe("");
+  });
 });
