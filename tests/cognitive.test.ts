@@ -1496,3 +1496,136 @@ describe("the recursion rule (FR-006 recursion clause; US4 rule completion)", ()
     expect(stderr()).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The labeled flow-break fixtures (FR-006 flow-break clause):
+// labeled-breaks.ts — a break or continue referencing a label adds 1 flat;
+// a plain break or continue adds nothing. The plain pair is a hold case:
+// it must pass both before and after T024 lands.
+// ---------------------------------------------------------------------------
+
+const LABELED_BREAKS = [
+  "// The labeled flow-break rule (FR-006 flow-break clause): a break or",
+  "// continue referencing a label adds 1 flat; a plain break or continue",
+  "// adds nothing.",
+  "export function labeledBreak(items: number[]): number {",
+  "  outer: for (const item of items) {",
+  "    if (item > 0) {",
+  "      break outer;",
+  "    }",
+  "  }",
+  "  return 0;",
+  "}",
+  "",
+  "export function labeledContinue(items: number[]): number {",
+  "  let total = 0;",
+  "  outer: for (const item of items) {",
+  "    if (item < 0) {",
+  "      continue outer;",
+  "    }",
+  "    total += item;",
+  "  }",
+  "  return total;",
+  "}",
+  "",
+  "export function plainBreak(items: number[]): number {",
+  "  for (const item of items) {",
+  "    if (item > 0) {",
+  "      break;",
+  "    }",
+  "  }",
+  "  return 0;",
+  "}",
+  "",
+  "export function plainContinue(items: number[]): number {",
+  "  let total = 0;",
+  "  for (const item of items) {",
+  "    if (item < 0) {",
+  "      continue;",
+  "    }",
+  "    total += item;",
+  "  }",
+  "  return total;",
+  "}",
+  "",
+].join("\n");
+
+const LABELED_BREAKS_FILES: Readonly<Record<string, string>> = {
+  "labeled-breaks.ts": LABELED_BREAKS,
+};
+
+// The pinned labeled flow-break values, one case per function (FR-006
+// flow-break clause).
+const LABELED_BREAKS_CASES: ReadonlyArray<{
+  expected: number;
+  name: string;
+  rule: string;
+}> = [
+  {
+    expected: 4,
+    name: "labeledBreak",
+    rule: "outer: for (...) { if (x) { break outer } } — for 1 + nested if 2 + labeled break 1",
+  },
+  {
+    expected: 4,
+    name: "labeledContinue",
+    rule: "outer: for (...) { if (x) { continue outer } } — for 1 + nested if 2 + labeled continue 1",
+  },
+  {
+    expected: 3,
+    name: "plainBreak",
+    rule: "a plain break adds nothing — for 1 + nested if 2",
+  },
+  {
+    expected: 3,
+    name: "plainContinue",
+    rule: "a plain continue adds nothing — for 1 + nested if 2",
+  },
+];
+
+// The exact labeled flow-break rows, (line, name, cognitive_complexity) in
+// the documented order — every score hand-computed from the flow-break
+// clause plus the structural clauses.
+const LABELED_BREAKS_EXPECTED: ReadonlyArray<[number, string, number]> = [
+  [4, "labeledBreak", 4],
+  [13, "labeledContinue", 4],
+  [24, "plainBreak", 3],
+  [33, "plainContinue", 3],
+];
+
+describe("the labeled flow-break rule (FR-006 flow-break clause; US4 rule completion)", () => {
+  let rows: readonly WireRow[] = [];
+  let stderr: () => string = () => "";
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(LABELED_BREAKS_FILES);
+    cleanup = tree.cleanup;
+    const run = await rowsTree(tree.root);
+    rows = run.rows;
+    stderr = run.stderr;
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it.each(LABELED_BREAKS_CASES)(
+    "$name: $rule — scores $expected",
+    ({ name, expected }) => {
+      expect(rowFor(rows, name, "labeled-breaks.ts").cognitive_complexity).toBe(
+        expected,
+      );
+    },
+  );
+
+  it("the exact row set and order with every hand-computed score", () => {
+    expect(fileScores(rows, "labeled-breaks.ts")).toEqual(LABELED_BREAKS_EXPECTED);
+    expectWireInvariants(rows);
+    expect(rows).toHaveLength(4);
+  });
+
+  it("a clean tree writes no stderr diagnostics", () => {
+    expect(stderr()).toBe("");
+  });
+});
