@@ -6,5 +6,6 @@ This product includes software originally developed in snake-eyes
 Apache License 2.0. The JSON-RPC protocol layer, the classification
 signal pipeline design, and the test-mapping pipeline design (pairing
 strategies and pinned confidences, matcher classification semantics,
-fallback chains, provenance boundaries) are ported from snake-eyes'
-Python implementation of the Gaze analyzer protocol.
+fallback chains, provenance boundaries), and the doc-coverage
+symbol-surface design (the exported-surface walk) are ported from
+snake-eyes' Python implementation of the Gaze analyzer protocol.
