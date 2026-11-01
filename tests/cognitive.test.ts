@@ -1371,3 +1371,128 @@ describe("the logical-sequence rule (FR-008; US4 rule completion)", () => {
     expect(stderr()).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The recursion fixtures (FR-006 recursion clause): recursion.ts — a direct
+// call to the enclosing record's own name adds 1 per call site (bare or via
+// this); mutual recursion adds nothing. The isEven/isOdd pair is a hold
+// case: it must pass both before and after T024 lands.
+// ---------------------------------------------------------------------------
+
+const RECURSION = [
+  "// The recursion rule (FR-006 recursion clause): a call to the enclosing",
+  "// function's own name adds 1 per call site, bare (f(...)) or via this",
+  "// (this.m(...) within a class method); mutual recursion adds nothing —",
+  "// the call targets the other function, not the record itself.",
+  "export function factTernary(n: number): number {",
+  "  return n <= 1 ? 1 : n * factTernary(n - 1);",
+  "}",
+  "",
+  "export function factIf(n: number): number {",
+  "  if (n <= 1) {",
+  "    return 1;",
+  "  }",
+  "  return n * factIf(n - 1);",
+  "}",
+  "",
+  "export class Tail {",
+  "  m(n: number): number {",
+  "    return n <= 1 ? 1 : this.m(n - 1);",
+  "  }",
+  "}",
+  "",
+  "export function isEven(n: number): boolean {",
+  "  if (n === 0) {",
+  "    return true;",
+  "  }",
+  "  return isOdd(n - 1);",
+  "}",
+  "",
+  "export function isOdd(n: number): boolean {",
+  "  if (n === 0) {",
+  "    return false;",
+  "  }",
+  "  return isEven(n - 1);",
+  "}",
+  "",
+].join("\n");
+
+const RECURSION_FILES: Readonly<Record<string, string>> = {
+  "recursion.ts": RECURSION,
+};
+
+// The pinned recursion values, one case per row (FR-006 recursion clause).
+const RECURSION_CASES: ReadonlyArray<{
+  expected: number;
+  name: string;
+  rule: string;
+}> = [
+  {
+    expected: 2,
+    name: "factTernary",
+    rule: "n <= 1 ? 1 : n * factTernary(n - 1) — ternary 1 plus the direct self-call 1",
+  },
+  {
+    expected: 2,
+    name: "factIf",
+    rule: "if (n <= 1) { return 1 } return n * factIf(n - 1) — if 1 plus the direct self-call 1",
+  },
+  {
+    expected: 2,
+    name: "m",
+    rule: "this.m(n - 1) inside method m carrying a ternary — ternary 1 plus the this-self-call 1",
+  },
+  {
+    expected: 1,
+    name: "isEven",
+    rule: "mutual recursion adds nothing — the if only (the call targets isOdd)",
+  },
+  {
+    expected: 1,
+    name: "isOdd",
+    rule: "mutual recursion adds nothing — the if only (the call targets isEven)",
+  },
+];
+
+// The exact recursion rows, (line, name, cognitive_complexity) in the
+// documented order — every score hand-computed from the recursion clause
+// plus the structural clauses.
+const RECURSION_EXPECTED: ReadonlyArray<[number, string, number]> = [
+  [6, "factTernary", 2],
+  [10, "factIf", 2],
+  [18, "m", 2],
+  [23, "isEven", 1],
+  [30, "isOdd", 1],
+];
+
+describe("the recursion rule (FR-006 recursion clause; US4 rule completion)", () => {
+  let rows: readonly WireRow[] = [];
+  let stderr: () => string = () => "";
+  let cleanup: (() => Promise<void>) | undefined;
+
+  beforeAll(async () => {
+    const tree = await createFixtureTree(RECURSION_FILES);
+    cleanup = tree.cleanup;
+    const run = await rowsTree(tree.root);
+    rows = run.rows;
+    stderr = run.stderr;
+  }, 120_000);
+
+  afterAll(async () => {
+    await cleanup?.();
+  });
+
+  it.each(RECURSION_CASES)("$name: $rule — scores $expected", ({ name, expected }) => {
+    expect(rowFor(rows, name, "recursion.ts").cognitive_complexity).toBe(expected);
+  });
+
+  it("the exact row set and order with every hand-computed score", () => {
+    expect(fileScores(rows, "recursion.ts")).toEqual(RECURSION_EXPECTED);
+    expectWireInvariants(rows);
+    expect(rows).toHaveLength(5);
+  });
+
+  it("a clean tree writes no stderr diagnostics", () => {
+    expect(stderr()).toBe("");
+  });
+});
