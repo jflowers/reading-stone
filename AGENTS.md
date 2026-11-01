@@ -71,6 +71,10 @@ The division of responsibility:
   test suites (the `test_mapping` method)
 - Coverage data parsing
 - Cyclomatic complexity calculation
+- Cognitive complexity calculation per SonarSource semantics (the
+  `cognitive_complexity` method)
+- Documentation coverage over the exported TypeScript/JavaScript
+  symbol surface (the `doc_coverage` method)
 - File and project discovery
 
 ## Technology Stack
@@ -107,7 +111,9 @@ reading-stone/
 │   ├── extract.ts           # Table-driven function extraction (ExtractionRecord set)
 │   ├── detector.ts          # Side-effect detection rules + FunctionRecord assembly
 │   ├── complexity.ts        # Cyclomatic complexity engine (ComplexityEntry)
+│   ├── cognitive.ts         # CognitiveRow + serializer, nesting-aware SonarSource walk, entry
 │   ├── coverage.ts          # Istanbul coverage-final.json artifact parser (CoverageEntry)
+│   ├── doc-coverage.ts      # SymbolRow + SymbolKind + serializer, symbol-surface walk, entry
 │   ├── quality/             # Test-mapping pipeline (test_mapping method + analyze wiring)
 │   │   ├── assertions.ts    # Assertion detection (vitest/jest expect chains, node:assert forms)
 │   │   ├── collect.ts       # Test-function collection (it/test/describe walk, qualified titles)
@@ -127,7 +133,7 @@ reading-stone/
 │       ├── routing.ts       # Effect-type routing table (48 canonical types → agreeing vocabulary)
 │       ├── types.ts         # Signal wire record + serializer (six-value closed source set)
 │       └── visibility.ts    # visibility signal (exported components, clamped at +20)
-├── tests/                   # Vitest suites (tests/signals/ and tests/quality/ mirror their src/ trees one-to-one)
+├── tests/                   # Vitest suites (tests/signals/ and tests/quality/ mirror their src/ trees one-to-one; tests/doc-coverage.test.ts and tests/cognitive.test.ts mirror src/doc-coverage.ts and src/cognitive.ts)
 ├── docs/
 │   └── effect-disposition.md  # 48-type disposition table (tier, disposition, TypeScript mapping, rationale)
 ├── .github/workflows/       # CI: biome, tsc, vitest gates
