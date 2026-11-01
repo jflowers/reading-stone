@@ -1458,11 +1458,11 @@ const RECURSION_CASES: ReadonlyArray<{
 // documented order — every score hand-computed from the recursion clause
 // plus the structural clauses.
 const RECURSION_EXPECTED: ReadonlyArray<[number, string, number]> = [
-  [6, "factTernary", 2],
-  [10, "factIf", 2],
-  [18, "m", 2],
-  [23, "isEven", 1],
-  [30, "isOdd", 1],
+  [5, "factTernary", 2],
+  [9, "factIf", 2],
+  [17, "m", 2],
+  [22, "isEven", 1],
+  [29, "isOdd", 1],
 ];
 
 describe("the recursion rule (FR-006 recursion clause; US4 rule completion)", () => {
