@@ -2,12 +2,26 @@
   "name": "reading-stone",
   "version": "0.2.0",
   "description": "TypeScript side-effect analyzer backend for Gaze",
+  "keywords": [
+    "gaze",
+    "typescript",
+    "javascript",
+    "static-analysis",
+    "side-effects",
+    "json-rpc",
+    "analyzer",
+    "test-quality"
+  ],
   "type": "module",
   "license": "Apache-2.0",
   "author": "zero-dot-force",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zero-dot-force/reading-stone.git"
+  },
+  "homepage": "https://github.com/zero-dot-force/reading-stone#readme",
+  "bugs": {
+    "url": "https://github.com/zero-dot-force/reading-stone/issues"
   },
   "engines": {
     "node": ">=22"
@@ -18,8 +32,17 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc",

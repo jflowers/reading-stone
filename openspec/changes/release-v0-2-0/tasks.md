@@ -6,12 +6,12 @@
 
 ## 2. Packaging
 
-- [ ] 2.1 `package.json`: `files` → `["dist", "!dist/**/*.map", "NOTICE"]`; add `homepage`, `bugs`, `keywords`, and the `exports` map; extend the package-metadata test to pin them
-- [ ] 2.2 Add a tarball-contents test (`npm pack --dry-run --json`) pinning NOTICE/LICENSE/README/package.json present and no `.map` files
+- [x] 2.1 `package.json`: `files` → `["dist", "!dist/**/*.map", "NOTICE"]`; add `homepage`, `bugs`, `keywords`, and the `exports` map; extend the package-metadata test to pin them
+- [x] 2.2 Add a tarball-contents test (`npm pack --dry-run --json`) pinning NOTICE/LICENSE/README/package.json present and no `.map` files
 
 ## 3. End-to-end conformance
 
-- [ ] 3.1 Add the full-lifecycle stdio smoke test against `dist/main.js` (all 10 methods, one session, non-empty rows per analysis method, exit 0)
+- [x] 3.1 Add the full-lifecycle stdio smoke test against `dist/main.js` (all 10 methods, one session, non-empty rows per analysis method, exit 0)
 
 ## 4. Documentation
 

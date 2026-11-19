@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -103,6 +103,19 @@ describe("package metadata", () => {
     // typescript/unstable/* surface, which carries no semver stability
     // guarantee, so a caret range could resolve a breaking 7.x.
     expect(pkg.dependencies).toEqual({ typescript: "7.0.2" });
+    // The registry surface (release-v0-2-0): the barrel is the only
+    // exported entry (AP-001); NOTICE ships for Apache-2.0 §4(d)
+    // attribution, which npm does not auto-include; source maps are
+    // excluded because their `sources` point at the unshipped src/.
+    expect(pkg.exports).toEqual({
+      ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+      "./package.json": "./package.json",
+    });
+    expect(pkg.files).toEqual(["dist", "!dist/**/*.map", "NOTICE"]);
+    expect(pkg.homepage).toBe("https://github.com/zero-dot-force/reading-stone#readme");
+    expect(pkg.bugs).toEqual({
+      url: "https://github.com/zero-dot-force/reading-stone/issues",
+    });
   });
 
   it("ships the gaze-analyzer-typescript bin alias for PATH auto-discovery", () => {
@@ -173,6 +186,78 @@ interface SubprocessComplexityEntry {
   readonly complexity: number;
 }
 
+// The full-lifecycle fixture (release-v0-2-0 task 3.1): one documented,
+// exported source function carrying a stdout write, a parameter mutation,
+// a branch, and a return value; one vitest test asserting on it; a
+// tsconfig so program mode (checker-dependent signals) is exercised; and
+// a hand-authored Istanbul artifact so `coverage` answers rows without
+// any test execution (Constitution Principle V). Every analysis method
+// returns at least one row over it, so a regression that empties any
+// method fails the lifecycle test loudly.
+const LIFECYCLE_SOURCES: Readonly<Record<string, string>> = {
+  "package.json": '{"name":"fixture","devDependencies":{"vitest":"*"}}\n',
+  "tsconfig.json":
+    '{"compilerOptions":{"strict":true,"module":"NodeNext","moduleResolution":"NodeNext"},"include":["src","tests"]}\n',
+  "src/store.ts": [
+    "/** Records a value in the cache and returns the previous one. */", // 1
+    "export function remember(cache: Map<string, number>, key: string, value: number): number | undefined {", // 2
+    "  const previous = cache.get(key);", // 3
+    "  if (previous === undefined) {", // 4
+    '    console.log("first write", key);', // 5
+    "  }", // 6
+    "  cache.set(key, value);", // 7
+    "  return previous;", // 8
+    "}", // 9
+    "",
+  ].join("\n"),
+  "tests/store.test.ts": [
+    'import { expect, it } from "vitest";',
+    'import { remember } from "../src/store";',
+    "",
+    'it("returns the previous value", () => {',
+    "  const cache = new Map<string, number>();",
+    '  expect(remember(cache, "a", 1)).toBeUndefined();',
+    '  expect(remember(cache, "a", 2)).toBe(1);',
+    "});",
+    "",
+  ].join("\n"),
+  "coverage/coverage-final.json": JSON.stringify({
+    "src/store.ts": {
+      path: "src/store.ts",
+      statementMap: {
+        "0": { start: { line: 3, column: 2 }, end: { line: 3, column: 35 } },
+        "1": { start: { line: 4, column: 2 }, end: { line: 6, column: 3 } },
+        "2": { start: { line: 5, column: 4 }, end: { line: 5, column: 36 } },
+        "3": { start: { line: 7, column: 2 }, end: { line: 7, column: 24 } },
+        "4": { start: { line: 8, column: 2 }, end: { line: 8, column: 18 } },
+      },
+      fnMap: {
+        "0": {
+          name: "remember",
+          decl: { start: { line: 2, column: 16 }, end: { line: 2, column: 24 } },
+          loc: { start: { line: 2, column: 101 }, end: { line: 9, column: 1 } },
+        },
+      },
+      branchMap: {},
+      s: { "0": 2, "1": 2, "2": 1, "3": 2, "4": 2 },
+      f: { "0": 2 },
+      b: {},
+    },
+  }),
+};
+
+// The lifecycle order issue #7 names, each analysis method paired with
+// the single result key its v1.2.0 schema defines.
+const LIFECYCLE_METHODS: ReadonlyArray<readonly [string, string]> = [
+  ["analyze", "functions"],
+  ["complexity", "functions"],
+  ["coverage", "functions"],
+  ["test_mapping", "mappings"],
+  ["classify_signals", "signals"],
+  ["doc_coverage", "symbols"],
+  ["cognitive_complexity", "functions"],
+];
+
 describe.skipIf(!existsSync(mainJs))("subprocess", () => {
   function readLine(stream: Readable): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -221,6 +306,134 @@ describe.skipIf(!existsSync(mainJs))("subprocess", () => {
       child.on("exit", (code) => resolve(code));
     });
     expect(exitCode).toBe(2);
+  });
+
+  // Release-v0-2-0 task 2.2: the tarball npm would publish, read with
+  // `npm pack --dry-run --json` (honors `files`, its negation, and npm's
+  // auto-includes) without writing a tarball. Gated with this suite
+  // because the list only contains dist/ once it is built.
+  it("packs NOTICE and the compiled surface, never source maps", {
+    timeout: 60_000,
+  }, () => {
+    const packed = spawnSync(
+      "npm",
+      ["pack", "--dry-run", "--json", "--ignore-scripts"],
+      {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        encoding: "utf8",
+        shell: process.platform === "win32",
+      },
+    );
+    expect(packed.status).toBe(0);
+    const [manifest] = JSON.parse(packed.stdout) as Array<{
+      files: Array<{ path: string }>;
+    }>;
+    const paths = (manifest?.files ?? []).map((file) => file.path);
+    for (const required of [
+      "NOTICE",
+      "LICENSE",
+      "README.md",
+      "package.json",
+      "dist/main.js",
+      "dist/index.js",
+      "dist/index.d.ts",
+    ]) {
+      expect(paths).toContain(required);
+    }
+    expect(paths.filter((path) => path.endsWith(".map"))).toEqual([]);
+    expect(
+      paths.filter((path) => path.startsWith("src/") || path.startsWith("tests/")),
+    ).toEqual([]);
+  });
+
+  // Release-v0-2-0 task 3.1 (issue #7): the whole protocol lifecycle in
+  // ONE session against the BUILT server Gaze spawns — initialize,
+  // discover, the seven analysis methods, shutdown. Every response must
+  // be a success echoing its id; every analysis method must answer its
+  // single schema key with a non-empty row array over the fixture.
+  it("serves the full v1.2.0 lifecycle in one session", {
+    timeout: 120_000,
+  }, async () => {
+    const tree = await createFixtureTree(LIFECYCLE_SOURCES);
+    const child = spawn(process.execPath, [mainJs, "--stdio"]);
+    try {
+      const rootParam = `{"root_path":${JSON.stringify(tree.root)}}`;
+      const methods = [
+        "initialize",
+        "discover",
+        ...LIFECYCLE_METHODS.map(([method]) => method),
+        "shutdown",
+      ];
+      const lines: string[] = [];
+      let buffer = "";
+      child.stdout.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        let index = buffer.indexOf("\n");
+        while (index >= 0) {
+          lines.push(buffer.slice(0, index));
+          buffer = buffer.slice(index + 1);
+          index = buffer.indexOf("\n");
+        }
+      });
+      const exited = new Promise<number | null>((resolve) => {
+        child.on("exit", (code) => resolve(code));
+      });
+      child.stdin.write(
+        methods
+          .map(
+            (method, index) =>
+              `{"jsonrpc":"2.0","id":${index + 1},"method":"${method}","params":${rootParam}}\n`,
+          )
+          .join(""),
+      );
+      const exitCode = await exited;
+
+      // Assertions run only after the child exits, so a failure can
+      // never strand the subprocess.
+      expect(exitCode).toBe(0);
+      expect(lines).toHaveLength(methods.length);
+      const responses = lines.map(
+        (line) =>
+          JSON.parse(line) as {
+            jsonrpc: string;
+            id: number;
+            result?: Record<string, unknown>;
+            error?: unknown;
+          },
+      );
+      responses.forEach((response, index) => {
+        expect(response.jsonrpc).toBe("2.0");
+        expect(response.id).toBe(index + 1);
+        expect(response.error).toBeUndefined();
+        expect(response.result).toBeTypeOf("object");
+      });
+
+      const [initialize, discover] = responses;
+      expect(initialize?.result?.protocol_version).toBe("1.2.0");
+      expect(initialize?.result?.capabilities).toEqual({
+        classify_signals: true,
+        cognitive_complexity: true,
+        discover: true,
+        doc_coverage: true,
+        streaming: false,
+        test_mapping: true,
+      });
+      expect(discover?.result?.source_files).toEqual(["src/store.ts"]);
+      expect(discover?.result?.test_files).toEqual(["tests/store.test.ts"]);
+
+      LIFECYCLE_METHODS.forEach(([method, key], offset) => {
+        const result = responses[offset + 2]?.result ?? {};
+        expect(Object.keys(result), method).toEqual([key]);
+        const rows = result[key];
+        expect(Array.isArray(rows), method).toBe(true);
+        expect((rows as unknown[]).length, method).toBeGreaterThan(0);
+      });
+
+      expect(responses.at(-1)?.result).toEqual({});
+    } finally {
+      child.kill();
+      await tree.cleanup();
+    }
   });
 
   // The closed kind set (005 FR-001): the gaze protocol's doc_coverage
