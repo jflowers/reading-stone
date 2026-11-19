@@ -67,7 +67,7 @@ keeps TypeScript identifiers identical to the wire names, the
 | `test_function` | `string` | The describe-qualified title (Section 5.1); possibly empty (non-static titles) |
 | `test_file` | `string` | Root-relative POSIX path of the test file |
 | `assertion_location` | `string` | `"<relPath>:<line>"` — 1-based line of the assertion's anchor (the outermost wrapper of the matcher/assert invocation, `await` spellings included); no column component |
-| `assertion_type` | `string` | Exactly one of `equality`, `comparison`, `membership`, `error_check`, `""` — never `generic`, never `null` |
+| `assertion_type` | `string` | Exactly one of `equality`, `error_check`, `nil_check`, `diff_check`, `custom` — Gaze's assertion-type set; never empty, never `null` |
 | `target_function` | `string` | The target record's declared name |
 | `target_package` | `string` | `derivePackage(targetRecord.relPath)` — the dotted module path |
 | `side_effect_type` | `string` | One of the 48 canonical taxonomy names (aliases never emitted) |
@@ -78,7 +78,7 @@ export interface MappingRow {
   readonly test_function: string;
   readonly test_file: string;
   readonly assertion_location: string;
-  readonly assertion_type: AssertionKind; // "" | "equality" | "comparison" | "membership" | "error_check"
+  readonly assertion_type: AssertionKind; // "equality" | "error_check" | "nil_check" | "diff_check" | "custom"
   readonly target_function: string;
   readonly target_package: string;
   readonly side_effect_type: SideEffectType;
@@ -93,8 +93,7 @@ export interface TestMappingResult {
 
 **Serializer** (`serializeMappingRow`, `src/quality/types.ts`): the
 `serializeSignal` house pattern — fail loud (Constitution I):
-`assertion_type` membership in the closed five-value kind set
-(including `""`); `side_effect_type` canonical membership through
+`assertion_type` membership in the closed five-value kind set; `side_effect_type` canonical membership through
 `resolveSideEffectType` (a canonical name passes, anything else throws
 — aliases are construction-time bugs that must not reach the wire);
 `confidence` an integer in [0, 100]; every string field type-checked.
@@ -104,26 +103,42 @@ An empty analysis is a `{"mappings": []}` success (US1-8).
 
 ## 3. Assertion-type vocabulary
 
-The closed kind set (FR-001/FR-008, spec assumptions 1–2):
+The closed kind set (FR-001/FR-008, spec assumptions 1–2) is Gaze's
+assertion-type set, verbatim from the porting contract
+(`docs/porting/taxonomy-reference.md` § Assertion Types) and the
+`assertion_type` enum of Gaze's JSON report schema:
 
 | Kind | Denotation |
 |---|---|
-| `equality` | The assertion pins an exact value: `toBe` (documented strict equality / `Object.is`), structural equality, closeness, object-shape matching, with-argument mock forms |
-| `comparison` | Ordered relations only: strictly the `toBeGreaterThan` / `toBeLessThan` families |
-| `membership` | Containment and pattern matching: `toContain` family, `toMatch` |
-| `error_check` | The assertion observes the error channel: `toThrow` family, every matcher under `.rejects`, `assert.throws` family |
-| `""` | Recognized assertion, unclassified kind: property, truthiness, type, bare-occurrence, count, and snapshot forms; unknown or custom matchers |
+| `equality` | The assertion checks a value: exact and structural equality, closeness, object shape, with-argument mock forms, ordered relations, containment and pattern matching, truthiness, type and instance checks, length and property checks |
+| `error_check` | The assertion observes the error channel: `toThrow` family, every matcher under `.rejects`, `assert.throws` family, `assert.ifError` |
+| `nil_check` | Null/undefined presence: `toBeNull`, `toBeUndefined`, `toBeDefined` |
+| `diff_check` | Structural diff against a recorded expectation: `toMatchSnapshot`, `toMatchInlineSnapshot` |
+| `custom` | Framework-specific or unrecognized: mock-interaction occurrence and count forms, predicate matchers, `assert.fail`, unknown or custom matchers |
 
-Two deliberate divergences from the reference analyzer's six-value set:
-no `generic` (the empty string is the unclassified convention — the
-platform's assertion-detection metric counts rows carrying a recognized
-type, so `""` feeds it exactly), and no `identity` (Python's `is`
-bucket has no distinct vitest/jest analog — `toBe` is documented
-strict equality and routes to `equality`).
+**Routing principle** (amended 2026-11-19, OpenSpec change
+`align-assertion-types`): each vitest/jest/`node:assert` form routes to
+the kind Gaze's Go-native detector assigns its testify analog
+(`internal/quality/assertion.go` `classifyTestifyCall` +
+`internal/quality/mapping.go` `mapKindToType`): `Equal`, `Contains`,
+`Regexp`, `Len`, `Empty`, `True`/`False`, `Greater`/`Less`, `IsType`,
+`Implements`, `Zero`, `InDelta` → `equality`; `NoError`/`Error*` →
+`error_check`; `Nil`/`NotNil` → `nil_check`; `cmp.Diff` → `diff_check`;
+anything unrecognized → `custom`. A TypeScript suite and an equivalent
+Go suite therefore score identically on Gaze's assertion-detection
+confidence, which counts rows with a non-empty `assertion_type`
+(`internal/adapter/quality.go` `classificationConfidence`).
+
+Superseded (pre-amendment): the four-kind set `equality`,
+`comparison`, `membership`, `error_check` plus `""` for unclassified,
+adapted from the reference analyzer's six-value set. It was not
+Gaze's vocabulary: `comparison` and `membership` fall outside Gaze's
+report-schema enum, and every `""` row lowered Gaze's
+assertion-detection confidence for 19 standard matchers.
 
 Negation semantics (assumption 3): `.not.` and `not`-prefixed assert
-functions preserve the underlying kind — the `comparison` kind denotes
-ordered relations only, never inequality. `resolves`/`rejects`
+functions preserve the underlying kind — negation flips polarity,
+never the kind. `resolves`/`rejects`
 (assumption 4): `.resolves.` preserves the matcher's kind; `.rejects.`
 routes to `error_check` (the assertion is about the rejection channel).
 
@@ -134,7 +149,7 @@ routes to `error_check` (the assertion is about the rejection channel).
 FR-007 pins this table as normative data. `src/quality/matchers.ts`
 transcribes it verbatim; `tests/quality/matchers.test.ts` diffs the
 module against this section. The lookup is total: a form absent from
-the table routes to `""` through the miss path — never an exception,
+the table routes to `custom` through the miss path — never an exception,
 never a drop (US3-6).
 
 ### 4.1 `expect()` matchers
@@ -155,36 +170,36 @@ never a drop (US3-6).
 | `toBeCalledWith` | `equality` (legacy jest alias) |
 | `lastCalledWith` | `equality` (legacy jest alias) |
 | `nthCalledWith` | `equality` (legacy jest alias) |
-| `toBeGreaterThan` | `comparison` |
-| `toBeGreaterThanOrEqual` | `comparison` |
-| `toBeLessThan` | `comparison` |
-| `toBeLessThanOrEqual` | `comparison` |
-| `toContain` | `membership` |
-| `toContainEqual` | `membership` |
-| `toMatch` | `membership` |
+| `toBeGreaterThan` | `equality` |
+| `toBeGreaterThanOrEqual` | `equality` |
+| `toBeLessThan` | `equality` |
+| `toBeLessThanOrEqual` | `equality` |
+| `toContain` | `equality` |
+| `toContainEqual` | `equality` |
+| `toMatch` | `equality` |
 | `toThrow` | `error_check` |
 | `toThrowError` | `error_check` |
 | `toThrowErrorMatchingSnapshot` | `error_check` |
 | `toThrowErrorMatchingInlineSnapshot` | `error_check` |
-| `toBeTruthy` | `""` |
-| `toBeFalsy` | `""` |
-| `toBeNull` | `""` |
-| `toBeUndefined` | `""` |
-| `toBeDefined` | `""` |
-| `toBeNaN` | `""` |
-| `toBeInstanceOf` | `""` |
-| `toHaveBeenCalled` | `""` |
-| `toHaveBeenCalledTimes` | `""` |
-| `toHaveReturned` | `""` |
-| `toHaveReturnedTimes` | `""` |
-| `toBeCalled` | `""` (legacy jest alias) |
-| `toBeCalledTimes` | `""` (legacy jest alias) |
-| `toHaveProperty` | `""` |
-| `toHaveLength` | `""` |
-| `toMatchSnapshot` | `""` |
-| `toMatchInlineSnapshot` | `""` |
-| `toBeTypeOf` | `""` (vitest) |
-| `toSatisfy` | `""` (vitest) |
+| `toBeTruthy` | `equality` |
+| `toBeFalsy` | `equality` |
+| `toBeNull` | `nil_check` |
+| `toBeUndefined` | `nil_check` |
+| `toBeDefined` | `nil_check` |
+| `toBeNaN` | `equality` |
+| `toBeInstanceOf` | `equality` |
+| `toHaveBeenCalled` | `custom` |
+| `toHaveBeenCalledTimes` | `custom` |
+| `toHaveReturned` | `custom` |
+| `toHaveReturnedTimes` | `custom` |
+| `toBeCalled` | `custom` (legacy jest alias) |
+| `toBeCalledTimes` | `custom` (legacy jest alias) |
+| `toHaveProperty` | `equality` |
+| `toHaveLength` | `equality` |
+| `toMatchSnapshot` | `diff_check` |
+| `toMatchInlineSnapshot` | `diff_check` |
+| `toBeTypeOf` | `equality` (vitest) |
+| `toSatisfy` | `custom` (vitest) |
 
 **Modifier semantics** (applied to the invoked matcher's kind):
 
@@ -208,22 +223,22 @@ routing — the syntactic form routes identically.
 
 | Assert form | Kind |
 |---|---|
-| `assert(value)` (bare) | `""` |
-| `assert.ok` | `""` |
-| `assert.ifError` | `""` |
-| `assert.fail` | `""` |
+| `assert(value)` (bare) | `equality` |
+| `assert.ok` | `equality` |
+| `assert.ifError` | `error_check` |
+| `assert.fail` | `custom` |
 | `assert.equal` / `assert.notEqual` | `equality` |
 | `assert.strictEqual` / `assert.notStrictEqual` | `equality` |
 | `assert.deepEqual` / `assert.notDeepEqual` | `equality` |
 | `assert.deepStrictEqual` / `assert.notDeepStrictEqual` | `equality` |
-| `assert.match` / `assert.doesNotMatch` | `membership` |
+| `assert.match` / `assert.doesNotMatch` | `equality` |
 | `assert.throws` | `error_check` |
 | `assert.doesNotThrow` | `error_check` |
 | `assert.rejects` | `error_check` |
 | `assert.doesNotReject` | `error_check` |
 
 `not`-prefixed functions preserve their base kind (US3-7). An
-unknown member call on an assert binding routes to `""`. The asserted
+unknown member call on an assert binding routes to `custom`. The asserted
 expression — provenance's subject — is the FIRST argument of every
 assert form.
 
@@ -268,7 +283,7 @@ discipline, never a request crash.
 
 | Field | Type | Notes |
 |---|---|---|
-| `kind` | `AssertionKind` | The classified kind or `""` (Section 4) |
+| `kind` | `AssertionKind` | The classified kind (Section 4) |
 | `line` | `number` | 1-based line of the assertion's anchor — the outermost wrapper of the matcher/assert invocation (`await` and parenthesized wrappers unwrapped upward), so every matcher invocation on one shared chain reports the SAME anchor (US1-1; the row's `assertion_location` line, no column on the wire) |
 | `character` | `number` | 0-based character of that same outermost anchor — the row-order tie-break |
 | `assertedExpression` | `Node \| null` | The provenance subject: `expect(...)`'s first argument, or the assert call's first argument; `null` when absent |
@@ -395,7 +410,7 @@ By assertion type alone — never provenance:
 ErrorReturn if present, else ErrorSignal if present, else ErrorReturn
 ```
 
-### 7.2 Value rows (`equality`, `comparison`, `membership`, `""`)
+### 7.2 Value rows (`equality`, `nil_check`, `diff_check`, `custom`)
 
 **Standard fallback chain** (FR-010 — the reference's final
 semantics, generator-aware from the start):
@@ -508,8 +523,8 @@ responses including a full second pipeline run.
    one pair shares the pair's strategy confidence; there is no
    per-assertion confidence.
 6. **Kind totality** (FR-007/FR-008): every expect matcher invocation
-   and recognized assert call classifies to a kind or `""` — the
-   table's miss path is total.
+   and recognized assert call classifies to a kind — the
+   table's miss path (`custom`) is total.
 7. **Static analysis only** (FR-012, Constitution V): test files are
    parsed by the compiler API inside the bounded hermetic host, never
    executed or imported — pinned by canary fixtures.

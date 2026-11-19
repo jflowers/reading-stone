@@ -427,6 +427,13 @@ is the actual operand in every standard form.
 
 ## R6: The matcher table — normative data, totality, and the unknown-form fallback
 
+> **Amended 2026-11-19** (OpenSpec change `align-assertion-types`): the
+> kind set is now Gaze's `equality` / `error_check` / `nil_check` /
+> `diff_check` / `custom`, routed by parity with Gaze's Go-native testify
+> routing, and the miss path routes to `custom` instead of `""`. The
+> decision record below is kept as written; data-model.md Sections 3–4
+> are the current normative source.
+
 **Decision**: `matchers.ts` is pure fixed data — the FR-007 routing
 table: every standard vitest/jest matcher and `node:assert` function
 routed to a classification kind or explicitly to none (`""`),
