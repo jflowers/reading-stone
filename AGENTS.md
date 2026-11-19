@@ -85,7 +85,8 @@ The division of responsibility:
 - **Runtime**: Node.js stdlib plus one runtime dependency:
   `typescript` (the compiler package, consumed at runtime via
   `typescript/unstable/sync`; moved from devDependencies to
-  dependencies — v0.1.0 shipped with zero runtime deps)
+  dependencies — the unpublished v0.1.0 scaffold had zero
+  runtime deps; v0.2.0 is the first npm release)
 - **Project management**: npm
 - **Testing**: [vitest](https://vitest.dev/) with
   `@vitest/coverage-v8`
