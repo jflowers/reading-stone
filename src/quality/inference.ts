@@ -112,8 +112,8 @@ function errorRowType(effects: readonly Effect[]): SideEffectType {
 
 /**
  * The value-row fallback chain (FR-010; data-model Section 7): value
- * rows — `equality`, `comparison`, `membership`, and the unclassified
- * `""` kind alike — follow the standard chain:
+ * rows — every kind except `error_check` (`equality`, `nil_check`,
+ * `diff_check`, `custom`) — follow the standard chain:
  *
  * 1. `ReturnValue` when present (presence-based: it shadows a P0 effect
  *    that precedes it in the array);

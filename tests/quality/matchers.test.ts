@@ -8,7 +8,7 @@
  *    node:assert form to its pinned kind, apply the chain-modifier rule
  *    (`.not.`/`.resolves.` preserve, `.rejects.` reroutes to
  *    `error_check`, other intermediate properties inert), and route every
- *    miss to `""` — never an exception, never a drop (US3-6).
+ *    miss to `custom` — never an exception, never a drop (US3-6).
  * 2. Doc parity — specs/004-test-mapping/data-model.md's Section 4
  *    tables are parsed and diffed row-for-row against the module, so the
  *    normative prose cannot drift from the shipped table. The document
@@ -44,8 +44,8 @@
  *
  * HOW CELLS MAP TO ASSERTIONS
  * - Kind cell: one trailing parenthesized annotation is stripped
- *   (`(legacy jest alias)`, `(vitest)`), and the literal `""` maps to
- *   the empty string — the unclassified kind's wire spelling.
+ *   (`(legacy jest alias)`, `(vitest)`); the remainder is the kind's
+ *   wire spelling verbatim.
  * - Matcher cell (4.1): the matcher name verbatim.
  * - Assert-form cell (4.2): split on ` / ` into forms; each form's
  *   trailing `(bare)` annotation is stripped; `assert(value)` marks the
@@ -85,16 +85,19 @@ const EQUALITY_MATCHERS: readonly string[] = [
   "nthCalledWith",
 ];
 
-/** The 4 comparison matchers — ordered relations only. */
-const COMPARISON_MATCHERS: readonly string[] = [
+/**
+ * The 4 ordered-relation matchers — routed to equality (testify
+ * `Greater`/`Less` precedent; Gaze has no ordered-relation kind).
+ */
+const ORDERED_MATCHERS: readonly string[] = [
   "toBeGreaterThan",
   "toBeGreaterThanOrEqual",
   "toBeLessThan",
   "toBeLessThanOrEqual",
 ];
 
-/** The 3 membership matchers — containment and pattern matching. */
-const MEMBERSHIP_MATCHERS: readonly string[] = [
+/** The 3 containment/pattern matchers — equality (testify `Contains`/`Regexp`). */
+const CONTAINMENT_MATCHERS: readonly string[] = [
   "toContain",
   "toContainEqual",
   "toMatch",
@@ -108,26 +111,41 @@ const ERROR_CHECK_MATCHERS: readonly string[] = [
   "toThrowErrorMatchingInlineSnapshot",
 ];
 
-/** The 19 `""`-routed forms: property, truthiness, occurrence, count, snapshot (and siblings). */
-const UNCLASSIFIED_MATCHERS: readonly string[] = [
+/**
+ * The 7 truthiness/type/shape matchers — equality (testify `True`,
+ * `IsType`, `Len` precedent), in document order.
+ */
+const VALUE_PREDICATE_MATCHERS: readonly string[] = [
   "toBeTruthy",
   "toBeFalsy",
+  "toBeNaN",
+  "toBeInstanceOf",
+  "toHaveProperty",
+  "toHaveLength",
+  "toBeTypeOf",
+];
+
+/** The 3 nil_check matchers (testify `Nil`/`NotNil`). */
+const NIL_CHECK_MATCHERS: readonly string[] = [
   "toBeNull",
   "toBeUndefined",
   "toBeDefined",
-  "toBeNaN",
-  "toBeInstanceOf",
+];
+
+/** The 2 diff_check matchers (go-cmp `Diff`): snapshot comparison. */
+const DIFF_CHECK_MATCHERS: readonly string[] = [
+  "toMatchSnapshot",
+  "toMatchInlineSnapshot",
+];
+
+/** The 7 custom matchers: mock occurrence/count forms and the predicate matcher. */
+const CUSTOM_MATCHERS: readonly string[] = [
   "toHaveBeenCalled",
   "toHaveBeenCalledTimes",
   "toHaveReturned",
   "toHaveReturnedTimes",
   "toBeCalled",
   "toBeCalledTimes",
-  "toHaveProperty",
-  "toHaveLength",
-  "toMatchSnapshot",
-  "toMatchInlineSnapshot",
-  "toBeTypeOf",
   "toSatisfy",
 ];
 
@@ -142,14 +160,15 @@ const EQUALITY_ASSERTS: readonly string[] = [
   "deepStrictEqual",
   "notDeepStrictEqual",
 ];
-const MEMBERSHIP_ASSERTS: readonly string[] = ["match", "doesNotMatch"];
+const VALUE_ASSERTS: readonly string[] = ["ok", "match", "doesNotMatch"];
 const ERROR_CHECK_ASSERTS: readonly string[] = [
+  "ifError",
   "throws",
   "doesNotThrow",
   "rejects",
   "doesNotReject",
 ];
-const UNCLASSIFIED_ASSERTS: readonly string[] = ["ok", "ifError", "fail"];
+const CUSTOM_ASSERTS: readonly string[] = ["fail"];
 
 // ---------------------------------------------------------------------------
 // Doc parser — module-private, mirroring tests/disposition.test.ts's
@@ -210,10 +229,9 @@ function isHeaderRow(line: string, headerCells: readonly string[]): boolean {
   );
 }
 
-/** Parses the kind cell: strip one trailing annotation; `""` is the empty-string kind. */
+/** Parses the kind cell: strip one trailing annotation. */
 function parseKindCell(cell: string): string {
-  const kind = cell.replace(/\s*\([^)]*\)\s*$/, "").trim();
-  return kind === '""' ? "" : kind;
+  return cell.replace(/\s*\([^)]*\)\s*$/, "").trim();
 }
 
 /**
@@ -337,7 +355,7 @@ const MINIMAL_MATCHER_DOC: string = [
   "| --- | --- |",
   "| `toBe` | `equality` |",
   "| `toBeCalledWith` | `equality` (legacy jest alias) |",
-  '| `toBeTypeOf` | `""` (vitest) |',
+  "| `toBeTypeOf` | `equality` (vitest) |",
   "",
   "Prose after the table.",
 ].join("\n");
@@ -347,21 +365,21 @@ const MINIMAL_ASSERT_DOC: string = [
   "",
   "| Assert form | Kind |",
   "| --- | --- |",
-  '| `assert(value)` (bare) | `""` |',
-  '| `assert.ok` | `""` |',
+  "| `assert(value)` (bare) | `equality` |",
+  "| `assert.fail` | `custom` |",
   "| `assert.equal` / `assert.notEqual` | `equality` |",
-  "| `assert.match` / `assert.doesNotMatch` | `membership` |",
+  "| `assert.ifError` | `error_check` |",
   "",
   "Prose after the table.",
 ].join("\n");
 
 describe("parseMatcherTable (parser contract)", () => {
-  it("parses rows with kind annotations and the literal empty-string kind", () => {
+  it("parses rows with kind annotations stripped", () => {
     const rows = parseMatcherTable(MINIMAL_MATCHER_DOC);
     expect(rows).toEqual([
       { matcher: "toBe", kind: "equality", line: 5 },
       { matcher: "toBeCalledWith", kind: "equality", line: 6 },
-      { matcher: "toBeTypeOf", kind: "", line: 7 },
+      { matcher: "toBeTypeOf", kind: "equality", line: 7 },
     ]);
   });
 
@@ -409,10 +427,10 @@ describe("parseAssertTable (parser contract)", () => {
   it("splits two-form rows, recognizes the bare form, and strips (bare) annotations", () => {
     const rows = parseAssertTable(MINIMAL_ASSERT_DOC);
     expect(rows).toEqual([
-      { members: [], bare: true, kind: "", line: 5 },
-      { members: ["ok"], bare: false, kind: "", line: 6 },
+      { members: [], bare: true, kind: "equality", line: 5 },
+      { members: ["fail"], bare: false, kind: "custom", line: 6 },
       { members: ["equal", "notEqual"], bare: false, kind: "equality", line: 7 },
-      { members: ["match", "doesNotMatch"], bare: false, kind: "membership", line: 8 },
+      { members: ["ifError"], bare: false, kind: "error_check", line: 8 },
     ]);
   });
 
@@ -420,7 +438,7 @@ describe("parseAssertTable (parser contract)", () => {
     const doc = [
       "| Assert form | Kind |",
       "| --- | --- |",
-      '| require(`x`) | `""` |',
+      "| require(`x`) | `custom` |",
     ].join("\n");
     expect(() => parseAssertTable(doc)).toThrow(
       /unrecognized assert form at line 3: "require\(x\)"/,
@@ -437,41 +455,57 @@ describe("classifyExpectChain: matcher routing (Section 4.1)", () => {
     expect(classifyExpectChain(matcher, [])).toBe("equality");
   });
 
-  it.each(COMPARISON_MATCHERS)("routes %s to comparison", (matcher) => {
-    expect(classifyExpectChain(matcher, [])).toBe("comparison");
-  });
-
-  it.each(MEMBERSHIP_MATCHERS)("routes %s to membership", (matcher) => {
-    expect(classifyExpectChain(matcher, [])).toBe("membership");
-  });
+  it.each([...ORDERED_MATCHERS, ...CONTAINMENT_MATCHERS, ...VALUE_PREDICATE_MATCHERS])(
+    "routes %s to equality (testify-analog parity)",
+    (matcher) => {
+      expect(classifyExpectChain(matcher, [])).toBe("equality");
+    },
+  );
 
   it.each(ERROR_CHECK_MATCHERS)("routes %s to error_check", (matcher) => {
     expect(classifyExpectChain(matcher, [])).toBe("error_check");
   });
 
-  it.each(UNCLASSIFIED_MATCHERS)("routes %s to the empty string", (matcher) => {
-    expect(classifyExpectChain(matcher, [])).toBe("");
+  it.each(NIL_CHECK_MATCHERS)("routes %s to nil_check", (matcher) => {
+    expect(classifyExpectChain(matcher, [])).toBe("nil_check");
+  });
+
+  it.each(DIFF_CHECK_MATCHERS)("routes %s to diff_check", (matcher) => {
+    expect(classifyExpectChain(matcher, [])).toBe("diff_check");
+  });
+
+  it.each(CUSTOM_MATCHERS)("routes %s to custom", (matcher) => {
+    expect(classifyExpectChain(matcher, [])).toBe("custom");
   });
 
   it.each(["toBeWithin", "toCustomMatcher", "toEqual-ish", "not"])(
-    "routes the unknown/custom matcher %s to the empty string (never an exception, never a drop)",
+    "routes the unknown/custom matcher %s to custom (never an exception, never a drop)",
     (matcher) => {
-      expect(classifyExpectChain(matcher, [])).toBe("");
+      expect(classifyExpectChain(matcher, [])).toBe("custom");
     },
   );
+
+  it("never routes any matcher, known or unknown, to the empty string", () => {
+    for (const kind of EXPECT_MATCHER_KINDS.values()) {
+      expect(kind).not.toBe("");
+    }
+    expect(classifyExpectChain("toBeWithin", [])).not.toBe("");
+  });
 });
 
 describe("classifyExpectChain: modifier semantics (Section 4.1's modifier table)", () => {
   it(".not. preserves the matcher's kind", () => {
     expect(classifyExpectChain("toBe", ["not"])).toBe("equality");
     expect(classifyExpectChain("toThrow", ["not"])).toBe("error_check");
-    expect(classifyExpectChain("toContain", ["not"])).toBe("membership");
-    expect(classifyExpectChain("toBeTruthy", ["not"])).toBe("");
+    expect(classifyExpectChain("toContain", ["not"])).toBe("equality");
+    expect(classifyExpectChain("toBeNull", ["not"])).toBe("nil_check");
+    expect(classifyExpectChain("toHaveBeenCalled", ["not"])).toBe("custom");
   });
 
   it(".resolves. preserves the matcher's kind", () => {
     expect(classifyExpectChain("toEqual", ["resolves"])).toBe("equality");
-    expect(classifyExpectChain("toBeGreaterThan", ["resolves"])).toBe("comparison");
+    expect(classifyExpectChain("toBeGreaterThan", ["resolves"])).toBe("equality");
+    expect(classifyExpectChain("toBeUndefined", ["resolves"])).toBe("nil_check");
     expect(classifyExpectChain("toThrow", ["resolves"])).toBe("error_check");
   });
 
@@ -487,7 +521,7 @@ describe("classifyExpectChain: modifier semantics (Section 4.1's modifier table)
   it("any other intermediate property is inert (classification by the invoked matcher)", () => {
     expect(classifyExpectChain("toEqual", ["foo"])).toBe("equality");
     expect(classifyExpectChain("toBe", ["some", "unknown", "chain"])).toBe("equality");
-    expect(classifyExpectChain("toBeTruthy", ["context"])).toBe("");
+    expect(classifyExpectChain("toMatchSnapshot", ["context"])).toBe("diff_check");
   });
 
   it("modifier combinations: preservation composes, .rejects. wins regardless", () => {
@@ -509,38 +543,41 @@ describe("classifyAssertCall: node:assert routing (Section 4.2)", () => {
     expect(classifyAssertCall(member)).toBe("equality");
   });
 
-  it.each(MEMBERSHIP_ASSERTS)("routes assert.%s to membership", (member) => {
-    expect(classifyAssertCall(member)).toBe("membership");
-  });
+  it.each(VALUE_ASSERTS)(
+    "routes assert.%s to equality (testify True/Regexp parity)",
+    (member) => {
+      expect(classifyAssertCall(member)).toBe("equality");
+    },
+  );
 
   it.each(ERROR_CHECK_ASSERTS)("routes assert.%s to error_check", (member) => {
     expect(classifyAssertCall(member)).toBe("error_check");
   });
 
-  it.each(UNCLASSIFIED_ASSERTS)("routes assert.%s to the empty string", (member) => {
-    expect(classifyAssertCall(member)).toBe("");
+  it.each(CUSTOM_ASSERTS)("routes assert.%s to custom", (member) => {
+    expect(classifyAssertCall(member)).toBe("custom");
   });
 
-  it("routes the memberless bare call assert(value) to the empty string", () => {
-    expect(classifyAssertCall(undefined)).toBe("");
+  it("routes the memberless bare call assert(value) to equality, like assert.ok", () => {
+    expect(classifyAssertCall(undefined)).toBe("equality");
   });
 
   it.each(["equalsStrict", "calledWith", "matches", "iferror"])(
-    "routes the unknown member %s to the empty string (never an exception, never a drop)",
+    "routes the unknown member %s to custom (never an exception, never a drop)",
     (member) => {
-      expect(classifyAssertCall(member)).toBe("");
+      expect(classifyAssertCall(member)).toBe("custom");
     },
   );
 
-  it("not-prefixed functions preserve their base kind (never comparison — it denotes ordered relations only)", () => {
-    // The not-siblings are equality rows in the pinned table; this test
-    // names the principle so a future table edit rerouting any of them
-    // to "comparison" fails with the semantic reason visible.
+  it("not-prefixed functions preserve their base kind (negation flips polarity, never the kind)", () => {
+    // The not-siblings share their base form's row; this test names the
+    // principle so a future table edit splitting a pair fails with the
+    // semantic reason visible.
     expect(classifyAssertCall("notEqual")).toBe("equality");
     expect(classifyAssertCall("notStrictEqual")).toBe("equality");
     expect(classifyAssertCall("notDeepEqual")).toBe("equality");
     expect(classifyAssertCall("notDeepStrictEqual")).toBe("equality");
-    expect(classifyAssertCall("doesNotMatch")).toBe("membership");
+    expect(classifyAssertCall("doesNotMatch")).toBe("equality");
     expect(classifyAssertCall("doesNotThrow")).toBe("error_check");
     expect(classifyAssertCall("doesNotReject")).toBe("error_check");
   });
@@ -570,12 +607,12 @@ describe("src/quality/matchers.ts against data-model.md Section 4 (doc parity)",
     ).toEqual([...ASSERT_FUNCTION_KINDS.entries()]);
   });
 
-  it("pins the bare assert(value) form to the empty string", () => {
+  it("pins the bare assert(value) form to equality", () => {
     const bareKinds = ASSERT_ROWS.filter((row) => row.bare).map((row) => row.kind);
     expect(
       bareKinds,
-      "exactly the doc's bare row(s), each routed to the empty string",
-    ).toEqual([""]);
+      "exactly the doc's bare row(s), each routed to equality (testify True parity)",
+    ).toEqual(["equality"]);
   });
 
   it("keeps the pinned behavioral lists consistent with the document rows", () => {
@@ -583,22 +620,25 @@ describe("src/quality/matchers.ts against data-model.md Section 4 (doc parity)",
     // lists above) and the doc rows must describe the same table — this
     // closes the loop so a doc edit that does not update the pinned
     // lists (or vice versa) fails here with both sides named.
-    expect(
-      MATCHER_ROWS.filter((row) => row.kind === "equality").map((row) => row.matcher),
-    ).toEqual(EQUALITY_MATCHERS);
-    expect(
-      MATCHER_ROWS.filter((row) => row.kind === "comparison").map((row) => row.matcher),
-    ).toEqual(COMPARISON_MATCHERS);
-    expect(
-      MATCHER_ROWS.filter((row) => row.kind === "membership").map((row) => row.matcher),
-    ).toEqual(MEMBERSHIP_MATCHERS);
-    expect(
-      MATCHER_ROWS.filter((row) => row.kind === "error_check").map(
-        (row) => row.matcher,
-      ),
-    ).toEqual(ERROR_CHECK_MATCHERS);
-    expect(
-      MATCHER_ROWS.filter((row) => row.kind === "").map((row) => row.matcher),
-    ).toEqual(UNCLASSIFIED_MATCHERS);
+    const rowsOf = (kind: string): string[] =>
+      MATCHER_ROWS.filter((row) => row.kind === kind).map((row) => row.matcher);
+    expect(rowsOf("equality")).toEqual([
+      ...EQUALITY_MATCHERS,
+      ...ORDERED_MATCHERS,
+      ...CONTAINMENT_MATCHERS,
+      ...VALUE_PREDICATE_MATCHERS,
+    ]);
+    expect(rowsOf("error_check")).toEqual(ERROR_CHECK_MATCHERS);
+    expect(rowsOf("nil_check")).toEqual(NIL_CHECK_MATCHERS);
+    expect(rowsOf("diff_check")).toEqual(DIFF_CHECK_MATCHERS);
+    expect(rowsOf("custom")).toEqual(CUSTOM_MATCHERS);
+    // Gaze's closed set, exactly: no row carries any other kind.
+    expect([...new Set(MATCHER_ROWS.map((row) => row.kind))].sort()).toEqual([
+      "custom",
+      "diff_check",
+      "equality",
+      "error_check",
+      "nil_check",
+    ]);
   });
 });

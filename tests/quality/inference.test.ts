@@ -137,9 +137,9 @@ describe("inferSideEffectType (error rows)", () => {
 describe("inferSideEffectType (value rows)", () => {
   it("selects ReturnValue when present, for every value kind", () => {
     expect(infer("equality", ["ReturnValue"])).toBe("ReturnValue");
-    expect(infer("comparison", ["ReturnValue"])).toBe("ReturnValue");
-    expect(infer("membership", ["ReturnValue"])).toBe("ReturnValue");
-    expect(infer("", ["ReturnValue"])).toBe("ReturnValue");
+    expect(infer("nil_check", ["ReturnValue"])).toBe("ReturnValue");
+    expect(infer("diff_check", ["ReturnValue"])).toBe("ReturnValue");
+    expect(infer("custom", ["ReturnValue"])).toBe("ReturnValue");
   });
 
   it("lets ReturnValue shadow a P0 effect that precedes it in the array", () => {
@@ -190,9 +190,9 @@ describe("inferSideEffectType (value rows)", () => {
     // US1-7: inference is total — a target with no detected effects at all
     // maps ReturnValue, never an omission.
     expect(infer("equality", [])).toBe("ReturnValue");
-    expect(infer("comparison", [])).toBe("ReturnValue");
-    expect(infer("membership", [])).toBe("ReturnValue");
-    expect(infer("", [])).toBe("ReturnValue");
+    expect(infer("nil_check", [])).toBe("ReturnValue");
+    expect(infer("diff_check", [])).toBe("ReturnValue");
+    expect(infer("custom", [])).toBe("ReturnValue");
   });
 
   it("falls back to ReturnValue when only inapplicable effects are present", () => {
@@ -200,11 +200,14 @@ describe("inferSideEffectType (value rows)", () => {
     expect(infer("equality", ["MapMutation", "ContainerMutation"])).toBe("ReturnValue");
   });
 
-  it("treats the unclassified kind as a value row", () => {
-    // "" is a recognized assertion with no classification — the standard
-    // chain governs it exactly like the classified value kinds.
-    expect(infer("", ["ErrorSignal"])).toBe("ErrorSignal");
-    expect(infer("", ["GeneratorYield"])).toBe("GeneratorYield");
+  it("treats nil_check, diff_check, and custom as value rows", () => {
+    // Only error_check selects the error chain; every other kind — the
+    // miss-path custom kind included — follows the standard chain exactly
+    // like equality.
+    expect(infer("custom", ["ErrorSignal"])).toBe("ErrorSignal");
+    expect(infer("custom", ["GeneratorYield"])).toBe("GeneratorYield");
+    expect(infer("nil_check", ["ErrorSignal"])).toBe("ErrorSignal");
+    expect(infer("diff_check", ["GeneratorYield"])).toBe("GeneratorYield");
   });
 });
 

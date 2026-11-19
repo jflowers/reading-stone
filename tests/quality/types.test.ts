@@ -78,10 +78,10 @@ describe("serializeMappingRow: valid rows", () => {
 
   it.each([
     { kind: "equality" },
-    { kind: "comparison" },
-    { kind: "membership" },
     { kind: "error_check" },
-    { kind: "" },
+    { kind: "nil_check" },
+    { kind: "diff_check" },
+    { kind: "custom" },
   ] as const)("accepts the closed kind value %j", ({ kind }) => {
     const serialized = serializeMappingRow(
       rowWith({ assertion_type: kind satisfies AssertionKind }),
@@ -114,8 +114,18 @@ describe("serializeMappingRow: valid rows", () => {
 });
 
 describe("serializeMappingRow: fail-loud validation", () => {
-  it.each(["generic", "identity", "EQUALITY", "equality ", "error-check"])(
-    "throws on the kind value %j (never generic, never anything outside the closed set)",
+  it.each([
+    "",
+    "comparison",
+    "membership",
+    "generic",
+    "identity",
+    "EQUALITY",
+    "equality ",
+    "error-check",
+    "nil-check",
+  ])(
+    "throws on the kind value %j (never empty, never anything outside Gaze's closed set)",
     (kind) => {
       expect(() =>
         serializeMappingRow(rowWith({ assertion_type: kind as AssertionKind })),

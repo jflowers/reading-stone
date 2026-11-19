@@ -91,7 +91,7 @@ class MappingWalkDepthExceeded extends Error {
  * subtree is pass 4's scan domain.
  */
 export interface AssertionSite {
-  /** The classified kind — a kind or `""` (Section 4's normative table). */
+  /** The classified kind (Section 4's normative table). */
   readonly kind: AssertionKind;
   /**
    * 1-based line of the assertion's anchor — the outermost wrapper of
@@ -433,7 +433,7 @@ function assertionAnchor(
  * tie-break. Classification runs through the normative table
  * (src/quality/matchers.ts): the matcher's kind under the modifier rule
  * (`.rejects.` → `error_check`, else the matcher's row), and an unknown
- * or custom matcher routes to `""` — never an exception, never a drop.
+ * or custom matcher routes to `custom` — never an exception, never a drop.
  *
  * @param test The paired test function.
  * @param stderr The diagnostic sink for depth-budget skips (the server's

@@ -20,28 +20,32 @@ import type { AssertionKind } from "./types.js";
  *   module's entries, order included (the disposition-table anti-drift
  *   pattern), so the code table and the normative prose cannot drift
  *   apart.
- * - Total miss path: a form absent from the table routes to `""` — never
- *   an exception, never a drop (US3-6). An unknown matcher (custom
+ * - Total miss path: a form absent from the table routes to `custom` —
+ *   never an exception, never a drop (US3-6). An unknown matcher (custom
  *   `expect.extend` vocabulary) and an unknown `assert` member are
- *   recognized-but-unclassified assertions, not errors.
+ *   recognized assertions of an unrecognized kind, not errors.
  *
- * The classification principles the table encodes (data-model Section 3;
- * spec FR-008):
+ * The kind set is Gaze's assertion-type set (porting contract
+ * `docs/porting/taxonomy-reference.md`; the report-schema enum), and the
+ * routing principle is parity with Gaze's Go-native detector: each form
+ * takes the kind Gaze assigns its testify analog (data-model Section 3,
+ * amended by OpenSpec change `align-assertion-types`):
  *
- * - `equality` — the assertion pins an exact value: `toBe` (documented
- *   strict equality / `Object.is`), structural equality, closeness,
- *   object-shape matching, with-argument mock forms.
- * - `comparison` — ordered relations only: strictly the
- *   `toBeGreaterThan` / `toBeLessThan` families. Negation NEVER routes
- *   here — `.not.` and `not`-prefixed assert functions preserve the
- *   underlying kind (the kind denotes the relation, not its polarity).
- * - `membership` — containment and pattern matching.
- * - `error_check` — the assertion observes the error channel: the
- *   `toThrow` family, every matcher under `.rejects`, the
- *   `assert.throws` family.
- * - `""` — recognized assertion, unclassified kind: property,
- *   truthiness, type, bare-occurrence, count, and snapshot forms;
- *   unknown or custom matchers.
+ * - `equality` — value checks of every shape: exact and structural
+ *   equality, closeness, object shape, with-argument mock forms, ordered
+ *   relations (testify `Greater`/`Less`), containment and patterns
+ *   (`Contains`/`Regexp`), truthiness (`True`/`False`), length (`Len`),
+ *   type and instance checks (`IsType`).
+ * - `error_check` — the error channel: the `toThrow` family, every
+ *   matcher under `.rejects`, the `assert.throws` family, and
+ *   `assert.ifError` (testify `NoError`).
+ * - `nil_check` — null/undefined presence (testify `Nil`/`NotNil`).
+ * - `diff_check` — snapshot matchers (go-cmp `Diff`).
+ * - `custom` — mock occurrence/count forms, predicate matchers,
+ *   `assert.fail`, and unknown or custom matchers.
+ *
+ * Negation never changes the kind: `.not.` and `not`-prefixed assert
+ * functions preserve it.
  *
  * `node:assert/strict` changes call semantics, not routing (data-model
  * Section 4.2): the syntactic form routes identically, which is why the
@@ -82,40 +86,40 @@ export const EXPECT_MATCHER_KINDS: ReadonlyMap<string, AssertionKind> = new Map<
   ["toBeCalledWith", "equality"],
   ["lastCalledWith", "equality"],
   ["nthCalledWith", "equality"],
-  // --- comparison: ordered relations only ---
-  ["toBeGreaterThan", "comparison"],
-  ["toBeGreaterThanOrEqual", "comparison"],
-  ["toBeLessThan", "comparison"],
-  ["toBeLessThanOrEqual", "comparison"],
-  // --- membership: containment and pattern matching ---
-  ["toContain", "membership"],
-  ["toContainEqual", "membership"],
-  ["toMatch", "membership"],
+  // --- equality: ordered relations (testify Greater/Less) ---
+  ["toBeGreaterThan", "equality"],
+  ["toBeGreaterThanOrEqual", "equality"],
+  ["toBeLessThan", "equality"],
+  ["toBeLessThanOrEqual", "equality"],
+  // --- equality: containment and patterns (testify Contains/Regexp) ---
+  ["toContain", "equality"],
+  ["toContainEqual", "equality"],
+  ["toMatch", "equality"],
   // --- error_check: the error channel ---
   ["toThrow", "error_check"],
   ["toThrowError", "error_check"],
   ["toThrowErrorMatchingSnapshot", "error_check"],
   ["toThrowErrorMatchingInlineSnapshot", "error_check"],
-  // --- recognized, unclassified ---
-  ["toBeTruthy", ""],
-  ["toBeFalsy", ""],
-  ["toBeNull", ""],
-  ["toBeUndefined", ""],
-  ["toBeDefined", ""],
-  ["toBeNaN", ""],
-  ["toBeInstanceOf", ""],
-  ["toHaveBeenCalled", ""],
-  ["toHaveBeenCalledTimes", ""],
-  ["toHaveReturned", ""],
-  ["toHaveReturnedTimes", ""],
-  ["toBeCalled", ""],
-  ["toBeCalledTimes", ""],
-  ["toHaveProperty", ""],
-  ["toHaveLength", ""],
-  ["toMatchSnapshot", ""],
-  ["toMatchInlineSnapshot", ""],
-  ["toBeTypeOf", ""],
-  ["toSatisfy", ""],
+  // --- formerly unclassified, routed by testify analog ---
+  ["toBeTruthy", "equality"],
+  ["toBeFalsy", "equality"],
+  ["toBeNull", "nil_check"],
+  ["toBeUndefined", "nil_check"],
+  ["toBeDefined", "nil_check"],
+  ["toBeNaN", "equality"],
+  ["toBeInstanceOf", "equality"],
+  ["toHaveBeenCalled", "custom"],
+  ["toHaveBeenCalledTimes", "custom"],
+  ["toHaveReturned", "custom"],
+  ["toHaveReturnedTimes", "custom"],
+  ["toBeCalled", "custom"],
+  ["toBeCalledTimes", "custom"],
+  ["toHaveProperty", "equality"],
+  ["toHaveLength", "equality"],
+  ["toMatchSnapshot", "diff_check"],
+  ["toMatchInlineSnapshot", "diff_check"],
+  ["toBeTypeOf", "equality"],
+  ["toSatisfy", "custom"],
 ]);
 
 /**
@@ -123,19 +127,20 @@ export const EXPECT_MATCHER_KINDS: ReadonlyMap<string, AssertionKind> = new Map<
  * data-model.md table order (flattened over the document's
  * ` / `-separated two-form rows): assert member name → classification
  * kind. The memberless bare call `assert(value)` is not an entry — it is
- * the `undefined` member in `classifyAssertCall`, routed to `""`.
+ * the `undefined` member in `classifyAssertCall`, routed to `equality`
+ * like `assert.ok` (testify `True`).
  *
- * `not`-prefixed functions carry their base kind (US3-7: the comparison
- * kind denotes ordered relations only, never inequality).
+ * `not`-prefixed functions carry their base kind (US3-7: negation flips
+ * polarity, never the kind).
  */
 export const ASSERT_FUNCTION_KINDS: ReadonlyMap<string, AssertionKind> = new Map<
   string,
   AssertionKind
 >([
-  // --- recognized, unclassified ---
-  ["ok", ""],
-  ["ifError", ""],
-  ["fail", ""],
+  // --- truthiness, error, and unconditional-failure forms ---
+  ["ok", "equality"],
+  ["ifError", "error_check"],
+  ["fail", "custom"],
   // --- equality (each with its not-sibling) ---
   ["equal", "equality"],
   ["notEqual", "equality"],
@@ -145,9 +150,9 @@ export const ASSERT_FUNCTION_KINDS: ReadonlyMap<string, AssertionKind> = new Map
   ["notDeepEqual", "equality"],
   ["deepStrictEqual", "equality"],
   ["notDeepStrictEqual", "equality"],
-  // --- membership ---
-  ["match", "membership"],
-  ["doesNotMatch", "membership"],
+  // --- equality: patterns (testify Regexp) ---
+  ["match", "equality"],
+  ["doesNotMatch", "equality"],
   // --- error_check ---
   ["throws", "error_check"],
   ["doesNotThrow", "error_check"],
@@ -184,15 +189,15 @@ const ERROR_CHANNEL_MODIFIER = "rejects";
  *   never sees an await.
  *
  * The miss path is total: an unknown or custom matcher name (the
- * `expect.extend` vocabulary) routes to `""` — never an exception, never
- * a drop.
+ * `expect.extend` vocabulary) routes to `custom` — never an exception,
+ * never a drop.
  *
  * @param matcher The invoked property's name — the matcher (`"toBe"` in
  * `expect(x).not.toBe(y)`).
  * @param modifiers The intermediate property names between the `expect`
  * call and the invoked matcher, in chain order (`["not"]` in
  * `expect(x).not.toBe(y)`; `[]` for a bare `expect(x).toBe(y)`).
- * @returns The classified `AssertionKind` — a kind or `""`.
+ * @returns The classified `AssertionKind` (`custom` on a miss).
  */
 export function classifyExpectChain(
   matcher: string,
@@ -201,7 +206,7 @@ export function classifyExpectChain(
   if (modifiers.includes(ERROR_CHANNEL_MODIFIER)) {
     return "error_check";
   }
-  return EXPECT_MATCHER_KINDS.get(matcher) ?? "";
+  return EXPECT_MATCHER_KINDS.get(matcher) ?? "custom";
 }
 
 /**
@@ -214,16 +219,17 @@ export function classifyExpectChain(
  * assert-binding table's concern in src/quality/assertions.ts).
  *
  * The miss path is total: an unknown member call on an assert binding
- * routes to `""` — never an exception, never a drop.
+ * routes to `custom` — never an exception, never a drop.
  *
  * @param member The invoked member's name (`"equal"` for
  * `assert.equal(a, b)`), or `undefined` for the memberless bare
- * truthiness call `assert(value)`.
- * @returns The classified `AssertionKind` — a kind or `""`.
+ * truthiness call `assert(value)`, which routes to `equality` like
+ * `assert.ok` (testify `True`).
+ * @returns The classified `AssertionKind` (`custom` on a miss).
  */
 export function classifyAssertCall(member: string | undefined): AssertionKind {
   if (member === undefined) {
-    return "";
+    return "equality";
   }
-  return ASSERT_FUNCTION_KINDS.get(member) ?? "";
+  return ASSERT_FUNCTION_KINDS.get(member) ?? "custom";
 }

@@ -18,8 +18,7 @@ import { resolveSideEffectType, type SideEffectType } from "../taxonomy.js";
  * call-site discipline — fail loud, never emit invalid protocol data:
  *
  * - `assertion_type` membership in the closed five-value kind set
- *   (including `""` — the unclassified convention; never `generic`,
- *   never `null`).
+ *   (Gaze's assertion-type set — never empty, never `null`).
  * - `side_effect_type` CANONICAL membership through `resolveSideEffectType`
  *   — a canonical name passes, anything else throws. This is the one
  *   deliberate divergence from `serializeSignal`, which RESOLVES an
@@ -43,18 +42,19 @@ import { resolveSideEffectType, type SideEffectType } from "../taxonomy.js";
 
 /**
  * The closed assertion-kind vocabulary (FR-001/FR-008; data-model.md
- * Section 3): exactly five values, the empty string being the
- * unclassified convention — never `generic` (the reference analyzer's
- * sixth value is deliberately dropped: the platform's
- * assertion-detection metric counts rows carrying a recognized type, so
- * `""` feeds it exactly), never `null`.
+ * Section 3): exactly Gaze's assertion-type set — the porting contract's
+ * `docs/porting/taxonomy-reference.md` § Assertion Types and the
+ * `assertion_type` enum of Gaze's JSON report schema. Never empty: Gaze
+ * counts a row toward assertion-detection confidence only when its type
+ * is non-empty, and its Go-native detector routes unknown forms to
+ * `custom` (amended by OpenSpec change `align-assertion-types`).
  */
 export type AssertionKind =
-  | ""
   | "equality"
-  | "comparison"
-  | "membership"
-  | "error_check";
+  | "error_check"
+  | "nil_check"
+  | "diff_check"
+  | "custom";
 
 /**
  * One test-to-assertion mapping row (FR-001; data-model.md Section 2).
@@ -75,7 +75,7 @@ export interface MappingRow {
   readonly test_file: string;
   /** `"<relPath>:<line>"` — the expect/assert call's 1-based line; no column. */
   readonly assertion_location: string;
-  /** The classified kind or `""` (Section 4's normative table). */
+  /** The classified kind (Section 4's normative table). */
   readonly assertion_type: AssertionKind;
   /** The target record's declared name. */
   readonly target_function: string;
@@ -118,11 +118,11 @@ export interface TestMappingResult {
  * a misspelled member is a compile error.
  */
 const ASSERTION_KINDS: ReadonlySet<string> = new Set<AssertionKind>([
-  "",
   "equality",
-  "comparison",
-  "membership",
   "error_check",
+  "nil_check",
+  "diff_check",
+  "custom",
 ]);
 
 /**

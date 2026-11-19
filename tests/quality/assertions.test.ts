@@ -154,14 +154,14 @@ it("kinds", () => {
         hasAssertedExpression: true,
       },
       {
-        kind: "comparison",
+        kind: "equality",
         line: 5,
         character: 2,
         expectChain: true,
         hasAssertedExpression: true,
       },
       {
-        kind: "membership",
+        kind: "equality",
         line: 6,
         character: 2,
         expectChain: true,
@@ -174,10 +174,10 @@ it("kinds", () => {
         expectChain: true,
         hasAssertedExpression: true,
       },
-      // The miss path is total: an unknown or custom matcher routes to ""
-      // — never an exception, never a drop (US3-6).
+      // The miss path is total: an unknown or custom matcher routes to
+      // custom — never an exception, never a drop (US3-6).
       {
-        kind: "",
+        kind: "custom",
         line: 8,
         character: 2,
         expectChain: true,
@@ -304,7 +304,7 @@ it("double", () => {
         hasAssertedExpression: true,
       },
       {
-        kind: "",
+        kind: "nil_check",
         line: 3,
         character: 2,
         expectChain: true,
@@ -551,19 +551,19 @@ it("families", () => {
       "equality", // toMatchObject
       "equality", // toHaveBeenCalledWith
       "equality", // toHaveReturnedWith
-      "comparison", // toBeGreaterThan
-      "comparison", // toBeLessThanOrEqual
-      "membership", // toContain
-      "membership", // toContainEqual
-      "membership", // toMatch
+      "equality", // toBeGreaterThan (testify Greater)
+      "equality", // toBeLessThanOrEqual (testify LessOrEqual)
+      "equality", // toContain (testify Contains)
+      "equality", // toContainEqual
+      "equality", // toMatch (testify Regexp)
       "error_check", // toThrow
       "error_check", // toThrowError
-      "", // toBeTruthy
-      "", // toBeDefined
-      "", // toBeNaN
-      "", // toHaveBeenCalled
-      "", // toHaveBeenCalledTimes
-      "", // toBeInstanceOf
+      "equality", // toBeTruthy (testify True)
+      "nil_check", // toBeDefined (testify NotNil)
+      "equality", // toBeNaN
+      "custom", // toHaveBeenCalled — mock occurrence
+      "custom", // toHaveBeenCalledTimes — mock count
+      "equality", // toBeInstanceOf (testify IsType)
     ]);
     expect(sites.every((site) => site.expectChain)).toBe(true);
   });
@@ -589,7 +589,7 @@ it("parity", () => {
     expect(shapeOf(sites).map((site) => site.kind)).toEqual([
       "equality", // .not. preserves
       "equality", // .resolves. preserves
-      "error_check", // .rejects. reroutes membership
+      "error_check", // .rejects. reroutes toContain
       "equality", // awaited resolves chain classifies identically
     ]);
   });
@@ -623,15 +623,15 @@ it("default form", () => {
       "default form",
     );
     expect(shapeOf(sites).map((site) => site.kind)).toEqual([
-      "", // bare truthiness call
-      "", // ok
-      "", // ifError
-      "", // fail
+      "equality", // bare truthiness call (testify True)
+      "equality", // ok
+      "error_check", // ifError (testify NoError)
+      "custom", // fail — unconditional failure
       "equality", // equal
       "equality", // notStrictEqual — US3-7: not-prefixed preserves
-      "membership", // match
+      "equality", // match (testify Regexp)
       "error_check", // throws
-      "", // unknown member — the total miss path, never a drop
+      "custom", // unknown member — the total miss path, never a drop
     ]);
     expect(sites.every((site) => !site.expectChain)).toBe(true);
   });
@@ -654,7 +654,7 @@ it("namespace form", () => {
     expect(shapeOf(sites).map((site) => site.kind)).toEqual([
       "equality", // strictEqual
       "error_check", // doesNotThrow
-      "", // bare truthiness on the namespace binding
+      "equality", // bare truthiness on the namespace binding
     ]);
     expect(sites.every((site) => !site.expectChain)).toBe(true);
   });
@@ -697,7 +697,7 @@ it("cjs form", () => {
       "cjs form",
     );
     expect(shapeOf(sites).map((site) => site.kind)).toEqual([
-      "", // ok
+      "equality", // ok
       "equality", // deepEqual
     ]);
     expect(sites.every((site) => !site.expectChain)).toBe(true);
