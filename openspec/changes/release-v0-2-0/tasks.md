@@ -2,7 +2,7 @@
 
 ## 1. Versioning
 
-- [ ] 1.1 Bump version to `0.2.0` in `package.json`/`package-lock.json` (`npm version 0.2.0 --no-git-tag-version`) and `VERSION` in `src/index.ts`; update the `tests/cli.test.ts` version pins
+- [x] 1.1 Bump version to `0.2.0` in `package.json`/`package-lock.json` (`npm version 0.2.0 --no-git-tag-version`) and `VERSION` in `src/index.ts`; update the `tests/cli.test.ts` version pins
 
 ## 2. Packaging
 
