@@ -15,8 +15,8 @@
 
 ## 4. Documentation
 
-- [ ] 4.1 Add `CHANGELOG.md` with the v0.2.0 entry
-- [ ] 4.2 README: v0.2.0 status heading, npm install path, exact `typescript` pin note; AGENTS.md: correct the "v0.1.0 shipped" claim
+- [x] 4.1 Add `CHANGELOG.md` with the v0.2.0 entry
+- [x] 4.2 README: v0.2.0 status heading, npm install path, exact `typescript` pin note; AGENTS.md: correct the "v0.1.0 shipped" claim
 
 ## 5. OpenSpec hygiene and gates
 

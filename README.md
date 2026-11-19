@@ -5,7 +5,7 @@
 Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/stdout
 (protocol v1.2.0). Gaze owns the CLI, scoring, and reports.
 
-## Current status (v0.1.0)
+## Current status (v0.2.0)
 
 | Method | Status |
 |--------|--------|
@@ -86,6 +86,18 @@ reports.
 
 Requires Node.js 22+.
 
+### From npm
+
+```bash
+npm i -g reading-stone
+```
+
+The package's only runtime dependency is `typescript`, pinned exactly
+(currently `7.0.2`): Reading Stone uses the compiler's
+`typescript/unstable/*` API, which carries no semver stability
+guarantee, so the pin moves only in a Reading Stone release. It is
+independent of the TypeScript version the analyzed project uses.
+
 ### From a clone (local development)
 
 ```bash
@@ -102,12 +114,6 @@ analyzer over stdin/stdout:
   auto-discovery looks for; either name works in `.gaze.yaml`.
 
 ## Configuration
-
-Install the package globally:
-
-```bash
-npm i -g reading-stone
-```
 
 Gaze auto-discovers external analyzers by PATH naming convention:
 run gaze with `--language typescript` (e.g.
