@@ -31,6 +31,8 @@ for TypeScript and JavaScript projects.
   synthesized `contradiction` signals (#4).
 - `test_mapping`: vitest/jest and `node:assert` test-to-assertion
   mapping with pairing confidences and side-effect inference (#5).
+  `assertion_type` uses Gaze's assertion-type set (`equality`,
+  `error_check`, `nil_check`, `diff_check`, `custom`), never empty (#28).
 - `doc_coverage`: documentation coverage over the exported symbol
   surface (#6).
 - `cognitive_complexity`: SonarSource cognitive complexity per
