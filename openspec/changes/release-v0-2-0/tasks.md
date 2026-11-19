@@ -21,4 +21,4 @@
 ## 5. OpenSpec hygiene and gates
 
 - [x] 5.1 Archive `align-protocol-v1-2-0` with `--skip-specs`
-- [ ] 5.2 Run the CI parity gates — `npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage` — all pass at ≥85%
+- [x] 5.2 Run the CI parity gates — `npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage` — all pass at ≥85%
