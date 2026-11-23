@@ -261,6 +261,26 @@ instead of producing one itself.
 When input is malformed, Reading Stone emits a one-line diagnostic to
 **stderr** and continues. **stdout carries only the JSON-RPC response.**
 
+## Releasing
+
+Releases are staged by CI and published by a maintainer. Nothing
+reaches npm without a human 2FA approval.
+
+1. On `main`, bump the version (`package.json`, `package-lock.json`,
+   `VERSION` in `src/index.ts`) and date its `CHANGELOG.md` entry, then
+   merge.
+2. Tag the merged commit `vX.Y.Z` (matching `package.json`) and push the
+   tag.
+3. Approve the `npm` environment deployment on the `release` workflow
+   run. The run checks the tag against `package.json`, reruns the CI
+   gates, and runs `npm stage publish --provenance` through npm trusted
+   publishing (OIDC, no tokens). Prerelease versions stage under the
+   `next` dist-tag.
+4. Approve the staged version on npmjs.com (Staged Packages) or with
+   `npm stage approve <stage-id>`. Both require 2FA. The version goes
+   public at this step.
+5. Create the GitHub release for the tag.
+
 ## License
 
 Apache 2.0 -- see [LICENSE](LICENSE). The JSON-RPC protocol layer, the
