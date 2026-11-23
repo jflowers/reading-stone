@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-11-23
 
 First npm release. Implements the complete
 [Gaze analyzer protocol](https://github.com/unbound-force/gaze) v1.2.0
