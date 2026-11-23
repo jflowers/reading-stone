@@ -11,13 +11,19 @@
 #                  The `release-tag-protection` ruleset (as in gaze)
 #                  makes v* tags immutable once created: no deletion,
 #                  no moves.
-#   3. stage     — in the `npm` environment (required reviewers), checks
-#                  out the tag, reruns the CI gates, sets the package
-#                  version from the tag (not committed; main holds
-#                  0.0.0-development), and runs
-#                  `npm stage publish` through npm trusted publishing
-#                  (OIDC; no tokens). The version goes public when a
-#                  maintainer approves it on npmjs.com with 2FA.
+#   3. stage     — in the `npm` environment (main only), checks out the
+#                  tag, reruns the CI gates, sets the package version
+#                  from the tag (not committed; main holds
+#                  0.0.0-development), and runs `npm stage publish`
+#                  through npm trusted publishing (OIDC; no tokens).
+#                  Skipped if the version is already on npm, so re-runs
+#                  are safe. The version goes public only when a
+#                  maintainer approves it on npmjs.com with 2FA — the
+#                  one human approval in a release.
+#   4. github-release — creates the GitHub release for the tag with
+#                  generated notes (skipped if it exists). If the staged
+#                  version is later rejected, delete the release by hand;
+#                  the tag stays.
 #
 # The npm trust relationship pins this file's name (release.yml) and
 # the `npm` environment, so neither can change without re-creating it.
@@ -88,22 +94,62 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - name: Install npm with staged publishing support
         run: npm install -g npm@11.21.2
-      - run: npm ci
-      - run: npx biome check src/ tests/
-      - run: npm run build
-      - run: npx vitest run --coverage
+      - name: Check whether the version is already on npm
+        id: npm
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          if npm view "reading-stone@${TAG#v}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::reading-stone@${TAG#v} is already on npm; skipping staging"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.npm.outputs.published == 'false'
+        run: npm ci
+      - if: steps.npm.outputs.published == 'false'
+        run: npx biome check src/ tests/
+      - if: steps.npm.outputs.published == 'false'
+        run: npm run build
+      - if: steps.npm.outputs.published == 'false'
+        run: npx vitest run --coverage
       # After the gates, which test the tag as committed (package.json
       # holds the placeholder). VERSION is read from package.json at
       # load time, so nothing built needs to change.
       - name: Set the package version from the tag
+        if: steps.npm.outputs.published == 'false'
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
         run: npm version "${TAG#v}" --no-git-tag-version
       - name: Stage for maintainer approval
+        if: steps.npm.outputs.published == 'false'
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
         run: |
           case "$TAG" in
             *-*) npm stage publish --provenance --tag next ;;
             *) npm stage publish --provenance ;;
+          esac
+
+  github-release:
+    name: GitHub release
+    needs: [preflight, stage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists; leaving it unchanged"
+            exit 0
+          fi
+          case "$TAG" in
+            *-*) gh release create "$TAG" --verify-tag --generate-notes --prerelease ;;
+            *) gh release create "$TAG" --verify-tag --generate-notes ;;
           esac

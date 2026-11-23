@@ -263,7 +263,8 @@ When input is malformed, Reading Stone emits a one-line diagnostic to
 
 ## Releasing
 
-Releases are tagged and staged by CI and published by a maintainer.
+Releases are tagged, staged, and given a GitHub release by CI, and
+published to npm by a maintainer.
 Release tags are created by the `release` workflow and can't be deleted
 or moved afterward (the `release-tag-protection` ruleset). Nothing
 reaches npm without a human 2FA approval.
@@ -275,18 +276,21 @@ the placeholder `0.0.0-development`; nothing is bumped by hand.
    release → Run workflow, or
    `gh workflow run release.yml -f tag=vX.Y.Z`). It runs the shared
    release preflight (semver, uniqueness, ordering, CI status,
-   unreleased commits) and creates the annotated tag.
-2. Approve the `npm` environment deployment on the run. The stage job
-   checks out the tag, reruns the CI gates, sets the package version
-   to `X.Y.Z` (not committed), and runs
-   `npm stage publish --provenance` through npm trusted publishing
-   (OIDC, no tokens). Prerelease versions stage under the `next`
-   dist-tag.
-3. Approve the staged version on npmjs.com (Staged Packages) or with
-   `npm stage approve <stage-id>`. Both require 2FA. The version goes
-   public at this step.
-4. Create the GitHub release for the tag
-   (`gh release create vX.Y.Z --verify-tag --generate-notes`).
+   unreleased commits) and creates the annotated tag. The stage job then
+   checks out the tag, reruns the CI gates, sets the package version to
+   `X.Y.Z` (not committed), and runs `npm stage publish --provenance`
+   through npm trusted publishing (OIDC, no tokens). Last, it creates
+   the GitHub release with generated notes. Prerelease tags stage under
+   the `next` dist-tag and get a GitHub prerelease.
+2. Approve the staged version on npmjs.com (Staged Packages) or with
+   `npm stage approve <stage-id>` (npm 11.15.0 or newer, e.g.
+   `npx -y npm@11.21.2 stage approve <stage-id>`). Both require 2FA.
+   The version goes public at this step; it is the only approval.
+
+Re-running the workflow is safe: a version already on npm is not
+restaged, and an existing GitHub release is left unchanged. If you
+reject a staged version (`npm stage reject <stage-id>`), delete its
+GitHub release by hand (`gh release delete vX.Y.Z`); the tag stays.
 
 ## License
 
