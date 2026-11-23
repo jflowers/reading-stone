@@ -10,7 +10,7 @@
 
 ## 3. Gates
 
-- [ ] 3.1 `actionlint` passes on `release.yml`; CI parity gates pass (`npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage`)
+- [x] 3.1 `actionlint` passes on `release.yml`; CI parity gates pass (`npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage`)
 
 ## 4. Repository settings (maintainer)
 
