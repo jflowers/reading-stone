@@ -282,6 +282,20 @@ Before marking any task complete, agents MUST run the same checks CI
 runs. Derive commands from `.github/workflows/ci.yml`, not from
 memory.
 
+### Release Pipeline
+
+`.github/workflows/release.yml` only calls the shared npm pipeline in
+[`jflowers/ship`](https://github.com/jflowers/ship)
+(`.github/workflows/npm-release.yml`), pinned by commit SHA, the same one
+the other npm packages use. org-infra's preflight creates the tag; then, in
+the `npm` environment, ship reruns the gates listed in `release.yml`, sets
+the version from the tag and runs `npm stage publish`. Releasing through
+ship is a deliberate maintainer decision: fix the pipeline there and bump
+the pin, rather than moving it back into this repo. Keep the `checks` in
+`release.yml` in step with `ci.yml`. npm trusts the calling workflow, so
+`release.yml`'s file name and the `npm` environment can't change without
+re-creating the trusted publisher.
+
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan

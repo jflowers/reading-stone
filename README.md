@@ -274,14 +274,16 @@ the placeholder `0.0.0-development`; nothing is bumped by hand.
 
 1. Run the `release` workflow from `main` with the new tag (Actions →
    release → Run workflow, or
-   `gh workflow run release.yml -f tag=vX.Y.Z`). It runs the shared
-   release preflight (semver, uniqueness, ordering, CI status,
-   unreleased commits) and creates the annotated tag. The stage job then
-   checks out the tag, reruns the CI gates, sets the package version to
-   `X.Y.Z` (not committed), and runs `npm stage publish --provenance`
-   through npm trusted publishing (OIDC, no tokens). Last, it creates
-   the GitHub release with generated notes. Prerelease tags stage under
-   the `next` dist-tag and get a GitHub prerelease.
+   `gh workflow run release.yml -f tag=vX.Y.Z`). It calls the shared
+   npm pipeline in [`jflowers/ship`](https://github.com/jflowers/ship),
+   which runs the release preflight (semver, uniqueness, ordering, CI
+   status, unreleased commits) and creates the annotated tag. The
+   stage job then checks out the tag, reruns the CI gates, sets the
+   package version to `X.Y.Z` (not committed), and runs
+   `npm stage publish --provenance` through npm trusted publishing
+   (OIDC, no tokens). Last, it creates the GitHub release with
+   generated notes. Prerelease tags stage under the `next` dist-tag
+   and get a GitHub prerelease.
 2. Approve the staged version on npmjs.com (Staged Packages) or with
    `npm stage approve <stage-id>` (npm 11.15.0 or newer, e.g.
    `npx -y npm@11.21.2 stage approve <stage-id>`). Both require 2FA.
