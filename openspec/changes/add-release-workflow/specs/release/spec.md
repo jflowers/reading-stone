@@ -1,18 +1,23 @@
 ## ADDED Requirements
 
-### Requirement: Tag-triggered staged npm release
+### Requirement: Dispatched staged npm release
 
-The repository SHALL provide a GitHub Actions workflow at `.github/workflows/release.yml` that runs on pushed tags matching `v*`. The job runs in the `npm` environment. Its permissions are `contents: read` and `id-token: write`, and the workflow-level permissions are empty. It authenticates to npm only through OIDC trusted publishing: no npm token is referenced. It stages the package with `npm stage publish --provenance` and never runs `npm publish`.
+The repository SHALL provide `.github/workflows/release.yml`, triggered only by `workflow_dispatch` with a required `tag` input, that creates the `v*` tag and stages the package in the `npm` environment via OIDC trusted publishing (`npm stage publish --provenance`), never running `npm publish` or referencing an npm token. Workflow-level permissions SHALL be empty; the stage job SHALL hold only `contents: read` and `id-token: write`.
 
-#### Scenario: A version tag stages the package
+#### Scenario: A valid run tags and stages
 
-- **WHEN** a tag `vX.Y.Z` is pushed and the `package.json` version is `X.Y.Z`
-- **THEN** after environment approval, the workflow runs the CI gates (`npm ci`, `npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage`) and stages `reading-stone@X.Y.Z` with provenance, awaiting maintainer 2FA approval
+- **WHEN** a maintainer runs the workflow from `main` with `tag` `vX.Y.Z`, the `package.json` version at `HEAD` is `X.Y.Z`, `vX.Y.Z` does not exist and is newer than the latest tag, and `test (22)` and `test (24)` passed on `HEAD`
+- **THEN** the preflight creates the annotated tag `vX.Y.Z` at `HEAD`. After environment approval, the stage job checks out the tag, runs the CI gates (`npm ci`, `npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage`), and stages `reading-stone@X.Y.Z` with provenance, awaiting maintainer 2FA approval
 
 #### Scenario: Tag and package version disagree
 
-- **WHEN** the pushed tag is not `v` followed by the `package.json` version
-- **THEN** the workflow fails before staging anything
+- **WHEN** the `tag` input is not `v` followed by the `package.json` version at `HEAD`
+- **THEN** the workflow fails before any tag is created or anything is staged
+
+#### Scenario: Run dispatched off main
+
+- **WHEN** the workflow is dispatched from any ref other than `refs/heads/main`
+- **THEN** the workflow fails before any tag is created or anything is staged
 
 #### Scenario: Prerelease versions stage under next
 
@@ -22,4 +27,4 @@ The repository SHALL provide a GitHub Actions workflow at `.github/workflows/rel
 #### Scenario: Actions are pinned
 
 - **WHEN** the workflow file is inspected
-- **THEN** every `uses:` reference is pinned to a full 40-character commit SHA
+- **THEN** every `uses:` reference, reusable workflows included, is pinned to a full 40-character commit SHA
