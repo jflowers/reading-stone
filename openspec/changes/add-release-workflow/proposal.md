@@ -18,7 +18,7 @@ No `release.yml` exists yet. Every release therefore still depends on a maintain
   The staged version goes public only when a maintainer approves it on npmjs.com with 2FA.
 - README: a "Releasing" section documenting run → approve environment → approve on npm → GitHub release.
 - Repository settings that a maintainer applies, listed in design.md:
-  - the `version tags` ruleset gains the GitHub Actions app as its only bypass actor, so the workflow can create `v*` tags while people still can't;
+  - the `version tags` ruleset becomes gaze's `release-tag-protection`: `v*` tags may be created, so the workflow's `GITHUB_TOKEN` can tag, but never deleted or moved; org admins can bypass;
   - the `npm` environment's deployment policy moves from the `v*` tag to the `main` branch, because a dispatched run's ref is the branch.
 
 Out of scope: automating the GitHub release notes, CHANGELOG dating, and version bumps. Those stay with the maintainer before the run.
@@ -36,5 +36,5 @@ None.
 ## Impact
 
 - New `.github/workflows/release.yml`; `README.md`.
-- Repository settings: the `version tags` ruleset bypass list and the `npm` environment deployment policy.
+- Repository settings, declared in `zero-dot-force/.github` safe-settings: the tag ruleset (`version tags` → `release-tag-protection`) and the `npm` environment deployment policy.
 - No source, test, or package changes. The Gaze protocol contract is unaffected.

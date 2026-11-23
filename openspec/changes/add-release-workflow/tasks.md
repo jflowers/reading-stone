@@ -14,5 +14,5 @@
 
 ## 4. Repository settings (maintainer)
 
-- [ ] 4.1 `version tags` ruleset: add the GitHub Actions app (Integration 15368, `always`) as the sole bypass actor
-- [ ] 4.2 `npm` environment: deployment policy `main` branch instead of the `v*` tag
+- [ ] 4.1 Tag ruleset: replace `version tags` with gaze's `release-tag-protection` (`refs/tags/v*`; `deletion`, `non_fast_forward`; `OrganizationAdmin` bypass) via zero-dot-force/.github#35
+- [x] 4.2 `npm` environment: deployment policy `main` branch instead of the `v*` tag (zero-dot-force/.github#33, applied by safe-settings sync run 45237222310)
