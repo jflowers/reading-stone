@@ -263,23 +263,28 @@ When input is malformed, Reading Stone emits a one-line diagnostic to
 
 ## Releasing
 
-Releases are staged by CI and published by a maintainer. Nothing
-reaches npm without a human 2FA approval.
+Releases are tagged and staged by CI and published by a maintainer.
+Nobody pushes `v*` tags by hand (a ruleset blocks it), and nothing reaches
+npm without a human 2FA approval.
 
 1. On `main`, bump the version (`package.json`, `package-lock.json`,
    `VERSION` in `src/index.ts`) and date its `CHANGELOG.md` entry, then
-   merge.
-2. Tag the merged commit `vX.Y.Z` (matching `package.json`) and push the
-   tag.
-3. Approve the `npm` environment deployment on the `release` workflow
-   run. The run checks the tag against `package.json`, reruns the CI
-   gates, and runs `npm stage publish --provenance` through npm trusted
-   publishing (OIDC, no tokens). Prerelease versions stage under the
-   `next` dist-tag.
+   merge and let `ci` pass.
+2. Run the `release` workflow from `main` (Actions → release → Run
+   workflow, or `gh workflow run release.yml -f tag=vX.Y.Z`) with the
+   tag matching `package.json`. It verifies the tag, runs the shared
+   release preflight (semver, uniqueness, ordering, CI status,
+   unreleased commits), and creates the annotated tag.
+3. Approve the `npm` environment deployment on the run. The stage job
+   builds the tagged commit, reruns the CI gates, and runs
+   `npm stage publish --provenance` through npm trusted publishing
+   (OIDC, no tokens). Prerelease versions stage under the `next`
+   dist-tag.
 4. Approve the staged version on npmjs.com (Staged Packages) or with
    `npm stage approve <stage-id>`. Both require 2FA. The version goes
    public at this step.
-5. Create the GitHub release for the tag.
+5. Create the GitHub release for the tag
+   (`gh release create vX.Y.Z --verify-tag --generate-notes`).
 
 ## License
 

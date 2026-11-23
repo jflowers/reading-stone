@@ -2,11 +2,11 @@
 
 ## 1. Workflow
 
-- [ ] 1.1 Add `.github/workflows/release.yml`: `workflow_dispatch` with a required `tag` input; a verify job (main-only, tag = `v` + `package.json` version); the pinned `complytime/org-infra` preflight (`allow_prerelease: true`, `ci_checks: ["test (22)", "test (24)"]`); a stage job in the `npm` environment (`contents: read` + `id-token: write`, checks out the tag, SHA-pinned checkout/setup-node on Node 24 with no cache, pinned `npm@11.21.2`, CI gates, `npm stage publish --provenance`, `--tag next` for prereleases)
+- [x] 1.1 Add `.github/workflows/release.yml`: `workflow_dispatch` with a required `tag` input; a verify job (main-only, tag = `v` + `package.json` version); the pinned `complytime/org-infra` preflight (`allow_prerelease: true`, `ci_checks: ["test (22)", "test (24)"]`); a stage job in the `npm` environment (`contents: read` + `id-token: write`, checks out the tag, SHA-pinned checkout/setup-node on Node 24 with no cache, pinned `npm@11.21.2`, CI gates, `npm stage publish --provenance`, `--tag next` for prereleases)
 
 ## 2. Documentation
 
-- [ ] 2.1 README: "Releasing" section (bump and date on `main`, run the workflow with the tag, approve the environment, approve on npm, GitHub release)
+- [x] 2.1 README: "Releasing" section (bump and date on `main`, run the workflow with the tag, approve the environment, approve on npm, GitHub release)
 
 ## 3. Gates
 
