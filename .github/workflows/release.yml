@@ -8,9 +8,9 @@
 #                  tag (semver, unique, newer than the last tag), checks
 #                  that ci.yml passed on HEAD and that there are
 #                  unreleased commits, then creates the annotated tag.
-#                  The `version tags` ruleset blocks people from creating
-#                  v* tags; only this workflow (GitHub Actions bypass)
-#                  can.
+#                  The `release-tag-protection` ruleset (as in gaze)
+#                  makes v* tags immutable once created: no deletion,
+#                  no moves.
 #   3. stage     — in the `npm` environment (required reviewers), builds
 #                  the tagged commit, reruns the CI gates, and runs
 #                  `npm stage publish` through npm trusted publishing

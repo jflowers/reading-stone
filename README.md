@@ -264,8 +264,9 @@ When input is malformed, Reading Stone emits a one-line diagnostic to
 ## Releasing
 
 Releases are tagged and staged by CI and published by a maintainer.
-Nobody pushes `v*` tags by hand (a ruleset blocks it), and nothing reaches
-npm without a human 2FA approval.
+Release tags are created by the `release` workflow and can't be deleted
+or moved afterward (the `release-tag-protection` ruleset). Nothing
+reaches npm without a human 2FA approval.
 
 1. On `main`, bump the version (`package.json`, `package-lock.json`,
    `VERSION` in `src/index.ts`) and date its `CHANGELOG.md` entry, then
