@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Releases take their version from the tag given to the `release`
+  workflow. `package.json` on `main` holds the placeholder
+  `0.0.0-development`, and `VERSION` is read from the package's
+  `package.json` instead of a hard-coded literal.
+
 ## [0.2.0] - 2026-11-23
 
 First npm release. Implements the complete

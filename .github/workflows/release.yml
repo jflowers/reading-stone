@@ -3,7 +3,7 @@
 # One-click release, run by a maintainer from main with the version tag
 # (e.g. v0.3.0), following unbound-force/unbound-force's release.yml:
 #
-#   1. verify    — the run is on main and the tag matches package.json.
+#   1. verify    — the run is on main.
 #   2. preflight — complytime/org-infra's shared preflight validates the
 #                  tag (semver, unique, newer than the last tag), checks
 #                  that ci.yml passed on HEAD and that there are
@@ -11,8 +11,10 @@
 #                  The `release-tag-protection` ruleset (as in gaze)
 #                  makes v* tags immutable once created: no deletion,
 #                  no moves.
-#   3. stage     — in the `npm` environment (required reviewers), builds
-#                  the tagged commit, reruns the CI gates, and runs
+#   3. stage     — in the `npm` environment (required reviewers), checks
+#                  out the tag, reruns the CI gates, sets the package
+#                  version from the tag (not committed; main holds
+#                  0.0.0-development), and runs
 #                  `npm stage publish` through npm trusted publishing
 #                  (OIDC; no tokens). The version goes public when a
 #                  maintainer approves it on npmjs.com with 2FA.
@@ -26,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag matching package.json (e.g., v0.3.0)"
+        description: "Release tag; the package version is taken from it (e.g., v0.3.0)"
         required: true
         type: string
 
@@ -41,8 +43,7 @@ jobs:
     name: Verify
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
+    permissions: {}
     steps:
       - name: Require main
         env:
@@ -50,18 +51,6 @@ jobs:
         run: |
           if [ "$REF" != "refs/heads/main" ]; then
             echo "::error::Run the release from main (this run is on $REF)"
-            exit 1
-          fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check the tag matches package.json
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          version="$(node -p 'require("./package.json").version')"
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error::Tag $TAG does not match package.json version $version"
             exit 1
           fi
 
@@ -103,10 +92,18 @@ jobs:
       - run: npx biome check src/ tests/
       - run: npm run build
       - run: npx vitest run --coverage
+      # After the gates, which test the tag as committed (package.json
+      # holds the placeholder). VERSION is read from package.json at
+      # load time, so nothing built needs to change.
+      - name: Set the package version from the tag
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: npm version "${TAG#v}" --no-git-tag-version
       - name: Stage for maintainer approval
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
         run: |
-          version="$(node -p 'require("./package.json").version')"
-          case "$version" in
+          case "$TAG" in
             *-*) npm stage publish --provenance --tag next ;;
             *) npm stage publish --provenance ;;
           esac

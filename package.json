@@ -1,6 +1,6 @@
 {
   "name": "reading-stone",
-  "version": "0.2.0",
+  "version": "0.0.0-development",
   "description": "TypeScript side-effect analyzer backend for Gaze",
   "keywords": [
     "gaze",

@@ -32,7 +32,20 @@
  * compile-time types stays explicit.
  */
 
-export const VERSION = "0.2.0";
+import { readFileSync } from "node:fs";
+
+/**
+ * The package version, read from the package's own `package.json`
+ * (`../package.json` resolves to the package root from both `src/` and
+ * `dist/`). `main` carries the placeholder `0.0.0-development`; the
+ * release workflow writes the tag's version before building, so the
+ * published value is the released version.
+ */
+const manifest = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
+
+export const VERSION: string = manifest.version;
 
 export type {
   PatternSet,

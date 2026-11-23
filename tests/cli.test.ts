@@ -82,8 +82,11 @@ describe("main", () => {
 });
 
 describe("package metadata", () => {
-  it("exposes VERSION 0.2.0", () => {
-    expect(VERSION).toBe("0.2.0");
+  it("exposes VERSION from package.json", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    expect(VERSION).toBe(pkg.version);
   });
 
   it("declares the expected package.json fields", () => {
@@ -91,7 +94,7 @@ describe("package metadata", () => {
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
     ) as Record<string, unknown>;
     expect(pkg.name).toBe("reading-stone");
-    expect(pkg.version).toBe("0.2.0");
+    expect(pkg.version).toBe("0.0.0-development");
     expect(pkg.license).toBe("Apache-2.0");
     expect(pkg.type).toBe("module");
     expect(pkg.bin).toEqual({

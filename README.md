@@ -5,7 +5,7 @@
 Reading Stone is a Gaze-spawned subprocess. It speaks JSON-RPC 2.0 over stdin/stdout
 (protocol v1.2.0). Gaze owns the CLI, scoring, and reports.
 
-## Current status (v0.2.0)
+## Current status
 
 | Method | Status |
 |--------|--------|
@@ -268,23 +268,24 @@ Release tags are created by the `release` workflow and can't be deleted
 or moved afterward (the `release-tag-protection` ruleset). Nothing
 reaches npm without a human 2FA approval.
 
-1. On `main`, bump the version (`package.json`, `package-lock.json`,
-   `VERSION` in `src/index.ts`) and date its `CHANGELOG.md` entry, then
-   merge and let `ci` pass.
-2. Run the `release` workflow from `main` (Actions → release → Run
-   workflow, or `gh workflow run release.yml -f tag=vX.Y.Z`) with the
-   tag matching `package.json`. It verifies the tag, runs the shared
+The version comes from the tag alone. `package.json` on `main` holds
+the placeholder `0.0.0-development`; nothing is bumped by hand.
+
+1. Run the `release` workflow from `main` with the new tag (Actions →
+   release → Run workflow, or
+   `gh workflow run release.yml -f tag=vX.Y.Z`). It runs the shared
    release preflight (semver, uniqueness, ordering, CI status,
-   unreleased commits), and creates the annotated tag.
-3. Approve the `npm` environment deployment on the run. The stage job
-   builds the tagged commit, reruns the CI gates, and runs
+   unreleased commits) and creates the annotated tag.
+2. Approve the `npm` environment deployment on the run. The stage job
+   checks out the tag, reruns the CI gates, sets the package version
+   to `X.Y.Z` (not committed), and runs
    `npm stage publish --provenance` through npm trusted publishing
    (OIDC, no tokens). Prerelease versions stage under the `next`
    dist-tag.
-4. Approve the staged version on npmjs.com (Staged Packages) or with
+3. Approve the staged version on npmjs.com (Staged Packages) or with
    `npm stage approve <stage-id>`. Both require 2FA. The version goes
    public at this step.
-5. Create the GitHub release for the tag
+4. Create the GitHub release for the tag
    (`gh release create vX.Y.Z --verify-tag --generate-notes`).
 
 ## License
