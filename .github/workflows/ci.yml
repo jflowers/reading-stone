@@ -1,5 +1,6 @@
 # This workflow runs lint, type checking, and tests with coverage on
-# every push and pull request to main.
+# every push and pull request to main, then runs Gaze on reading-stone's
+# own src/ with the analyzer built from the same commit (report-only).
 name: ci
 
 on:
@@ -34,3 +35,71 @@ jobs:
       - run: npx biome check src/ tests/
       - run: npm run build
       - run: npx vitest run --coverage
+      # The gaze job reads this run's coverage instead of re-running tests.
+      - name: Upload coverage for the gaze job
+        if: matrix.node-version == '24'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage/coverage-final.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Gaze self-report (openspec ci-gaze-report). Gaze's reusable AI-report
+  # workflow is Go-only (unbound-force/gaze#375), so this job runs gaze
+  # directly. Report-only: no thresholds, no AI adapter, no secrets.
+  gaze:
+    name: gaze report
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GAZE_VERSION: v2.5.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Download coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage
+          path: coverage
+      # Without this file the report silently shows 0% line coverage.
+      - name: Check coverage is present
+        run: test -s coverage/coverage-final.json || { echo "::error::coverage/coverage-final.json is missing or empty"; exit 1; }
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: Install gaze
+        run: |
+          go install "github.com/unbound-force/gaze/v2/cmd/gaze@${GAZE_VERSION}"
+          gaze --version
+      # The analyzer under test is this commit's build. tsc keeps the
+      # shebang but not the exec bit.
+      - name: Put the built analyzer on PATH
+        run: |
+          chmod +x dist/main.js
+          mkdir -p "$RUNNER_TEMP/analyzer-bin"
+          ln -s "$GITHUB_WORKSPACE/dist/main.js" "$RUNNER_TEMP/analyzer-bin/gaze-analyzer-typescript"
+          echo "$RUNNER_TEMP/analyzer-bin" >> "$GITHUB_PATH"
+      # ./src/... keeps scaffolded .opencode/ code out of the scores;
+      # --analyzer is needed until unbound-force/gaze#282 lands.
+      - name: Gaze report
+        run: |
+          gaze report ./src/... --analyzer gaze-analyzer-typescript --format=markdown > gaze-report.md
+          cat gaze-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gaze-report
+          path: gaze-report.md
+          retention-days: 30
