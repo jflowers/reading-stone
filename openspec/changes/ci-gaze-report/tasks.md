@@ -12,4 +12,4 @@
 ## 2. Gates
 
 - [x] 2.1 `actionlint` passes on `ci.yml`; CI parity gates pass (`npm ci`, `npx biome check src/ tests/`, `npm run build`, `npx vitest run --coverage`)
-- [ ] 2.2 The `gaze` job passes on the PR and its summary shows the report with non-zero line coverage
+- [x] 2.2 The `gaze` job passes on the PR and its summary shows the report with non-zero line coverage
