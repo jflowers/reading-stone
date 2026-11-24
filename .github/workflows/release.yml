@@ -4,22 +4,30 @@
 # (e.g. v0.3.0). The pipeline is jflowers/ship's shared npm-release.yml,
 # the same one the other npm packages use:
 #
-#   1. settings  — the run is on main, before anything is tagged.
-#   2. preflight — complytime/org-infra's shared preflight validates the
-#                  tag (semver, unique, newer than the last tag), checks
-#                  that ci.yml passed on HEAD and that there are
-#                  unreleased commits, then creates the annotated tag.
-#                  The `release-tag-protection` ruleset (as in gaze)
-#                  makes v* tags immutable once created: no deletion,
-#                  no moves.
-#   3. stage     — in the `npm` environment (required reviewers), checks
-#                  out the tag, reruns the CI gates below, sets the
-#                  package version from the tag (not committed; main
-#                  holds 0.0.0-development), and runs
-#                  `npm stage publish --provenance` through npm trusted
-#                  publishing (OIDC; no tokens). Prereleases stage under
-#                  the `next` dist-tag. The version goes public when a
-#                  maintainer approves it on npmjs.com with 2FA.
+#   1. settings       — the run is on main, before anything is tagged.
+#   2. preflight      — complytime/org-infra's shared preflight validates
+#                       the tag (semver, unique, newer than the last tag),
+#                       checks that ci.yml passed on HEAD and that there
+#                       are unreleased commits, then creates the annotated
+#                       tag. The `release-tag-protection` ruleset (as in
+#                       gaze) makes v* tags immutable once created: no
+#                       deletion, no moves.
+#   3. stage          — in the `npm` environment (main only), checks out
+#                       the tag, reruns the CI gates below, sets the
+#                       package version from the tag (not committed; main
+#                       holds 0.0.0-development), and runs
+#                       `npm stage publish --provenance` through npm
+#                       trusted publishing (OIDC; no tokens). Skipped if
+#                       the version is already on npm, so re-runs are safe.
+#                       Prereleases stage under the `next` dist-tag. The
+#                       version goes public only when a maintainer approves
+#                       it on npmjs.com with 2FA — the one human approval
+#                       in a release.
+#   4. github-release — creates the GitHub release for the tag with
+#                       generated notes (a prerelease for -suffix tags),
+#                       skipped if it exists. If the staged version is
+#                       later rejected, delete the release by hand; the
+#                       tag stays.
 #
 # npm checks the calling workflow, so the trust relationship pins this
 # file's name (release.yml) and the `npm` environment, not ship's
@@ -44,13 +52,15 @@ permissions: {}
 jobs:
   release:
     name: Release
-    uses: jflowers/ship/.github/workflows/npm-release.yml@bf09d24bd206ce8f9f1f44ea1479afa5ca11532d # v0.3.0
+    uses: jflowers/ship/.github/workflows/npm-release.yml@79b475c2892604eaa941f43322b8948626e43ab8 # v0.4.0
     with:
       tag: ${{ inputs.tag }}
       # Job names from ci.yml's node-version matrix.
       ci_checks: '["test (22)", "test (24)"]'
       version_from: tag
-      stage: true
+      # Always staged, never `npm publish` (ship's default for a package in
+      # an organization, stated here because the release spec requires it).
+      stage: "true"
       environment: npm
       node_version: "24"
       install: npm ci
