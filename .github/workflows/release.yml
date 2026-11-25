@@ -52,7 +52,7 @@ permissions: {}
 jobs:
   release:
     name: Release
-    uses: jflowers/ship/.github/workflows/npm-release.yml@bcd5ebc6d1f5ebe209f6701741acea9b6e8bb008 # v0.5.0
+    uses: jflowers/ship/.github/workflows/npm-release.yml@45412e4cca927cbc422e3c4da9d1b12cb0c7329d # v0.6.0
     with:
       tag: ${{ inputs.tag }}
       # Job names from ci.yml's node-version matrix.
